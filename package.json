@@ -7,7 +7,10 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
-    "typecheck": "turbo typecheck"
+    "typecheck": "turbo typecheck",
+    "db:generate": "node ./packages/database/node_modules/prisma/build/index.js generate --schema ./packages/database/prisma/schema.prisma",
+    "db:migrate": "node ./packages/database/node_modules/prisma/build/index.js migrate dev --schema ./packages/database/prisma/schema.prisma",
+    "db:studio": "node ./packages/database/node_modules/prisma/build/index.js studio --schema ./packages/database/prisma/schema.prisma"
   },
   "devDependencies": {
     "turbo": "^2.4.2"
