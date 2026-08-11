@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../database/prisma.service";
 import { CreateBusinessDto } from "./dto/create-business.dto";
 
@@ -11,11 +11,9 @@ export class BusinessService {
   }
 
   async create(input: CreateBusinessDto) {
-    const name = input.name?.trim();
-    if (!name) throw new BadRequestException("Business name is required.");
     return this.prisma.business.create({
       data: {
-        name,
+        name: input.name.trim(),
         industry: input.industry?.trim() || null,
         website: input.website?.trim() || null,
         timezone: input.timezone?.trim() || "Asia/Kolkata"

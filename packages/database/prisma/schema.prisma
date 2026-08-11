@@ -42,6 +42,21 @@ enum OrderStatus {
   REFUNDED
 }
 
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ActivityEventType {
+  CONVERSATION_CREATED
+  MESSAGE_SENT
+  ORDER_PLACED
+  ORDER_UPDATED
+  CUSTOMER_TAGGED
+  LEAD_SCORED
+}
+
 model Business {
   id            String         @id @default(cuid())
   name          String
@@ -64,7 +79,7 @@ model User {
   businessId String
   email      String   @unique
   name       String?
-  role       String   @default("OWNER")
+  role       UserRole @default(OWNER)
   createdAt  DateTime @default(now())
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 }
@@ -85,9 +100,10 @@ model Customer {
   conversations Conversation[]
   leadScore     LeadScore?
   orders        Order[]
+  activity      ActivityEvent[]
 
   @@index([businessId, updatedAt])
-  @@index([businessId, email])
+  @@unique([businessId, email])
   @@index([businessId, phone])
 }
 
@@ -135,7 +151,8 @@ model Message {
   direction         MessageDirection
   content           String
   providerMessageId String?          @unique
-  metadata          Json?
+  metadata          Json?            // { source, responseId, state, model } for AI drafts
+  // sentAt: when the message was sent (caller-supplied for historical imports); createdAt: DB insert time
   sentAt            DateTime         @default(now())
   createdAt         DateTime         @default(now())
   conversation      Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -188,14 +205,15 @@ model Order {
 }
 
 model ActivityEvent {
-  id          String   @id @default(cuid())
+  id          String            @id @default(cuid())
   businessId  String
   customerId  String?
-  type        String
+  type        ActivityEventType
   summary     String
   metadata    Json?
-  createdAt   DateTime @default(now())
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdAt   DateTime          @default(now())
+  business    Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer    Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@index([businessId, createdAt])
 }

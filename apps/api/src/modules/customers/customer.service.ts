@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import { Channel, CustomerType, Prisma } from "@prisma/client";
+import { CustomerType, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { CreateIdentityDto } from "./dto/create-identity.dto";
@@ -68,14 +68,12 @@ export class CustomerService {
   async addIdentity(customerId: string, input: CreateIdentityDto) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw new NotFoundException("Customer not found.");
-    if (!Object.values(Channel).includes(input.channel) || !input.identifier?.trim()) {
-      throw new BadRequestException("A supported channel and identifier are required.");
-    }
     try {
       return await this.prisma.identity.create({
         data: { customerId, businessId: customer.businessId, channel: input.channel, identifier: input.identifier.trim(), displayName: input.displayName?.trim() || null, isPrimary: Boolean(input.isPrimary) }
       });
     } catch (error) {
+      // P2002 = unique violation on (businessId, channel, identifier)
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") throw new ConflictException("This channel identity already belongs to a customer.");
       throw error;
     }
