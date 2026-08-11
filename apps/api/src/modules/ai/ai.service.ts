@@ -6,12 +6,18 @@ import { PrismaService } from "../../database/prisma.service";
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
-  private readonly client: OpenAI;
+  // client is initialised lazily so the API starts without OPENAI_API_KEY configured
+  private client: OpenAI | null = null;
 
   constructor(private readonly prisma: PrismaService) {
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY is not configured on the API server.");
-    this.client = new OpenAI({ apiKey });
+    if (apiKey) this.client = new OpenAI({ apiKey });
+    else this.logger.warn("OPENAI_API_KEY is not set — AI draft endpoint will be unavailable.");
+  }
+
+  private getClient(): OpenAI {
+    if (!this.client) throw new ServiceUnavailableException("OPENAI_API_KEY is not configured on the API server.");
+    return this.client;
   }
 
   async createReplyDraft(conversationId: string) {
@@ -46,7 +52,7 @@ ${transcript || "No previous messages. Draft a concise greeting and ask how you 
 
     const { content, responseId, responseModel } = await (async () => {
       try {
-        const response = await this.client.responses.create({
+        const response = await this.getClient().responses.create({
           model: process.env.OPENAI_MODEL ?? "gpt-4o",
           instructions,
           input,
