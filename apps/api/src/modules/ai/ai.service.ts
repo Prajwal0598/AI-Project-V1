@@ -45,7 +45,7 @@ ${transcript || "No previous messages. Draft a concise greeting and ask how you 
 
     try {
       const response = await this.client.responses.create({
-        model: process.env.OPENAI_MODEL ?? "gpt-5",
+        model: process.env.OPENAI_MODEL ?? "gpt-4o",
         instructions,
         input,
         store: false

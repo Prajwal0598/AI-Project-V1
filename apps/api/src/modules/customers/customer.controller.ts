@@ -1,5 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
-import { CreateCustomerInput, CreateIdentityInput, CustomerService } from "./customer.service";
+import { CustomerService } from "./customer.service";
+import { CreateCustomerDto } from "./dto/create-customer.dto";
+import { CreateIdentityDto } from "./dto/create-identity.dto";
 
 @Controller()
 export class CustomerController {
@@ -11,7 +13,7 @@ export class CustomerController {
   }
 
   @Post("businesses/:businessId/customers")
-  create(@Param("businessId") businessId: string, @Body() input: CreateCustomerInput) {
+  create(@Param("businessId") businessId: string, @Body() input: CreateCustomerDto) {
     return this.customers.create(businessId, input);
   }
 
@@ -21,7 +23,7 @@ export class CustomerController {
   }
 
   @Post("customers/:customerId/identities")
-  addIdentity(@Param("customerId") customerId: string, @Body() input: CreateIdentityInput) {
+  addIdentity(@Param("customerId") customerId: string, @Body() input: CreateIdentityDto) {
     return this.customers.addIdentity(customerId, input);
   }
 }

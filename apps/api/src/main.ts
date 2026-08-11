@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { NestFactory } from "@nestjs/core";
+import { ValidationPipe } from "@nestjs/common";
 import { config } from "dotenv";
 import { AppModule } from "./app.module";
 
@@ -15,6 +16,7 @@ async function bootstrap() {
     origin: process.env.WEB_ORIGIN?.split(",") ?? "http://localhost:3000",
     credentials: true
   });
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   await app.listen(Number(process.env.PORT ?? 4000));
 }
 

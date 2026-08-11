@@ -1,25 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { Channel, ConversationStatus, MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
-
-export interface CreateConversationInput {
-  channel: Channel;
-  identityId?: string;
-  title?: string;
-}
-
-export interface CreateMessageInput {
-  direction: MessageDirection;
-  content: string;
-  providerMessageId?: string;
-  sentAt?: string;
-}
+import { CreateConversationDto } from "./dto/create-conversation.dto";
+import { CreateMessageDto } from "./dto/create-message.dto";
 
 @Injectable()
 export class ConversationService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(customerId: string, input: CreateConversationInput) {
+  async create(customerId: string, input: CreateConversationDto) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw new NotFoundException("Customer not found.");
     if (!Object.values(Channel).includes(input.channel)) throw new BadRequestException("A supported channel is required.");
@@ -38,7 +27,7 @@ export class ConversationService {
     return conversation;
   }
 
-  async addMessage(conversationId: string, input: CreateMessageInput) {
+  async addMessage(conversationId: string, input: CreateMessageDto) {
     if (!Object.values(MessageDirection).includes(input.direction) || !input.content?.trim()) {
       throw new BadRequestException("A valid direction and message content are required.");
     }
