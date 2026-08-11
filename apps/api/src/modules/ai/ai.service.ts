@@ -1,16 +1,17 @@
-import { Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import OpenAI from "openai";
 import { MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 
 @Injectable()
 export class AiService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(AiService.name);
+  private readonly client: OpenAI;
 
-  private get client() {
+  constructor(private readonly prisma: PrismaService) {
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new ServiceUnavailableException("OPENAI_API_KEY is not configured on the API server.");
-    return new OpenAI({ apiKey });
+    if (!apiKey) throw new Error("OPENAI_API_KEY is not configured on the API server.");
+    this.client = new OpenAI({ apiKey });
   }
 
   async createReplyDraft(conversationId: string) {
@@ -18,13 +19,13 @@ export class AiService {
       where: { id: conversationId },
       include: {
         customer: true,
-        business: { include: { products: { where: { active: true }, take: 30, orderBy: { updatedAt: "desc" } } } },
-        messages: { orderBy: { sentAt: "desc" }, take: 20 }
+        business: { include: { products: { where: { active: true }, take: 30, orderBy: { updatedAt: "desc" } } } }, // cap keeps AI prompt within safe token limits
+        messages: { orderBy: { sentAt: "asc" }, take: 20 }
       }
     });
     if (!conversation) throw new NotFoundException("Conversation not found.");
 
-    const transcript = [...conversation.messages].reverse().map((message) => {
+    const transcript = conversation.messages.map((message) => {
       const speaker = message.direction === MessageDirection.INBOUND ? "Customer" : "Business";
       return `${speaker}: ${message.content}`;
     }).join("\n");
@@ -43,32 +44,36 @@ ${catalog}
 Conversation:
 ${transcript || "No previous messages. Draft a concise greeting and ask how you can help."}`;
 
-    try {
-      const response = await this.client.responses.create({
-        model: process.env.OPENAI_MODEL ?? "gpt-5",
-        instructions,
-        input,
-        store: false
-      });
-      const content = response.output_text.trim();
-      if (!content) throw new ServiceUnavailableException("The AI service returned an empty reply.");
-
-      const message = await this.prisma.$transaction(async (tx) => {
-        const draft = await tx.message.create({
-          data: {
-            conversationId,
-            direction: MessageDirection.OUTBOUND,
-            content,
-            metadata: { source: "openai", responseId: response.id, state: "DRAFT", model: response.model }
-          }
+    const { content, responseId, responseModel } = await (async () => {
+      try {
+        const response = await this.client.responses.create({
+          model: process.env.OPENAI_MODEL ?? "gpt-4o",
+          instructions,
+          input,
+          store: false // prevents OpenAI from retaining conversation data on their infrastructure
         });
-        await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: draft.sentAt } });
-        return draft;
+        const raw = response.output_text?.trim();
+        if (!raw) throw new ServiceUnavailableException("The AI service returned an empty reply.");
+        return { content: raw, responseId: response.id, responseModel: response.model };
+      } catch (error) {
+        if (error instanceof ServiceUnavailableException) throw error;
+        this.logger.error("OpenAI request failed", error instanceof Error ? error.stack : String(error));
+        throw new ServiceUnavailableException("The AI service could not create a reply draft. Check the server key, model access, and billing configuration.");
+      }
+    })();
+
+    const message = await this.prisma.$transaction(async (tx) => {
+      const draft = await tx.message.create({
+        data: {
+          conversationId,
+          direction: MessageDirection.OUTBOUND,
+          content,
+          metadata: { source: "openai", responseId, state: "DRAFT", model: responseModel }
+        }
       });
-      return { draft: message, sent: false };
-    } catch (error) {
-      if (error instanceof ServiceUnavailableException) throw error;
-      throw new ServiceUnavailableException("The AI service could not create a reply draft. Check the server key, model access, and billing configuration.");
-    }
+      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: draft.sentAt } });
+      return draft;
+    });
+    return { draft: message, sent: false };
   }
 }

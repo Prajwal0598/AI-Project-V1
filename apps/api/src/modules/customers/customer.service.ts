@@ -1,22 +1,8 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import { Channel, CustomerType, Prisma } from "@prisma/client";
+import { CustomerType, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
-
-export interface CreateCustomerInput {
-  firstName?: string;
-  lastName?: string;
-  email?: string;
-  phone?: string;
-  type?: CustomerType;
-  tags?: string[];
-}
-
-export interface CreateIdentityInput {
-  channel: Channel;
-  identifier: string;
-  displayName?: string;
-  isPrimary?: boolean;
-}
+import { CreateCustomerDto } from "./dto/create-customer.dto";
+import { CreateIdentityDto } from "./dto/create-identity.dto";
 
 @Injectable()
 export class CustomerService {
@@ -47,7 +33,7 @@ export class CustomerService {
     });
   }
 
-  async create(businessId: string, input: CreateCustomerInput) {
+  async create(businessId: string, input: CreateCustomerDto) {
     await this.assertBusiness(businessId);
     if (!input.firstName?.trim() && !input.email?.trim() && !input.phone?.trim()) {
       throw new BadRequestException("Provide at least a name, email, or phone number.");
@@ -79,17 +65,15 @@ export class CustomerService {
     return customer;
   }
 
-  async addIdentity(customerId: string, input: CreateIdentityInput) {
+  async addIdentity(customerId: string, input: CreateIdentityDto) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw new NotFoundException("Customer not found.");
-    if (!Object.values(Channel).includes(input.channel) || !input.identifier?.trim()) {
-      throw new BadRequestException("A supported channel and identifier are required.");
-    }
     try {
       return await this.prisma.identity.create({
         data: { customerId, businessId: customer.businessId, channel: input.channel, identifier: input.identifier.trim(), displayName: input.displayName?.trim() || null, isPrimary: Boolean(input.isPrimary) }
       });
     } catch (error) {
+      // P2002 = unique violation on (businessId, channel, identifier)
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") throw new ConflictException("This channel identity already belongs to a customer.");
       throw error;
     }
