@@ -1,7 +1,10 @@
 import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import type { User } from "@prisma/client";
+import { GetUser } from "../../common/get-user.decorator";
 import { ConversationService } from "./conversation.service";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateMessageDto } from "./dto/create-message.dto";
+import { SendMessageDto } from "./dto/send-message.dto";
 
 @Controller()
 export class ConversationController {
@@ -20,5 +23,10 @@ export class ConversationController {
   @Post("conversations/:conversationId/messages")
   addMessage(@Param("conversationId") conversationId: string, @Body() input: CreateMessageDto) {
     return this.conversations.addMessage(conversationId, input);
+  }
+
+  @Post("conversations/:conversationId/send")
+  sendMessage(@Param("conversationId") conversationId: string, @GetUser() user: User, @Body() input: SendMessageDto) {
+    return this.conversations.sendMessage(conversationId, user.businessId, input.content);
   }
 }

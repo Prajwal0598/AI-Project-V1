@@ -58,13 +58,14 @@ enum ActivityEventType {
 }
 
 model Business {
-  id            String         @id @default(cuid())
-  name          String
-  industry      String?
-  website       String?
-  timezone      String         @default("Asia/Kolkata")
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  id                    String         @id @default(cuid())
+  name                  String
+  industry              String?
+  website               String?
+  timezone              String         @default("Asia/Kolkata")
+  whatsappPhoneNumberId String?        @unique
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
   users         User[]
   customers     Customer[]
   identities    Identity[]
@@ -75,13 +76,14 @@ model Business {
 }
 
 model User {
-  id         String   @id @default(cuid())
-  businessId String
-  email      String   @unique
-  name       String?
-  role       UserRole @default(OWNER)
-  createdAt  DateTime @default(now())
-  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  id           String   @id @default(cuid())
+  businessId   String
+  email        String   @unique
+  name         String?
+  passwordHash String?
+  role         UserRole @default(OWNER)
+  createdAt    DateTime @default(now())
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 }
 
 model Customer {
