@@ -8,6 +8,18 @@ import { CreateMessageDto } from "./dto/create-message.dto";
 export class ConversationService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async list(businessId: string) {
+    return this.prisma.conversation.findMany({
+      where: { businessId },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        identity: { select: { identifier: true, displayName: true } },
+        messages: { orderBy: { sentAt: "desc" }, take: 1 },
+      },
+      orderBy: { lastMessageAt: "desc" },
+    });
+  }
+
   async create(customerId: string, input: CreateConversationDto) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw new NotFoundException("Customer not found.");

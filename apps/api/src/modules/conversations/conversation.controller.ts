@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, Param, Post } from "@nestjs/common";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { ConversationService } from "./conversation.service";
@@ -9,6 +9,12 @@ import { SendMessageDto } from "./dto/send-message.dto";
 @Controller()
 export class ConversationController {
   constructor(private readonly conversations: ConversationService) {}
+
+  @Get("businesses/:businessId/conversations")
+  list(@Param("businessId") businessId: string, @GetUser() user: User) {
+    if (user.businessId !== businessId) throw new ForbiddenException();
+    return this.conversations.list(businessId);
+  }
 
   @Post("customers/:customerId/conversations")
   create(@Param("customerId") customerId: string, @Body() input: CreateConversationDto) {

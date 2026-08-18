@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, type ReactNode } from "react";
+import { getToken } from "../lib/api";
 
 const items = [
   ["Overview", "/", "O"],
@@ -16,6 +17,8 @@ const items = [
 
 export function AppShell({ title, subtitle, action, children }: { title: string; subtitle: string; action?: ReactNode; children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  useEffect(() => { if (!getToken()) router.replace("/login"); }, [router]);
   return <main className="app-shell">
     <aside className="app-sidebar">
       <Link className="app-brand" href="/"><span>r</span>relay</Link>

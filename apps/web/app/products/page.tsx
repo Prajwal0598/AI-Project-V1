@@ -1,5 +1,58 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "../../components/app-shell";
-const initial = [{ name: "Growth plan", price: "9,999", stock: "Unlimited", status: "Active" }, { name: "Starter plan", price: "2,999", stock: "Unlimited", status: "Active" }, { name: "Onboarding session", price: "4,500", stock: "12 slots", status: "Active" }];
-export default function ProductsPage() { const [products, setProducts] = useState(initial); const [show, setShow] = useState(false); const [name, setName] = useState(""); const [price, setPrice] = useState(""); function add() { if (!name || !price) return; setProducts([{ name, price, stock: "Unlimited", status: "Active" }, ...products]); setName(""); setPrice(""); setShow(false); } return <AppShell title="Products" subtitle="Give your AI agent accurate products, pricing, and availability." action={<button className="primary-button" onClick={() => setShow(true)}>+ Add product</button>}>{show && <div className="inline-form"><input placeholder="Product name" value={name} onChange={(event) => setName(event.target.value)} /><input placeholder="Price in INR" value={price} onChange={(event) => setPrice(event.target.value)} /><button className="primary-button" onClick={add}>Save product</button><button onClick={() => setShow(false)}>Cancel</button></div>}<div className="product-grid">{products.map((product) => <article className="product-card" key={product.name}><div className="product-icon">P</div><span className="stage-chip">{product.status}</span><h2>{product.name}</h2><strong>INR {product.price}</strong><p>{product.stock}</p><button>Edit product</button></article>)}</div></AppShell>; }
+import { api, getBusinessId } from "../../lib/api";
+import type { Product } from "../../lib/api";
+
+export default function ProductsPage() {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    api.products.list(bizId)
+      .then(setProducts)
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function add() {
+    const bizId = getBusinessId();
+    if (!name || !price || !bizId) return;
+    setSaving(true);
+    try {
+      const product = await api.products.create(bizId, { name: name.trim(), price: parseFloat(price) });
+      setProducts(prev => [product, ...prev]);
+      setName(""); setPrice(""); setShow(false);
+    } catch (err) { console.error(err); }
+    finally { setSaving(false); }
+  }
+
+  return <AppShell title="Products" subtitle="Give your AI agent accurate products, pricing, and availability." action={<button className="primary-button" onClick={() => setShow(true)}>+ Add product</button>}>
+    {show && <div className="inline-form">
+      <input placeholder="Product name" value={name} onChange={e => setName(e.target.value)} />
+      <input placeholder="Price in INR" value={price} onChange={e => setPrice(e.target.value)} />
+      <button className="primary-button" onClick={add} disabled={saving}>{saving ? "Saving…" : "Save product"}</button>
+      <button onClick={() => setShow(false)}>Cancel</button>
+    </div>}
+    <div className="product-grid">
+      {loading && <p style={{ color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
+      {!loading && products.length === 0 && <p style={{ color: "var(--muted)", fontSize: 12 }}>No products yet. Add your first one.</p>}
+      {products.map(p => (
+        <article className="product-card" key={p.id}>
+          <div className="product-icon">P</div>
+          <span className="stage-chip">{p.active ? "Active" : "Inactive"}</span>
+          <h2>{p.name}</h2>
+          <strong>{p.currency} {p.price}</strong>
+          <p>{p.inventory === null ? "Unlimited" : `${p.inventory} in stock`}</p>
+          <button>Edit product</button>
+        </article>
+      ))}
+    </div>
+  </AppShell>;
+}

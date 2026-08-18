@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 const navItems = [
   ["Overview", "grid"],
@@ -37,14 +38,17 @@ export default function Home() {
   const [workspaceCount, setWorkspaceCount] = useState<number | null>(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
+  const router = useRouter();
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && !localStorage.getItem("relay_token")) router.replace("/login");
+  }, [router]);
 
   useEffect(() => {
     async function connect() {
       try {
-        const [health, businesses] = await Promise.all([fetch(`${apiUrl}/health`), fetch(`${apiUrl}/businesses`)]);
-        if (!health.ok || !businesses.ok) throw new Error("API unavailable");
-        const items = await businesses.json() as unknown[];
-        setWorkspaceCount(items.length);
+        const health = await fetch(`${apiUrl}/health`);
+        if (!health.ok) throw new Error("API unavailable");
         setApiState("online");
       } catch {
         setApiState("offline");
@@ -96,7 +100,7 @@ export default function Home() {
             <div><p className="eyebrow">Monday, 10 August</p><h1>Good morning, Prajwal <span>✦</span></h1><p className="subheading">Here’s how your AI sales team is performing.</p></div>
             {workspaceCount === 0 ? <button className="primary-button" onClick={createWorkspace} disabled={creatingWorkspace}><span>＋</span> {creatingWorkspace ? "Creating..." : "Create workspace"}</button> : <button className="primary-button"><span>＋</span> Create automation</button>}
           </div>
-          <p className={`api-status ${apiState}`}><i /> {apiState === "checking" ? "Connecting to your API…" : apiState === "online" ? `API connected${workspaceCount === null ? "" : ` · ${workspaceCount} workspace${workspaceCount === 1 ? "" : "s"}`}` : "API offline — start the backend to enable live data"}</p>
+          <p className={`api-status ${apiState}`}><i /> {apiState === "checking" ? "Connecting to your API…" : apiState === "online" ? "API connected" : "API offline — start the backend to enable live data"}</p>
 
           <div className="metric-grid">
             <article className="metric-card"><div className="metric-header"><span className="metric-icon peach">✦</span><button>•••</button></div><p>New leads</p><h2>248</h2><small className="positive">↑ 18.4% <span>vs. last week</span></small></article>
