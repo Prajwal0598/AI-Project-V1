@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { api, getBusinessId } from "../lib/api";
+import type { BusinessStats } from "../lib/api";
 
 const navItems = [
   ["Overview", "grid"],
@@ -35,7 +37,7 @@ export default function Home() {
   const [active, setActive] = useState("Overview");
   const [period, setPeriod] = useState("This week");
   const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
-  const [workspaceCount, setWorkspaceCount] = useState<number | null>(null);
+  const [stats, setStats] = useState<BusinessStats | null>(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
   const router = useRouter();
@@ -43,6 +45,12 @@ export default function Home() {
   useEffect(() => {
     if (typeof window !== "undefined" && !localStorage.getItem("relay_token")) router.replace("/login");
   }, [router]);
+
+  useEffect(() => {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    api.businesses.stats(bizId).then(setStats).catch(console.error);
+  }, []);
 
   useEffect(() => {
     async function connect() {
@@ -61,8 +69,6 @@ export default function Home() {
     setCreatingWorkspace(true);
     try {
       const response = await fetch(`${apiUrl}/businesses`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Prajwal Studio" }) });
-      if (!response.ok) throw new Error("Could not create workspace");
-      setWorkspaceCount((count) => (count ?? 0) + 1);
       setApiState("online");
     } catch {
       setApiState("offline");
@@ -98,15 +104,15 @@ export default function Home() {
         <div className="page">
           <div className="heading-row">
             <div><p className="eyebrow">Monday, 10 August</p><h1>Good morning, Prajwal <span>✦</span></h1><p className="subheading">Here’s how your AI sales team is performing.</p></div>
-            {workspaceCount === 0 ? <button className="primary-button" onClick={createWorkspace} disabled={creatingWorkspace}><span>＋</span> {creatingWorkspace ? "Creating..." : "Create workspace"}</button> : <button className="primary-button"><span>＋</span> Create automation</button>}
+            <button className="primary-button"><span>＋</span> Create automation</button>
           </div>
           <p className={`api-status ${apiState}`}><i /> {apiState === "checking" ? "Connecting to your API…" : apiState === "online" ? "API connected" : "API offline — start the backend to enable live data"}</p>
 
           <div className="metric-grid">
-            <article className="metric-card"><div className="metric-header"><span className="metric-icon peach">✦</span><button>•••</button></div><p>New leads</p><h2>248</h2><small className="positive">↑ 18.4% <span>vs. last week</span></small></article>
-            <article className="metric-card"><div className="metric-header"><span className="metric-icon purple">◌</span><button>•••</button></div><p>Conversations</p><h2>1,284</h2><small className="positive">↑ 12.6% <span>vs. last week</span></small></article>
-            <article className="metric-card"><div className="metric-header"><span className="metric-icon blue">↗</span><button>•••</button></div><p>Conversions</p><h2>86 <span className="muted">/ 6.9%</span></h2><small className="positive">↑ 4.2% <span>vs. last week</span></small></article>
-            <article className="metric-card revenue"><div className="metric-header"><span className="metric-icon yellow">₹</span><button>•••</button></div><p>AI-attributed revenue</p><h2>₹4.82L</h2><small className="positive">↑ 22.8% <span>vs. last week</span></small></article>
+            <article className="metric-card"><div className="metric-header"><span className="metric-icon peach">✦</span><button>•••</button></div><p>New leads</p><h2>{stats?.leads ?? "—"}</h2></article>
+            <article className="metric-card"><div className="metric-header"><span className="metric-icon purple">◌</span><button>•••</button></div><p>Conversations</p><h2>{stats?.conversations ?? "—"}</h2></article>
+            <article className="metric-card"><div className="metric-header"><span className="metric-icon blue">↗</span><button>•••</button></div><p>Orders</p><h2>{stats?.orders ?? "—"}</h2></article>
+            <article className="metric-card revenue"><div className="metric-header"><span className="metric-icon yellow">₹</span><button>•••</button></div><p>Revenue (paid orders)</p><h2>{stats ? (Number(stats.revenue) >= 100000 ? `₹${(Number(stats.revenue) / 100000).toFixed(2)}L` : `₹${Number(stats.revenue).toLocaleString("en-IN")}`) : "—"}</h2></article>
           </div>
 
           <div className="dashboard-grid">

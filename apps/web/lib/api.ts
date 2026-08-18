@@ -54,6 +54,38 @@ export interface ConversationDetail extends ConversationSummary {
   messages: Message[];
 }
 
+export interface Business {
+  id: string;
+  name: string;
+  industry: string | null;
+  website: string | null;
+  timezone: string;
+  whatsappPhoneNumberId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BusinessStats {
+  leads: number;
+  customers: number;
+  conversations: number;
+  openConversations: number;
+  orders: number;
+  revenue: string | number;
+}
+
+export interface Order {
+  id: string;
+  customerId: string;
+  status: "DRAFT" | "PENDING_PAYMENT" | "PAID" | "FULFILLED" | "CANCELLED" | "REFUNDED";
+  subtotal: string;
+  shippingFee: string;
+  total: string;
+  currency: string;
+  createdAt: string;
+  customer: { id: string; firstName: string | null; lastName: string | null; email: string | null };
+}
+
 export interface Customer {
   id: string;
   firstName: string | null;
@@ -111,6 +143,13 @@ export const api = {
     register: (email: string, password: string, name: string, businessName: string) =>
       request<{ accessToken: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password, name, businessName }) }),
   },
+  businesses: {
+    list: () => request<Business[]>("/businesses"),
+    get: (id: string) => request<Business>(`/businesses/${id}`),
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId">>) =>
+      request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
+  },
   conversations: {
     list: (businessId: string) =>
       request<ConversationSummary[]>(`/businesses/${businessId}/conversations`),
@@ -130,5 +169,10 @@ export const api = {
       request<Product[]>(`/businesses/${businessId}/products`),
     create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number }) =>
       request<Product>(`/businesses/${businessId}/products`, { method: "POST", body: JSON.stringify(data) }),
+  },
+  orders: {
+    list: (businessId: string) => request<Order[]>(`/businesses/${businessId}/orders`),
+    updateStatus: (orderId: string, status: Order["status"]) =>
+      request<Order>(`/orders/${orderId}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
   },
 };

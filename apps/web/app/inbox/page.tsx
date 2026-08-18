@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId } from "../../lib/api";
 import type { ConversationSummary, ConversationDetail, Message } from "../../lib/api";
@@ -15,6 +15,10 @@ function timeAgo(d: string | null) {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
   return `${Math.floor(diff / 86400000)}d`;
 }
+function fmtTime(d: string) {
+  return new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+const CHANNEL_BADGE: Record<string, string> = { WHATSAPP: "WA", INSTAGRAM: "IG", EMAIL: "✉", WEB: "W", MANUAL: "M" };
 
 export default function InboxPage() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -24,6 +28,18 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [draftLoading, setDraftLoading] = useState(false);
+  const streamRef = useRef<HTMLDivElement>(null);
+
+  // auto-scroll to latest message
+  useEffect(() => {
+    streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
+  }, [selected?.messages.length]);
+
+  function loadList() {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    api.conversations.list(bizId).then(setConversations).catch(console.error);
+  }
 
   useEffect(() => {
     const bizId = getBusinessId();
@@ -47,6 +63,7 @@ export default function InboxPage() {
       const msg = await api.conversations.send(selected.id, input.trim());
       setSelected(prev => prev ? { ...prev, messages: [...prev.messages, msg] } : null);
       setInput("");
+      loadList();
     } catch (err) { console.error(err); }
     finally { setSending(false); }
   }
@@ -86,7 +103,7 @@ export default function InboxPage() {
           <button key={c.id} className={selected?.id === c.id ? "conversation selected" : "conversation"} onClick={() => selectConv(c.id)}>
             <b>{customerName(c.customer).slice(0, 2).toUpperCase()}</b>
             <span>
-              <strong>{customerName(c.customer)}</strong>
+              <strong>{customerName(c.customer)} <span className={`channel ${c.channel === "INSTAGRAM" ? "ig" : ""}`} style={{ fontSize: 8, verticalAlign: "middle" }}>{CHANNEL_BADGE[c.channel] ?? c.channel}</span></strong>
               <small>{c.messages[0]?.content.slice(0, 48) ?? c.channel}</small>
             </span>
             <time>{timeAgo(c.lastMessageAt)}</time>
@@ -104,9 +121,12 @@ export default function InboxPage() {
               </div>
               <button className="filter-button">Customer profile</button>
             </header>
-            <div className="message-stream">
+            <div className="message-stream" ref={streamRef}>
               {visibleMessages.map((m: Message) => (
-                <div key={m.id} className={`bubble ${m.direction === "OUTBOUND" ? "outbound" : "inbound"}`}>{m.content}</div>
+                <div key={m.id} className={`bubble ${m.direction === "OUTBOUND" ? "outbound" : "inbound"}`}>
+                  {m.content}
+                  <time style={{ display: "block", fontSize: 10, opacity: 0.55, marginTop: 4 }}>{fmtTime(m.sentAt)}</time>
+                </div>
               ))}
               {draft && <div className="ai-draft">
                 <span>AI draft</span>

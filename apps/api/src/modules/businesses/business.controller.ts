@@ -19,6 +19,18 @@ export class BusinessController {
     return this.businesses.create(input);
   }
 
+  @Get(":id")
+  getOne(@Param("id") id: string, @GetUser() user: User) {
+    if (user.businessId !== id) throw new ForbiddenException();
+    return this.businesses.get(id);
+  }
+
+  @Get(":id/stats")
+  stats(@Param("id") id: string, @GetUser() user: User) {
+    if (user.businessId !== id) throw new ForbiddenException();
+    return this.businesses.stats(id);
+  }
+
   @Patch(":id")
   update(@Param("id") id: string, @GetUser() user: User, @Body() input: UpdateBusinessDto) {
     if (user.businessId !== id) throw new ForbiddenException();
