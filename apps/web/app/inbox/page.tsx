@@ -48,6 +48,25 @@ export default function InboxPage() {
       .then(setConversations)
       .catch(console.error)
       .finally(() => setLoading(false));
+
+    // poll every 5 s so inbound WhatsApp messages appear without a manual refresh
+    const interval = setInterval(loadList, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selected?.id ?? null;
+
+  // silently refresh the open conversation so inbound replies appear
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const id = selectedIdRef.current;
+      if (!id) return;
+      api.conversations.get(id)
+        .then(detail => setSelected(prev => prev?.id === id ? detail : prev))
+        .catch(console.error);
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   async function selectConv(id: string) {
