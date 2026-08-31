@@ -1,13 +1,18 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Channel, ConversationStatus, MessageDirection } from "@prisma/client";
+import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { QueueService } from "../../queue/queue.service";
+import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { parseWhatsAppWebhook, ParsedWhatsAppMessage } from "./whatsapp-parser";
 
 @Injectable()
 export class WhatsAppWebhookService {
   private readonly logger = new Logger(WhatsAppWebhookService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queues: QueueService,
+  ) {}
 
   async ingest(body: unknown): Promise<void> {
     const messages = parseWhatsAppWebhook(body);
@@ -32,9 +37,13 @@ export class WhatsAppWebhookService {
     let customer = await this.prisma.customer.findFirst({
       where: { businessId: business.id, phone: msg.from },
     });
+    const isNewCustomer = !customer;
     if (!customer) {
       customer = await this.prisma.customer.create({
         data: { businessId: business.id, phone: msg.from, firstName: msg.displayName ?? null },
+      });
+      await this.prisma.activityEvent.create({
+        data: { businessId: business.id, customerId: customer.id, type: ActivityEventType.CUSTOMER_TAGGED, summary: `New WhatsApp contact: ${msg.displayName ?? msg.from}` },
       });
     }
 
@@ -48,10 +57,16 @@ export class WhatsAppWebhookService {
       where: { businessId: business.id, customerId: customer.id, channel: Channel.WHATSAPP, status: ConversationStatus.OPEN },
       orderBy: { createdAt: "desc" },
     });
+    const isNewConversation = !conversation;
     if (!conversation) {
       conversation = await this.prisma.conversation.create({
         data: { businessId: business.id, customerId: customer.id, identityId: identity.id, channel: Channel.WHATSAPP },
       });
+      await this.prisma.activityEvent.create({
+        data: { businessId: business.id, customerId: customer.id, type: ActivityEventType.CONVERSATION_CREATED, summary: `WhatsApp conversation started with ${msg.displayName ?? msg.from}` },
+      });
+      // schedule a follow-up draft if no agent reply within the configured window
+      await this.queues.scheduleFollowUp(conversation.id, business.id, customer.id);
     }
 
     // upsert by providerMessageId deduplicate Meta re-deliveries
@@ -71,5 +86,11 @@ export class WhatsAppWebhookService {
       where: { id: conversation.id },
       data: { lastMessageAt: msg.timestamp, status: ConversationStatus.OPEN },
     });
+
+    await this.prisma.activityEvent.create({
+      data: { businessId: business.id, customerId: customer.id, type: ActivityEventType.MESSAGE_SENT, summary: `${msg.displayName ?? msg.from}: "${msg.text.slice(0, 80)}"` },
+    });
+
+    await recalculateLeadScore(this.prisma, customer.id, business.id);
   }
 }

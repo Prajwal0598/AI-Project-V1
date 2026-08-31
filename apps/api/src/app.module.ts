@@ -11,9 +11,10 @@ import { JwtAuthGuard } from "./modules/auth/jwt-auth.guard";
 import { ProductModule } from "./modules/products/product.module";
 import { OrderModule } from "./modules/orders/order.module";
 import { WebhooksModule } from "./modules/webhooks/webhooks.module";
+import { QueueModule } from "./queue/queue.module";
 
 @Module({
-  imports: [DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, WebhooksModule],
+  imports: [DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, WebhooksModule, QueueModule],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
 })

@@ -1,0 +1,22 @@
+{
+  "name": "@ai-customer-agent/worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "ts-node --transpile-only src/worker.ts",
+    "build": "tsc",
+    "start": "node dist/worker.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.3.1",
+    "bullmq": "^5.81.4",
+    "dotenv": "^16.6.1",
+    "ioredis": "^5.11.1",
+    "openai": "^4.104.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

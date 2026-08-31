@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { BusinessService } from "./business.service";
@@ -29,6 +29,12 @@ export class BusinessController {
   stats(@Param("id") id: string, @GetUser() user: User) {
     if (user.businessId !== id) throw new ForbiddenException();
     return this.businesses.stats(id);
+  }
+
+  @Get(":id/activity")
+  activity(@Param("id") id: string, @GetUser() user: User, @Query("limit") limit?: string) {
+    if (user.businessId !== id) throw new ForbiddenException();
+    return this.businesses.activity(id, limit ? parseInt(limit, 10) : 20);
   }
 
   @Patch(":id")

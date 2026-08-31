@@ -54,6 +54,14 @@ export interface ConversationDetail extends ConversationSummary {
   messages: Message[];
 }
 
+export interface ActivityEvent {
+  id: string;
+  type: "CONVERSATION_CREATED" | "MESSAGE_SENT" | "ORDER_PLACED" | "ORDER_UPDATED" | "CUSTOMER_TAGGED" | "LEAD_SCORED";
+  summary: string;
+  createdAt: string;
+  customer: { id: string; firstName: string | null; lastName: string | null; phone: string | null } | null;
+}
+
 export interface Business {
   id: string;
   name: string;
@@ -149,6 +157,7 @@ export const api = {
     update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId">>) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
+    activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),
   },
   conversations: {
     list: (businessId: string) =>

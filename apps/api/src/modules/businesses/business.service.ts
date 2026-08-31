@@ -58,4 +58,13 @@ export class BusinessService {
       },
     });
   }
+
+  async activity(businessId: string, limit = 20) {
+    return this.prisma.activityEvent.findMany({
+      where: { businessId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true } } },
+    });
+  }
 }

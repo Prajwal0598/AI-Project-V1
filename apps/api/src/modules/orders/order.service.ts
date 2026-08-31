@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { OrderStatus } from "@prisma/client";
+import { ActivityEventType, OrderStatus } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { CreateOrderDto } from "./dto/create-order.dto";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 
@@ -26,7 +27,7 @@ export class OrderService {
     const shippingFee = input.shippingFee ?? 0;
     const total = input.subtotal + shippingFee;
 
-    return this.prisma.order.create({
+    const order = await this.prisma.order.create({
       data: {
         businessId,
         customerId: input.customerId,
@@ -38,6 +39,13 @@ export class OrderService {
         status: OrderStatus.DRAFT,
       },
     });
+
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId: input.customerId, type: ActivityEventType.ORDER_PLACED, summary: `Order placed — ${order.currency} ${order.total}` },
+    });
+    await recalculateLeadScore(this.prisma, input.customerId, businessId);
+
+    return order;
   }
 
   async updateStatus(orderId: string, businessId: string, input: UpdateOrderStatusDto) {
@@ -46,6 +54,12 @@ export class OrderService {
     if (TERMINAL_STATUSES.has(order.status)) {
       throw new BadRequestException(`Order is ${order.status.toLowerCase()} and cannot be updated.`);
     }
-    return this.prisma.order.update({ where: { id: orderId }, data: { status: input.status } });
+    const updated = await this.prisma.order.update({ where: { id: orderId }, data: { status: input.status } });
+
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order status changed to ${input.status.replace("_", " ").toLowerCase()}` },
+    });
+
+    return updated;
   }
 }

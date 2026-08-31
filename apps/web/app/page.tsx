@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, getBusinessId } from "../lib/api";
-import type { BusinessStats } from "../lib/api";
+import type { BusinessStats, ActivityEvent } from "../lib/api";
 
 const navItems = [
   ["Overview", "grid"],
@@ -12,13 +12,6 @@ const navItems = [
   ["Customers", "users"],
   ["Automations", "bolt"],
   ["Analytics", "chart"]
-];
-
-const activity = [
-  { name: "Priya Shah", detail: "Asked about the annual plan", channel: "WA", time: "2 min", color: "peach", status: "Hot lead" },
-  { name: "Rohan Mehta", detail: "Payment link sent by AI", channel: "IG", time: "18 min", color: "lavender", status: "In progress" },
-  { name: "Ananya Iyer", detail: "Booked a product demo", channel: "✉", time: "43 min", color: "mint", status: "Qualified" },
-  { name: "Karan Patel", detail: "Replied to a follow-up", channel: "WA", time: "1 hr", color: "sky", status: "Engaged" }
 ];
 
 function Glyph({ name }: { name: string }) {
@@ -38,6 +31,7 @@ export default function Home() {
   const [period, setPeriod] = useState("This week");
   const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
   const [stats, setStats] = useState<BusinessStats | null>(null);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
   const router = useRouter();
@@ -50,6 +44,7 @@ export default function Home() {
     const bizId = getBusinessId();
     if (!bizId) return;
     api.businesses.stats(bizId).then(setStats).catch(console.error);
+    api.businesses.activity(bizId).then(setActivity).catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -125,7 +120,7 @@ export default function Home() {
             <article className="card agent-card"><div className="agent-orb"><span>✦</span></div><p className="live"><i /> AI agent is active</p><h3>Your agent is on it.</h3><p className="agent-copy">It’s currently managing 42 conversations and has sent 86 follow-ups today.</p><div className="agent-list"><div><span className="round-icon">✉</span><p><strong>18 conversations</strong><small>are waiting for a reply</small></p><button>Review</button></div><div><span className="round-icon pink">♨</span><p><strong>7 hot leads</strong><small>need your attention</small></p><button>View</button></div></div><button className="agent-button">View agent activity <span>→</span></button></article>
           </div>
 
-          <article className="card activity-card"><div className="card-heading"><div><h3>Recent activity</h3><p>What’s happening across your customer channels</p></div><button className="text-button">View all <span>→</span></button></div><div className="activity-list">{activity.map((item) => <div className="activity-row" key={item.name}><span className={`avatar ${item.color}`}>{item.name.split(" ").map(part => part[0]).join("")}</span><div className="activity-person"><strong>{item.name}</strong><span>{item.detail}</span></div><span className={`channel ${item.channel === "IG" ? "ig" : ""}`}>{item.channel}</span><span className="activity-status">{item.status}</span><time>{item.time}</time><button className="more">•••</button></div>)}</div></article>
+          <article className="card activity-card"><div className="card-heading"><div><h3>Recent activity</h3><p>What's happening across your customer channels</p></div><button className="text-button">View all <span>→</span></button></div><div className="activity-list">{activity.length === 0 ? <p style={{padding:"16px",color:"#9895a3",fontSize:12}}>No activity yet — send a test message to get started.</p> : activity.map((item) => { const custName = [item.customer?.firstName, item.customer?.lastName].filter(Boolean).join(" ") || item.customer?.phone || "Unknown"; const initials = custName.split(" ").map((w: string) => w[0]).join("").slice(0,2).toUpperCase(); const colorMap: Record<string, string> = { MESSAGE_SENT:"sky", CONVERSATION_CREATED:"peach", ORDER_PLACED:"mint", ORDER_UPDATED:"lavender", CUSTOMER_TAGGED:"peach", LEAD_SCORED:"lavender" }; const statusMap: Record<string, string> = { MESSAGE_SENT:"Message in", CONVERSATION_CREATED:"New conv", ORDER_PLACED:"Order placed", ORDER_UPDATED:"Order updated", CUSTOMER_TAGGED:"New lead", LEAD_SCORED:"Score updated" }; const diff = Date.now() - new Date(item.createdAt).getTime(); const t = diff < 60000 ? "now" : diff < 3600000 ? `${Math.floor(diff/60000)}m` : diff < 86400000 ? `${Math.floor(diff/3600000)}h` : `${Math.floor(diff/86400000)}d`; return <div className="activity-row" key={item.id}><span className={`avatar ${colorMap[item.type]??""}`}>{initials}</span><div className="activity-person"><strong>{custName}</strong><span>{item.summary}</span></div><span className="channel">WA</span><span className="activity-status">{statusMap[item.type]??item.type}</span><time>{t}</time><button className="more">•••</button></div>; })}</div></article>
         </div>
       </section>
     </main>
