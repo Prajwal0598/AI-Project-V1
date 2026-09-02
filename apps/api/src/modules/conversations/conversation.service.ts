@@ -56,27 +56,44 @@ export class ConversationService {
       include: { identity: true, business: true },
     });
     if (!conversation) throw new NotFoundException("Conversation not found.");
-    if (conversation.channel !== Channel.WHATSAPP) {
-      throw new BadRequestException("Send is only supported for WhatsApp conversations currently.");
-    }
     if (!conversation.identity?.identifier) {
-      throw new BadRequestException("No WhatsApp identity linked to this conversation.");
+      throw new BadRequestException("No channel identity linked to this conversation.");
     }
-    if (!conversation.business.whatsappPhoneNumberId) {
+
+    const providerMessageId = conversation.channel === Channel.INSTAGRAM
+      ? await this.sendInstagram(conversation.business, conversation.identity.identifier, content)
+      : conversation.channel === Channel.WHATSAPP
+        ? await this.sendWhatsApp(conversation.business, conversation.identity.identifier, content)
+        : conversation.channel === Channel.EMAIL
+          ? await this.sendEmail(conversation.business, conversation.identity.identifier, conversation.title, content)
+          : (() => { throw new BadRequestException("Send is only supported for WhatsApp, Instagram, and Email conversations currently."); })();
+
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data: { conversationId, direction: MessageDirection.OUTBOUND, content: content.trim(), providerMessageId, sentAt: now },
+      });
+      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: now } });
+      return message;
+    });
+  }
+
+  private async sendWhatsApp(business: { whatsappPhoneNumberId: string | null }, to: string, content: string): Promise<string | null> {
+    if (!business.whatsappPhoneNumberId) {
       throw new BadRequestException("WhatsApp phone number ID not configured for this business — set it via PATCH /api/businesses/:id.");
     }
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
     if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${conversation.business.whatsappPhoneNumberId}/messages`,
+      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           messaging_product: "whatsapp",
           recipient_type: "individual",
-          to: conversation.identity.identifier,
+          to,
           type: "text",
           text: { body: content.trim() },
         }),
@@ -87,17 +104,62 @@ export class ConversationService {
       const errBody = await res.json().catch(() => ({}));
       throw new ServiceUnavailableException(`WhatsApp API error: ${JSON.stringify(errBody)}`);
     }
-
     const data = await res.json() as { messages?: { id: string }[] };
-    const wamid = data.messages?.[0]?.id ?? null;
+    return data.messages?.[0]?.id ?? null;
+  }
 
-    const now = new Date();
-    return this.prisma.$transaction(async (tx) => {
-      const message = await tx.message.create({
-        data: { conversationId, direction: MessageDirection.OUTBOUND, content: content.trim(), providerMessageId: wamid, sentAt: now },
-      });
-      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: now } });
-      return message;
+  private async sendInstagram(business: { instagramPageId: string | null }, to: string, content: string): Promise<string | null> {
+    if (!business.instagramPageId) {
+      throw new BadRequestException("Instagram Page ID not configured for this business — set it via PATCH /api/businesses/:id.");
+    }
+    const accessToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
+    if (!accessToken) throw new ServiceUnavailableException("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
+
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${business.instagramPageId}/messages?access_token=${accessToken}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: to },
+          message: { text: content.trim() },
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new ServiceUnavailableException(`Instagram API error: ${JSON.stringify(errBody)}`);
+    }
+    const data = await res.json() as { message_id?: string };
+    return data.message_id ?? null;
+  }
+
+  private async sendEmail(business: { supportEmail: string | null }, to: string, subject: string | null, content: string): Promise<string | null> {
+    if (!business.supportEmail) {
+      throw new BadRequestException("Support email not configured for this business — set it via PATCH /api/businesses/:id.");
+    }
+    const token = process.env.POSTMARK_SERVER_TOKEN;
+    const from = process.env.EMAIL_FROM;
+    if (!token || !from) throw new ServiceUnavailableException("POSTMARK_SERVER_TOKEN or EMAIL_FROM is not configured.");
+
+    const res = await fetch("https://api.postmarkapp.com/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-Postmark-Server-Token": token },
+      body: JSON.stringify({
+        From: from,
+        To: to,
+        Subject: subject ? `Re: ${subject}` : "Re: your message",
+        TextBody: content.trim(),
+        MessageStream: "outbound",
+      }),
     });
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new ServiceUnavailableException(`Postmark API error: ${JSON.stringify(errBody)}`);
+    }
+    const data = await res.json() as { MessageID?: string };
+    return data.MessageID ?? null;
   }
 }

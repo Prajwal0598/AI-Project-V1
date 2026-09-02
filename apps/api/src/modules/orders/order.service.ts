@@ -59,6 +59,8 @@ export class OrderService {
     await this.prisma.activityEvent.create({
       data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order status changed to ${input.status.replace("_", " ").toLowerCase()}` },
     });
+    // recalculate lead score since a paid/fulfilled status now contributes to the score
+    await recalculateLeadScore(this.prisma, order.customerId, businessId);
 
     return updated;
   }

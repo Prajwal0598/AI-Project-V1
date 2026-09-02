@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
+import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { BusinessModule } from "./modules/businesses/business.module";
 import { AiModule } from "./modules/ai/ai.module";
 import { ConversationModule } from "./modules/conversations/conversation.module";
@@ -14,8 +15,14 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
 import { QueueModule } from "./queue/queue.module";
 
 @Module({
-  imports: [DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, WebhooksModule, QueueModule],
+  imports: [
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]), // default: 100 req/min per IP across the API
+    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, WebhooksModule, QueueModule,
+  ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
 })
 export class AppModule {}

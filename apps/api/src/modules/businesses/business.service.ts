@@ -19,7 +19,14 @@ export class BusinessService {
   }
 
   async stats(businessId: string) {
-    const [leads, customers, conversations, openConversations, orders, revenueAgg] = await Promise.all([
+    const now = new Date();
+    const startOfThisWeek = new Date(now);
+    startOfThisWeek.setDate(now.getDate() - now.getDay());
+    startOfThisWeek.setHours(0, 0, 0, 0);
+    const startOfLastWeek = new Date(startOfThisWeek);
+    startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
+
+    const [leads, customers, conversations, openConversations, orders, revenueAgg, revenueThisWeekAgg, revenueLastWeekAgg] = await Promise.all([
       this.prisma.customer.count({ where: { businessId, type: "LEAD" } }),
       this.prisma.customer.count({ where: { businessId, type: "CUSTOMER" } }),
       this.prisma.conversation.count({ where: { businessId } }),
@@ -29,8 +36,21 @@ export class BusinessService {
         where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] } },
         _sum: { total: true },
       }),
+      this.prisma.order.aggregate({
+        where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] }, createdAt: { gte: startOfThisWeek } },
+        _sum: { total: true },
+      }),
+      this.prisma.order.aggregate({
+        where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] }, createdAt: { gte: startOfLastWeek, lt: startOfThisWeek } },
+        _sum: { total: true },
+      }),
     ]);
-    return { leads, customers, conversations, openConversations, orders, revenue: revenueAgg._sum.total ?? 0 };
+    return {
+      leads, customers, conversations, openConversations, orders,
+      revenue: revenueAgg._sum.total ?? 0,
+      revenueThisWeek: revenueThisWeekAgg._sum.total ?? 0,
+      revenueLastWeek: revenueLastWeekAgg._sum.total ?? 0,
+    };
   }
 
   async create(input: CreateBusinessDto) {
@@ -55,6 +75,8 @@ export class BusinessService {
         ...(input.website !== undefined && { website: input.website?.trim() || null }),
         ...(input.timezone !== undefined && { timezone: input.timezone.trim() }),
         ...(input.whatsappPhoneNumberId !== undefined && { whatsappPhoneNumberId: input.whatsappPhoneNumberId?.trim() || null }),
+        ...(input.instagramPageId !== undefined && { instagramPageId: input.instagramPageId?.trim() || null }),
+        ...(input.supportEmail !== undefined && { supportEmail: input.supportEmail?.trim().toLowerCase() || null }),
       },
     });
   }

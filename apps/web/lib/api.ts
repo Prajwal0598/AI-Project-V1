@@ -69,6 +69,8 @@ export interface Business {
   website: string | null;
   timezone: string;
   whatsappPhoneNumberId: string | null;
+  instagramPageId: string | null;
+  supportEmail: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,6 +82,8 @@ export interface BusinessStats {
   openConversations: number;
   orders: number;
   revenue: string | number;
+  revenueThisWeek: string | number;
+  revenueLastWeek: string | number;
 }
 
 export interface Order {
@@ -154,7 +158,7 @@ export const api = {
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId">>) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">>) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),
@@ -167,7 +171,7 @@ export const api = {
     send: (id: string, content: string) =>
       request<Message>(`/conversations/${id}/send`, { method: "POST", body: JSON.stringify({ content }) }),
     aiDraft: (id: string) =>
-      request<Message>(`/conversations/${id}/ai-draft`, { method: "POST" }),
+      request<{ draft: Message; sent: boolean; orderCreated: { id: string; total: string; currency: string } | null }>(`/conversations/${id}/ai-draft`, { method: "POST" }),
   },
   customers: {
     list: (businessId: string, search?: string) =>

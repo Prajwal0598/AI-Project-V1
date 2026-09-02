@@ -20,4 +20,12 @@ export class UpdateBusinessDto {
   @IsOptional()
   @IsString()
   whatsappPhoneNumberId?: string;
+
+  @IsOptional()
+  @IsString()
+  instagramPageId?: string;
+
+  @IsOptional()
+  @IsString()
+  supportEmail?: string;
 }

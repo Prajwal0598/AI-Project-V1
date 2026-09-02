@@ -28,6 +28,7 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [draftLoading, setDraftLoading] = useState(false);
+  const [error, setError] = useState("");
   const streamRef = useRef<HTMLDivElement>(null);
 
   // auto-scroll to latest message
@@ -77,39 +78,42 @@ export default function InboxPage() {
 
   async function send() {
     if (!selected || !input.trim() || sending) return;
-    setSending(true);
+    setSending(true); setError("");
     try {
       const msg = await api.conversations.send(selected.id, input.trim());
       setSelected(prev => prev ? { ...prev, messages: [...prev.messages, msg] } : null);
       setInput("");
       loadList();
-    } catch (err) { console.error(err); }
+    } catch (err) { setError(err instanceof Error ? err.message : "Failed to send message."); }
     finally { setSending(false); }
   }
 
   async function generateDraft() {
     if (!selected || draftLoading) return;
-    setDraftLoading(true);
+    setDraftLoading(true); setError("");
     try {
-      const msg = await api.conversations.aiDraft(selected.id);
-      setDraft(msg.content);
-    } catch (err) { console.error(err); }
+      const result = await api.conversations.aiDraft(selected.id);
+      setDraft(result.draft.content);
+      if (result.orderCreated) {
+        setError(`✓ Order created — ${result.orderCreated.currency} ${result.orderCreated.total} (#${result.orderCreated.id.slice(-8).toUpperCase()})`);
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : "Failed to generate AI draft."); }
     finally { setDraftLoading(false); }
   }
 
   async function approveDraft() {
     if (!selected || !draft || sending) return;
-    setSending(true);
+    setSending(true); setError("");
     try {
       const msg = await api.conversations.send(selected.id, draft);
       setSelected(prev => prev ? { ...prev, messages: [...prev.messages, msg] } : null);
       setDraft("");
-    } catch (err) { console.error(err); }
+    } catch (err) { setError(err instanceof Error ? err.message : "Failed to send draft."); }
     finally { setSending(false); }
   }
 
   const visibleMessages = (selected?.messages ?? []).filter(
-    m => (m.metadata as { state?: string } | null)?.state !== "draft"
+    m => ((m.metadata as { state?: string } | null)?.state ?? "").toLowerCase() !== "draft"
   );
 
   return <AppShell title="Inbox" subtitle="One place for every customer conversation.">
@@ -140,6 +144,7 @@ export default function InboxPage() {
               </div>
               <button className="filter-button">Customer profile</button>
             </header>
+            {error && <div style={{ background: error.startsWith("✓") ? "#eefaf3" : "#fff3f2", border: `1px solid ${error.startsWith("✓") ? "#bfe8d3" : "#fcd9d6"}`, color: error.startsWith("✓") ? "#237a52" : "#b94940", fontSize: 12, padding: "8px 14px", margin: "0 16px" }}>{error} <button onClick={() => setError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
             <div className="message-stream" ref={streamRef}>
               {visibleMessages.map((m: Message) => (
                 <div key={m.id} className={`bubble ${m.direction === "OUTBOUND" ? "outbound" : "inbound"}`}>

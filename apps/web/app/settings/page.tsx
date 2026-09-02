@@ -9,6 +9,8 @@ export default function SettingsPage() {
   const [name, setName] = useState("");
   const [timezone, setTimezone] = useState("");
   const [waPhoneId, setWaPhoneId] = useState("");
+  const [igPageId, setIgPageId] = useState("");
+  const [supportEmail, setSupportEmail] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -20,6 +22,8 @@ export default function SettingsPage() {
       setName(b.name);
       setTimezone(b.timezone);
       setWaPhoneId(b.whatsappPhoneNumberId ?? "");
+      setIgPageId(b.instagramPageId ?? "");
+      setSupportEmail(b.supportEmail ?? "");
     }).catch(console.error);
   }, []);
 
@@ -32,6 +36,8 @@ export default function SettingsPage() {
         name: name.trim(),
         timezone: timezone.trim(),
         whatsappPhoneNumberId: waPhoneId.trim() || null,
+        instagramPageId: igPageId.trim() || null,
+        supportEmail: supportEmail.trim() || null,
       });
       setBiz(updated);
       setSaved(true);
@@ -66,10 +72,36 @@ export default function SettingsPage() {
     </section>
 
     <section className="settings-section">
+      <h2>Instagram configuration</h2>
+      <p>Required for the webhook to route inbound Instagram DMs to your workspace.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <div className="login-field">
+          <label>Instagram Page ID</label>
+          <input value={igPageId} onChange={e => setIgPageId(e.target.value)} placeholder="Numeric ID from Meta Developer Console" />
+        </div>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Set <code>INSTAGRAM_PAGE_ACCESS_TOKEN</code> and <code>INSTAGRAM_VERIFY_TOKEN</code> in your <code>.env</code> file — tokens are never stored in the database.</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>Email configuration</h2>
+      <p>Required for the webhook to route inbound emails to your workspace.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <div className="login-field">
+          <label>Support email address</label>
+          <input value={supportEmail} onChange={e => setSupportEmail(e.target.value)} placeholder="support@yourbusiness.com" />
+        </div>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Set <code>POSTMARK_SERVER_TOKEN</code>, <code>EMAIL_FROM</code>, and <code>EMAIL_WEBHOOK_SECRET</code> in your <code>.env</code> file — tokens are never stored in the database.</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
       <h2>Connected channels</h2>
       <p>Only connect accounts that your business owns and has permission to use.</p>
       <div className="integration-list">
-        {[{ name: "WhatsApp Business", copy: `Phone Number ID: ${biz?.whatsappPhoneNumberId ?? "not set"}`, connected: !!biz?.whatsappPhoneNumberId }, { name: "Instagram", copy: "Manage business DMs and comments", connected: false }, { name: "Email", copy: "Send and receive from your business domain", connected: false }, { name: "OpenAI", copy: "AI reply drafts are active", connected: true }].map(item => (
+        {[{ name: "WhatsApp Business", copy: `Phone Number ID: ${biz?.whatsappPhoneNumberId ?? "not set"}`, connected: !!biz?.whatsappPhoneNumberId }, { name: "Instagram", copy: `Page ID: ${biz?.instagramPageId ?? "not set"}`, connected: !!biz?.instagramPageId }, { name: "Email", copy: `Support address: ${biz?.supportEmail ?? "not set"}`, connected: !!biz?.supportEmail }, { name: "OpenAI", copy: "AI reply drafts are active", connected: true }].map(item => (
           <article key={item.name}><span>{item.name[0]}</span><div><h3>{item.name}</h3><p>{item.copy}</p></div><button className={item.connected ? "connected" : "connect"}>{item.connected ? "Connected" : "Connect"}</button></article>
         ))}
       </div>
