@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
+import { AiService } from "../ai/ai.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { parseEmailWebhook } from "./email-parser";
 
@@ -12,6 +13,7 @@ export class EmailWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
+    private readonly ai: AiService,
   ) {}
 
   async ingest(body: unknown): Promise<void> {
@@ -83,5 +85,12 @@ export class EmailWebhookService {
     });
 
     await recalculateLeadScore(this.prisma, customer.id, business.id);
+
+    // fully autonomous reply — no human approval step
+    try {
+      await this.ai.generateAndSendReply(conversation.id);
+    } catch (err) {
+      this.logger.error(`Automatic AI reply failed for conversation ${conversation.id}`, err);
+    }
   }
 }

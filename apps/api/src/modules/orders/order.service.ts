@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ActivityEventType, OrderStatus } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { QueueService } from "../../queue/queue.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { CreateOrderDto } from "./dto/create-order.dto";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
@@ -10,7 +11,10 @@ const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStat
 
 @Injectable()
 export class OrderService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queues: QueueService,
+  ) {}
 
   async findAll(businessId: string) {
     return this.prisma.order.findMany({
@@ -26,6 +30,9 @@ export class OrderService {
 
     const shippingFee = input.shippingFee ?? 0;
     const total = input.subtotal + shippingFee;
+    // orders created with a payment method already chosen (e.g. via the AI conversational flow) go
+    // straight to PENDING_PAYMENT and start the simulated autonomous payment/shipment progression
+    const initialStatus = input.paymentMethod ? OrderStatus.PENDING_PAYMENT : OrderStatus.DRAFT;
 
     const order = await this.prisma.order.create({
       data: {
@@ -36,7 +43,8 @@ export class OrderService {
         total,
         currency: input.currency?.trim() || "INR",
         shippingAddress: (input.shippingAddress ?? undefined) as object | undefined,
-        status: OrderStatus.DRAFT,
+        paymentMethod: input.paymentMethod?.trim() || null,
+        status: initialStatus,
       },
     });
 
@@ -44,6 +52,8 @@ export class OrderService {
       data: { businessId, customerId: input.customerId, type: ActivityEventType.ORDER_PLACED, summary: `Order placed — ${order.currency} ${order.total}` },
     });
     await recalculateLeadScore(this.prisma, input.customerId, businessId);
+
+    if (input.paymentMethod) await this.queues.scheduleOrderProgress(order.id, businessId);
 
     return order;
   }

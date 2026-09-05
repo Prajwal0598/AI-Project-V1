@@ -1,8 +1,9 @@
 import "dotenv/config";
-import { Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
-import { QUEUES } from "./queues";
+import { QUEUES, OrderProgressJobData } from "./queues";
 import { processFollowUp } from "./jobs/follow-up";
+import { makeOrderProgressProcessor } from "./jobs/order-progress";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -21,11 +22,27 @@ followUpWorker.on("failed", (job, err) => {
   console.error(`[follow-up] job ${job?.id} failed`, err.message);
 });
 
+const orderProgressQueue = new Queue<OrderProgressJobData>(QUEUES.ORDER_PROGRESS, { connection });
+const orderProgressWorker = new Worker(QUEUES.ORDER_PROGRESS, makeOrderProgressProcessor(orderProgressQueue), {
+  connection,
+  concurrency: 3,
+});
+
+orderProgressWorker.on("completed", (job, result) => {
+  console.log(`[order-progress] job ${job.id} completed`, result);
+});
+
+orderProgressWorker.on("failed", (job, err) => {
+  console.error(`[order-progress] job ${job?.id} failed`, err.message);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queue: ${QUEUES.FOLLOW_UP}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}`);
 
 process.on("SIGTERM", async () => {
   await followUpWorker.close();
+  await orderProgressWorker.close();
+  await orderProgressQueue.close();
   await connection.quit();
   process.exit(0);
 });

@@ -109,8 +109,8 @@ export default function SettingsPage() {
 
     <section className="settings-section">
       <h2>AI autonomy</h2>
-      <p>Draft mode keeps people in control while you set up the workspace.</p>
-      <div className="autonomy"><strong>Draft only</strong><span>AI can analyse conversations and create replies. A human must approve every outbound message.</span><button className="selected-mode">Current mode</button></div>
+      <p>The AI replies to customers automatically — no human approval step.</p>
+      <div className="autonomy"><strong>Fully autonomous</strong><span>AI reads every inbound message, decides whether to answer or place an order, and sends the reply directly to the customer.</span><button className="selected-mode">Current mode</button></div>
     </section>
   </AppShell>;
 }

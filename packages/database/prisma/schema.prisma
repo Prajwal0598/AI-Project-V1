@@ -199,6 +199,7 @@ model Order {
   total       Decimal     @db.Decimal(12, 2)
   currency    String      @default("INR")
   shippingAddress Json?
+  paymentMethod   String?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)

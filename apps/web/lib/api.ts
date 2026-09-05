@@ -94,6 +94,7 @@ export interface Order {
   shippingFee: string;
   total: string;
   currency: string;
+  paymentMethod: string | null;
   createdAt: string;
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null };
 }
@@ -171,7 +172,7 @@ export const api = {
     send: (id: string, content: string) =>
       request<Message>(`/conversations/${id}/send`, { method: "POST", body: JSON.stringify({ content }) }),
     aiDraft: (id: string) =>
-      request<{ draft: Message; sent: boolean; orderCreated: { id: string; total: string; currency: string } | null }>(`/conversations/${id}/ai-draft`, { method: "POST" }),
+      request<{ message: Message; orderCreated: { id: string; total: string; currency: string } | null }>(`/conversations/${id}/ai-draft`, { method: "POST" }),
   },
   customers: {
     list: (businessId: string, search?: string) =>

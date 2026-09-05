@@ -23,4 +23,8 @@ export class CreateOrderDto {
 
   @IsOptional()
   shippingAddress?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  paymentMethod?: string;
 }

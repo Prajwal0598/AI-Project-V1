@@ -52,7 +52,7 @@ export default function OrdersPage() {
   return <AppShell title="Orders" subtitle="Track and manage every customer order.">
     <div className="data-card lead-table">
       <div className="table-head">
-        <span>Order</span><span>Customer</span><span>Total</span><span>Status</span><span>Date</span><span></span>
+        <span>Order</span><span>Customer</span><span>Total</span><span>Payment</span><span>Status</span><span>Date</span><span></span>
       </div>
       {loading && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
       {!loading && orders.length === 0 && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>No orders yet.</p>}
@@ -61,6 +61,7 @@ export default function OrdersPage() {
           <span style={{ fontFamily: "monospace", fontSize: 11, color: "var(--muted)" }}>#{o.id.slice(-8).toUpperCase()}</span>
           <div className="person"><b>{custName(o.customer).slice(0, 2).toUpperCase()}</b><strong>{custName(o.customer)}</strong></div>
           <span><strong>{o.currency} {o.total}</strong></span>
+          <span className="source-chip">{o.paymentMethod ?? "—"}</span>
           <span className={`stage-chip ${STATUS_COLOR[o.status]}`}>{o.status.replace("_", " ")}</span>
           <span className="activity-copy">{fmtDate(o.createdAt)}</span>
           {STATUS_NEXT[o.status] && (

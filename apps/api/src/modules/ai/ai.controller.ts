@@ -5,9 +5,9 @@ import { AiService } from "./ai.service";
 export class AiController {
   constructor(private readonly ai: AiService) {}
 
-  /** Generates and stores a draft only. It never sends a message to a channel. */
+  /** Generates a reply and sends it immediately via the conversation's channel — no approval step. */
   @Post("ai-draft")
   draftReply(@Param("conversationId") conversationId: string) {
-    return this.ai.createReplyDraft(conversationId);
+    return this.ai.generateAndSendReply(conversationId);
   }
 }

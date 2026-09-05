@@ -3,17 +3,20 @@ import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
 interface FollowUpJobData { conversationId: string; businessId: string; customerId: string }
+interface OrderProgressJobData { orderId: string; businessId: string; nextStatus: "PAID" | "FULFILLED" }
 
 @Injectable()
 export class QueueService implements OnModuleDestroy {
   private readonly logger = new Logger(QueueService.name);
   private connection: IORedis;
   private followUpQueue: Queue<FollowUpJobData>;
+  private orderProgressQueue: Queue<OrderProgressJobData>;
 
   constructor() {
     const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
     this.connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
     this.followUpQueue = new Queue("follow-up", { connection: this.connection });
+    this.orderProgressQueue = new Queue("order-progress", { connection: this.connection });
     this.logger.log(`Queue service ready — Redis at ${redisUrl}`);
   }
 
@@ -27,8 +30,20 @@ export class QueueService implements OnModuleDestroy {
     this.logger.log(`Follow-up scheduled for conversation ${conversationId} in ${Math.round(delay / 3_600_000)}h`);
   }
 
+  // simulated autonomous payment/shipment progression — no real payment gateway or courier is connected yet
+  async scheduleOrderProgress(orderId: string, businessId: string) {
+    const delay = parseInt(process.env.ORDER_AUTO_PAID_DELAY_MS ?? "300000", 10); // default 5 min
+    await this.orderProgressQueue.add("advance", { orderId, businessId, nextStatus: "PAID" }, {
+      delay,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 10_000 },
+    });
+    this.logger.log(`Order ${orderId} auto-progress scheduled — PAID (simulated) in ${Math.round(delay / 60_000)}min`);
+  }
+
   async onModuleDestroy() {
     await this.followUpQueue.close();
+    await this.orderProgressQueue.close();
     await this.connection.quit();
   }
 }

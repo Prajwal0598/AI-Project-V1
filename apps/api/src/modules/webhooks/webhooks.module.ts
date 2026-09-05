@@ -6,9 +6,10 @@ import { InstagramWebhookService } from "./instagram-webhook.service";
 import { EmailWebhookController } from "./email-webhook.controller";
 import { EmailWebhookService } from "./email-webhook.service";
 import { QueueModule } from "../../queue/queue.module";
+import { AiModule } from "../ai/ai.module";
 
 @Module({
-  imports: [QueueModule],
+  imports: [QueueModule, AiModule],
   controllers: [WhatsAppWebhookController, InstagramWebhookController, EmailWebhookController],
   providers: [WhatsAppWebhookService, InstagramWebhookService, EmailWebhookService],
 })

@@ -23,11 +23,10 @@ const CHANNEL_BADGE: Record<string, string> = { WHATSAPP: "WA", INSTAGRAM: "IG",
 export default function InboxPage() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selected, setSelected] = useState<ConversationDetail | null>(null);
-  const [draft, setDraft] = useState("");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [draftLoading, setDraftLoading] = useState(false);
+  const [aiReplying, setAiReplying] = useState(false);
   const [error, setError] = useState("");
   const streamRef = useRef<HTMLDivElement>(null);
 
@@ -71,7 +70,6 @@ export default function InboxPage() {
   }, []);
 
   async function selectConv(id: string) {
-    setDraft("");
     const detail = await api.conversations.get(id).catch(console.error);
     if (detail) setSelected(detail);
   }
@@ -88,28 +86,18 @@ export default function InboxPage() {
     finally { setSending(false); }
   }
 
-  async function generateDraft() {
-    if (!selected || draftLoading) return;
-    setDraftLoading(true); setError("");
+  async function generateAiReply() {
+    if (!selected || aiReplying) return;
+    setAiReplying(true); setError("");
     try {
       const result = await api.conversations.aiDraft(selected.id);
-      setDraft(result.draft.content);
+      setSelected(prev => prev ? { ...prev, messages: [...prev.messages, result.message] } : null);
       if (result.orderCreated) {
         setError(`✓ Order created — ${result.orderCreated.currency} ${result.orderCreated.total} (#${result.orderCreated.id.slice(-8).toUpperCase()})`);
       }
-    } catch (err) { setError(err instanceof Error ? err.message : "Failed to generate AI draft."); }
-    finally { setDraftLoading(false); }
-  }
-
-  async function approveDraft() {
-    if (!selected || !draft || sending) return;
-    setSending(true); setError("");
-    try {
-      const msg = await api.conversations.send(selected.id, draft);
-      setSelected(prev => prev ? { ...prev, messages: [...prev.messages, msg] } : null);
-      setDraft("");
-    } catch (err) { setError(err instanceof Error ? err.message : "Failed to send draft."); }
-    finally { setSending(false); }
+      loadList();
+    } catch (err) { setError(err instanceof Error ? err.message : "AI could not generate a reply."); }
+    finally { setAiReplying(false); }
   }
 
   const visibleMessages = (selected?.messages ?? []).filter(
@@ -152,16 +140,10 @@ export default function InboxPage() {
                   <time style={{ display: "block", fontSize: 10, opacity: 0.55, marginTop: 4 }}>{fmtTime(m.sentAt)}</time>
                 </div>
               ))}
-              {draft && <div className="ai-draft">
-                <span>AI draft</span>
-                <p>{draft}</p>
-                <button className="primary-button" onClick={approveDraft} disabled={sending}>Approve &amp; send</button>
-                <button onClick={() => setDraft("")}>Discard</button>
-              </div>}
             </div>
             <footer>
-              <button className="ai-draft-button" onClick={generateDraft} disabled={draftLoading}>
-                {draftLoading ? "Generating…" : "Generate AI draft"}
+              <button className="ai-draft-button" onClick={generateAiReply} disabled={aiReplying}>
+                {aiReplying ? "AI replying…" : "Generate AI reply"}
               </button>
               <input placeholder="Reply to customer…" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} />
               <button className="send-button" onClick={send} disabled={sending || !input.trim()}>Send</button>
