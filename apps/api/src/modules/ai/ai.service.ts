@@ -32,6 +32,11 @@ const REPLY_SCHEMA = {
   additionalProperties: false
 };
 
+// safety net for when the model copies a link pattern it saw earlier in the conversation history despite instructions not to
+function stripHallucinatedLinks(reply: string): string {
+  return reply.replace(/[^.!?\n]*https?:\/\/\S+[^.!?\n]*[.!?]?/gi, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -85,9 +90,9 @@ export class AiService {
 3. ADDRESS: if items are known but no shipping address has been given yet, ask for their shipping address. Do not ask again once given — carry it forward in "shippingAddress".
 4. PAYMENT METHOD: if items and address are known but no payment method chosen, ask "Would you like to pay via UPI or Pay on Delivery (COD)?". Carry the chosen method forward in "paymentMethod" exactly as "UPI" or "COD".
 5. SUMMARY: once items, address, and payment method are all known and you have NOT yet shown a summary (check the conversation history — if your own most recent message already contains an order summary, do not repeat this step), present a clear summary: items with quantities, computed total using catalogue prices, shipping address, and payment method. Ask them to confirm ("Shall I go ahead and place this order?"). Do not set orderConfirmed true yet at this step.
-6. CONFIRMATION: only after a summary has already been shown to the customer AND they now clearly confirm (e.g. "yes", "confirm", "place it"), set orderConfirmed to true, keeping items/shippingAddress/paymentMethod as already established.
+6. CONFIRMATION: only after a summary has already been shown to the customer AND they now clearly confirm (e.g. "yes", "confirm", "place it"), set orderConfirmed to true, keeping items/shippingAddress/paymentMethod as already established. If they chose UPI, a payment link is sent automatically in a separate follow-up message right after yours — never write a URL, link, or the phrase "payment link" in your own reply, even if earlier messages in the conversation contain one.
 
-Never invent pricing, stock, policies, discounts, or links — use only the catalogue below. Do not request payment-card numbers. Do not mention that you are an AI.
+Never invent pricing, stock, policies, discounts, or links — use only the catalogue below. Never include a URL or the word "http" in your reply under any circumstance. Do not request payment-card numbers. Do not mention that you are an AI.
 
 Product catalogue:
 ${catalog}`;
@@ -98,6 +103,7 @@ Conversation:
 ${transcript || "No previous messages. Greet the customer and share the product catalogue."}`;
 
     let orderCreated: { id: string; total: string; currency: string } | null = null;
+    let paymentLink: string | null = null;
 
     const content = await (async () => {
       try {
@@ -117,14 +123,15 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         this.logger.log(`Structured reply for conversation ${conversationId}: orderConfirmed=${parsed.orderConfirmed} items=${JSON.stringify(parsed.items)} address=${parsed.shippingAddress ? "set" : "null"} payment=${parsed.paymentMethod}`);
 
         if (!parsed.orderConfirmed || !parsed.items?.length || !parsed.shippingAddress || !parsed.paymentMethod) {
-          return parsed.reply;
+          return stripHallucinatedLinks(parsed.reply);
         }
 
         const result = await this.executeCreateOrder(conversation, parsed.items, parsed.shippingAddress, parsed.paymentMethod);
         this.logger.log(`create_order result for conversation ${conversationId}: ${JSON.stringify(result)}`);
         if (result.success) {
           orderCreated = { id: result.orderId!, total: result.total!, currency: result.currency! };
-          return parsed.reply;
+          paymentLink = result.paymentLink ?? null;
+          return stripHallucinatedLinks(parsed.reply);
         }
         // order creation failed (e.g. no matching product) — fall back to a plain clarifying reply instead of a false confirmation
         return `We couldn't confirm all of those items — could you clarify which products you'd like? ${result.error ?? ""}`.trim();
@@ -136,6 +143,12 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     })();
 
     const message = await this.conversations.sendMessage(conversationId, conversation.businessId, content);
+
+    // sent as a separate follow-up message after the order summary/confirmation, not bundled into it
+    if (paymentLink) {
+      await this.conversations.sendMessage(conversationId, conversation.businessId, `Complete your UPI payment here: ${paymentLink}`);
+    }
+
     return { message, orderCreated };
   }
 
@@ -144,7 +157,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     items: { productName: string; quantity: number }[],
     shippingAddress: string,
     paymentMethod: string
-  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[] }> {
+  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[]; paymentLink?: string }> {
     if (!items?.length) return { success: false, error: "No items specified." };
 
     const catalogue = conversation.business.products;
@@ -181,6 +194,8 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         total: order.total.toString(),
         currency: order.currency,
         items: matched.map((i) => `${i.quantity}x ${i.name}`),
+        // dummy payment link — simulates a payment gateway checkout page until a real one (e.g. Razorpay) is integrated
+        ...(normalizedPayment === "UPI" ? { paymentLink: `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
         ...(unmatched.length ? { unmatched } : {}),
       };
     } catch (error) {
