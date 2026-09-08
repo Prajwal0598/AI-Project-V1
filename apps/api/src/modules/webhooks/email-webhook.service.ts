@@ -63,7 +63,8 @@ export class EmailWebhookService {
       await this.queues.scheduleFollowUp(conversation.id, business.id, customer.id);
     }
 
-    // upsert by providerMessageId to deduplicate provider re-deliveries
+    // upsert by providerMessageId to deduplicate provider re-deliveries, and detect whether this was actually new
+    const existing = await this.prisma.message.findUnique({ where: { providerMessageId: msg.messageId } });
     await this.prisma.message.upsert({
       where: { providerMessageId: msg.messageId },
       create: {
@@ -74,6 +75,10 @@ export class EmailWebhookService {
       },
       update: {},
     });
+    if (existing) {
+      this.logger.warn(`Ignoring re-delivered email message ${msg.messageId} — already processed.`);
+      return;
+    }
 
     await this.prisma.conversation.update({
       where: { id: conversation.id },
@@ -88,7 +93,7 @@ export class EmailWebhookService {
 
     // fully autonomous reply — no human approval step
     try {
-      await this.ai.generateAndSendReply(conversation.id);
+      await this.ai.generateAndSendReply(conversation.id, business.id);
     } catch (err) {
       this.logger.error(`Automatic AI reply failed for conversation ${conversation.id}`, err);
     }

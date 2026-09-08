@@ -26,7 +26,7 @@ export class BusinessService {
     const startOfLastWeek = new Date(startOfThisWeek);
     startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
 
-    const [leads, customers, conversations, openConversations, orders, revenueAgg, revenueThisWeekAgg, revenueLastWeekAgg] = await Promise.all([
+    const [leads, customers, conversations, openConversations, orders, revenueAgg, revenueThisWeekAgg, revenueLastWeekAgg, recentPaidOrders] = await Promise.all([
       this.prisma.customer.count({ where: { businessId, type: "LEAD" } }),
       this.prisma.customer.count({ where: { businessId, type: "CUSTOMER" } }),
       this.prisma.conversation.count({ where: { businessId } }),
@@ -44,12 +44,31 @@ export class BusinessService {
         where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] }, createdAt: { gte: startOfLastWeek, lt: startOfThisWeek } },
         _sum: { total: true },
       }),
+      this.prisma.order.findMany({
+        where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] }, createdAt: { gte: startOfLastWeek } },
+        select: { createdAt: true, total: true },
+      }),
     ]);
+
+    // buckets each day (Mon-first, matching the chart's day labels) for the sales performance graph
+    const thisWeekSeries = new Array(7).fill(0);
+    const lastWeekSeries = new Array(7).fill(0);
+    for (const order of recentPaidOrders) {
+      const isThisWeek = order.createdAt >= startOfThisWeek;
+      const weekStart = isThisWeek ? startOfThisWeek : startOfLastWeek;
+      const sundayFirstIndex = Math.floor((order.createdAt.getTime() - weekStart.getTime()) / 86_400_000);
+      if (sundayFirstIndex < 0 || sundayFirstIndex > 6) continue;
+      const dayIndex = (sundayFirstIndex + 6) % 7; // remap Sunday-first bucket to Mon-first, matching the chart labels
+      const bucket = isThisWeek ? thisWeekSeries : lastWeekSeries;
+      bucket[dayIndex] += Number(order.total);
+    }
+
     return {
       leads, customers, conversations, openConversations, orders,
       revenue: revenueAgg._sum.total ?? 0,
       revenueThisWeek: revenueThisWeekAgg._sum.total ?? 0,
       revenueLastWeek: revenueLastWeekAgg._sum.total ?? 0,
+      revenueSeries: { thisWeek: thisWeekSeries, lastWeek: lastWeekSeries },
     };
   }
 

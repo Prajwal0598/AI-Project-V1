@@ -138,12 +138,15 @@ model Conversation {
   title         String?
   status        ConversationStatus @default(OPEN)
   lastMessageAt DateTime?
+  lastOrderKey  String?            // fingerprint of the last items+address+payment combo that was actually ordered — blocks re-placing the same order on a repeat/duplicate AI trigger
+  activeOrderId String?            // the order this conversation can still amend/cancel (cleared once it's no longer PENDING_PAYMENT)
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
   customer      Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
   identity      Identity?          @relation(fields: [identityId], references: [id], onDelete: SetNull)
   messages      Message[]
+  orders        Order[]
 
   @@index([businessId, status, lastMessageAt])
   @@index([customerId, lastMessageAt])
@@ -185,6 +188,7 @@ model Product {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  orderItems  OrderItem[]
 
   @@index([businessId, active])
 }
@@ -193,6 +197,7 @@ model Order {
   id          String      @id @default(cuid())
   businessId  String
   customerId  String
+  conversationId String?  // the conversation this order originated from, so the worker can notify the customer when payment clears
   status      OrderStatus @default(DRAFT)
   subtotal    Decimal     @db.Decimal(12, 2)
   shippingFee Decimal     @default(0) @db.Decimal(12, 2)
@@ -204,9 +209,25 @@ model Order {
   updatedAt   DateTime    @updatedAt
   business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
   customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  items       OrderItem[]
 
   @@index([businessId, status, createdAt])
   @@index([customerId, createdAt])
+}
+
+model OrderItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  productId String?
+  name      String
+  quantity  Int
+  unitPrice Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
 }
 
 model ActivityEvent {

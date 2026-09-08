@@ -17,18 +17,18 @@ export class ConversationController {
   }
 
   @Post("customers/:customerId/conversations")
-  create(@Param("customerId") customerId: string, @Body() input: CreateConversationDto) {
-    return this.conversations.create(customerId, input);
+  create(@Param("customerId") customerId: string, @GetUser() user: User, @Body() input: CreateConversationDto) {
+    return this.conversations.create(customerId, user.businessId, input);
   }
 
   @Get("conversations/:conversationId")
-  get(@Param("conversationId") conversationId: string) {
-    return this.conversations.get(conversationId);
+  get(@Param("conversationId") conversationId: string, @GetUser() user: User) {
+    return this.conversations.get(conversationId, user.businessId);
   }
 
   @Post("conversations/:conversationId/messages")
-  addMessage(@Param("conversationId") conversationId: string, @Body() input: CreateMessageDto) {
-    return this.conversations.addMessage(conversationId, input);
+  addMessage(@Param("conversationId") conversationId: string, @GetUser() user: User, @Body() input: CreateMessageDto) {
+    return this.conversations.addMessage(conversationId, user.businessId, input);
   }
 
   @Post("conversations/:conversationId/send")

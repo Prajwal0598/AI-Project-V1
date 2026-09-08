@@ -84,6 +84,7 @@ export interface BusinessStats {
   revenue: string | number;
   revenueThisWeek: string | number;
   revenueLastWeek: string | number;
+  revenueSeries: { thisWeek: number[]; lastWeek: number[] };
 }
 
 export interface Order {

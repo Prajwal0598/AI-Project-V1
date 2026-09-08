@@ -1,6 +1,7 @@
 import type { Job, Queue } from "bullmq";
-import { ActivityEventType, OrderStatus } from "@prisma/client";
+import { ActivityEventType, MessageDirection, OrderStatus } from "@prisma/client";
 import { prisma } from "../prisma";
+import { sendChannelMessage } from "../channel-send";
 import type { OrderProgressJobData } from "../queues";
 
 const TERMINAL = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
@@ -34,6 +35,12 @@ export function makeOrderProgressProcessor(orderProgressQueue: Queue<OrderProgre
       },
     });
 
+    // for UPI orders, the customer was told their order is only confirmed once payment clears — now that the
+    // simulated payment has cleared, tell them so (COD orders were already told "placed" at confirmation time)
+    if (nextStatus === "PAID" && order.paymentMethod === "UPI" && order.conversationId) {
+      await notifyPaymentReceived(order.conversationId, businessId);
+    }
+
     if (nextStatus === "PAID") {
       const delay = parseInt(process.env.ORDER_AUTO_FULFILLED_DELAY_MS ?? "86400000", 10); // default 24h
       await orderProgressQueue.add("advance", { orderId, businessId, nextStatus: "FULFILLED" }, {
@@ -45,4 +52,32 @@ export function makeOrderProgressProcessor(orderProgressQueue: Queue<OrderProgre
 
     return { advanced: nextStatus };
   };
+}
+
+async function notifyPaymentReceived(conversationId: string, businessId: string): Promise<void> {
+  try {
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: conversationId, businessId },
+      include: { identity: true, business: true },
+    });
+    if (!conversation?.identity?.identifier) return;
+
+    const content = "🎉 Payment received! Your order has been confirmed and will be shipped soon.";
+    const providerMessageId = await sendChannelMessage(
+      conversation.channel,
+      conversation.business,
+      conversation.identity.identifier,
+      content,
+      conversation.title
+    );
+
+    await prisma.$transaction(async (tx) => {
+      await tx.message.create({
+        data: { conversationId, direction: MessageDirection.OUTBOUND, content, providerMessageId, sentAt: new Date() },
+      });
+      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
+    });
+  } catch (err) {
+    console.error(`[order-progress] failed to notify conversation ${conversationId} of payment`, err);
+  }
 }

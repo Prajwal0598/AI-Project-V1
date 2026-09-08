@@ -20,8 +20,8 @@ export class ConversationService {
     });
   }
 
-  async create(customerId: string, input: CreateConversationDto) {
-    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+  async create(customerId: string, businessId: string, input: CreateConversationDto) {
+    const customer = await this.prisma.customer.findFirst({ where: { id: customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");
     if (input.identityId) {
       const identity = await this.prisma.identity.findFirst({ where: { id: input.identityId, customerId } });
@@ -32,14 +32,14 @@ export class ConversationService {
     });
   }
 
-  async get(conversationId: string) {
-    const conversation = await this.prisma.conversation.findUnique({ where: { id: conversationId }, include: { customer: true, identity: true, messages: { orderBy: { createdAt: "asc" } } } });
+  async get(conversationId: string, businessId: string) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, include: { customer: true, identity: true, messages: { orderBy: { createdAt: "asc" } } } });
     if (!conversation) throw new NotFoundException("Conversation not found.");
     return conversation;
   }
 
-  async addMessage(conversationId: string, input: CreateMessageDto) {
-    const conversation = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
+  async addMessage(conversationId: string, businessId: string, input: CreateMessageDto) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId } });
     if (!conversation) throw new NotFoundException("Conversation not found.");
     const sentAt = input.sentAt ? new Date(input.sentAt) : new Date();
     return this.prisma.$transaction(async (tx) => {

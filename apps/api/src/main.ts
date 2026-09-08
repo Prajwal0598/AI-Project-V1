@@ -11,7 +11,7 @@ async function bootstrap() {
   for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
     if (existsSync(path)) config({ path, override: false });
   }
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix("api");
   app.use(helmet());
   app.enableCors({

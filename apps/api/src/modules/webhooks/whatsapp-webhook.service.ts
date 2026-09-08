@@ -71,7 +71,8 @@ export class WhatsAppWebhookService {
       await this.queues.scheduleFollowUp(conversation.id, business.id, customer.id);
     }
 
-    // upsert by providerMessageId deduplicate Meta re-deliveries
+    // upsert by providerMessageId to deduplicate Meta re-deliveries, and detect whether this was actually new
+    const existing = await this.prisma.message.findUnique({ where: { providerMessageId: msg.waMessageId } });
     await this.prisma.message.upsert({
       where: { providerMessageId: msg.waMessageId },
       create: {
@@ -83,6 +84,10 @@ export class WhatsAppWebhookService {
       },
       update: {},
     });
+    if (existing) {
+      this.logger.warn(`Ignoring re-delivered WhatsApp message ${msg.waMessageId} — already processed.`);
+      return;
+    }
 
     await this.prisma.conversation.update({
       where: { id: conversation.id },
@@ -97,7 +102,7 @@ export class WhatsAppWebhookService {
 
     // fully autonomous reply — no human approval step
     try {
-      await this.ai.generateAndSendReply(conversation.id);
+      await this.ai.generateAndSendReply(conversation.id, business.id);
     } catch (err) {
       this.logger.error(`Automatic AI reply failed for conversation ${conversation.id}`, err);
     }

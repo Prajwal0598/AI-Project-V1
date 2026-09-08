@@ -51,9 +51,9 @@ export class CustomerService {
     });
   }
 
-  async get(customerId: string) {
-    const customer = await this.prisma.customer.findUnique({
-      where: { id: customerId },
+  async get(customerId: string, businessId: string) {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, businessId },
       include: {
         identities: true,
         leadScore: true,
@@ -65,8 +65,8 @@ export class CustomerService {
     return customer;
   }
 
-  async addIdentity(customerId: string, input: CreateIdentityDto) {
-    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+  async addIdentity(customerId: string, businessId: string, input: CreateIdentityDto) {
+    const customer = await this.prisma.customer.findFirst({ where: { id: customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");
     try {
       return await this.prisma.identity.create({

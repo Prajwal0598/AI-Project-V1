@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post } from "@nestjs/common";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { OrderService } from "./order.service";
@@ -10,12 +10,14 @@ export class OrderController {
   constructor(private readonly orders: OrderService) {}
 
   @Get("businesses/:businessId/orders")
-  findAll(@Param("businessId") businessId: string) {
+  findAll(@Param("businessId") businessId: string, @GetUser() user: User) {
+    if (user.businessId !== businessId) throw new ForbiddenException();
     return this.orders.findAll(businessId);
   }
 
   @Post("businesses/:businessId/orders")
-  create(@Param("businessId") businessId: string, @Body() input: CreateOrderDto) {
+  create(@Param("businessId") businessId: string, @GetUser() user: User, @Body() input: CreateOrderDto) {
+    if (user.businessId !== businessId) throw new ForbiddenException();
     return this.orders.create(businessId, input);
   }
 

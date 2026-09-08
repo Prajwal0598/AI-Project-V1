@@ -1,4 +1,9 @@
-import "dotenv/config";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { config } from "dotenv";
+for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
+  if (existsSync(path)) config({ path, override: false });
+}
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { QUEUES, OrderProgressJobData } from "./queues";
