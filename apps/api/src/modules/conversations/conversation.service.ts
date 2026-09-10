@@ -1,12 +1,23 @@
-import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { Channel, ConversationStatus, MessageDirection } from "@prisma/client";
+import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { Channel, ConversationOutcome, ConversationStatus, MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { decryptSecret } from "../../common/crypto.helper";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateMessageDto } from "./dto/create-message.dto";
 
 @Injectable()
 export class ConversationService {
+  private readonly logger = new Logger(ConversationService.name);
+
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Prefers the merchant's own encrypted credential; falls back to the shared .env token (single-demo-business setup). */
+  private resolveToken(encrypted: string | null, envVar: string): string | undefined {
+    if (encrypted) {
+      try { return decryptSecret(encrypted); } catch (error) { this.logger.error(`Failed to decrypt credential (falling back to .env): ${envVar}`, error instanceof Error ? error.stack : String(error)); }
+    }
+    return process.env[envVar];
+  }
 
   async list(businessId: string) {
     return this.prisma.conversation.findMany({
@@ -50,6 +61,23 @@ export class ConversationService {
     });
   }
 
+  /** Hands an escalated conversation back to the AI agent. */
+  async resume(conversationId: string, businessId: string) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId } });
+    if (!conversation) throw new NotFoundException("Conversation not found.");
+    return this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { escalated: false, escalationReason: null, ...(conversation.outcome === "ESCALATED" ? { outcome: "OPEN" } : {}) },
+    });
+  }
+
+  /** Lets the business owner manually label how a conversation resolved, for CRM reporting. */
+  async setOutcome(conversationId: string, businessId: string, outcome: ConversationOutcome) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId } });
+    if (!conversation) throw new NotFoundException("Conversation not found.");
+    return this.prisma.conversation.update({ where: { id: conversationId }, data: { outcome } });
+  }
+
   async sendMessage(conversationId: string, businessId: string, content: string) {
     const conversation = await this.prisma.conversation.findFirst({
       where: { id: conversationId, businessId },
@@ -78,11 +106,11 @@ export class ConversationService {
     });
   }
 
-  private async sendWhatsApp(business: { whatsappPhoneNumberId: string | null }, to: string, content: string): Promise<string | null> {
+  private async sendWhatsApp(business: { whatsappPhoneNumberId: string | null; whatsappAccessTokenEncrypted: string | null }, to: string, content: string): Promise<string | null> {
     if (!business.whatsappPhoneNumberId) {
       throw new BadRequestException("WhatsApp phone number ID not configured for this business — set it via PATCH /api/businesses/:id.");
     }
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+    const accessToken = this.resolveToken(business.whatsappAccessTokenEncrypted, "WHATSAPP_ACCESS_TOKEN");
     if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
@@ -108,11 +136,11 @@ export class ConversationService {
     return data.messages?.[0]?.id ?? null;
   }
 
-  private async sendInstagram(business: { instagramPageId: string | null }, to: string, content: string): Promise<string | null> {
+  private async sendInstagram(business: { instagramPageId: string | null; instagramAccessTokenEncrypted: string | null }, to: string, content: string): Promise<string | null> {
     if (!business.instagramPageId) {
       throw new BadRequestException("Instagram Page ID not configured for this business — set it via PATCH /api/businesses/:id.");
     }
-    const accessToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
+    const accessToken = this.resolveToken(business.instagramAccessTokenEncrypted, "INSTAGRAM_PAGE_ACCESS_TOKEN");
     if (!accessToken) throw new ServiceUnavailableException("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
@@ -135,11 +163,11 @@ export class ConversationService {
     return data.message_id ?? null;
   }
 
-  private async sendEmail(business: { supportEmail: string | null }, to: string, subject: string | null, content: string): Promise<string | null> {
+  private async sendEmail(business: { supportEmail: string | null; postmarkServerTokenEncrypted: string | null }, to: string, subject: string | null, content: string): Promise<string | null> {
     if (!business.supportEmail) {
       throw new BadRequestException("Support email not configured for this business — set it via PATCH /api/businesses/:id.");
     }
-    const token = process.env.POSTMARK_SERVER_TOKEN;
+    const token = this.resolveToken(business.postmarkServerTokenEncrypted, "POSTMARK_SERVER_TOKEN");
     const from = process.env.EMAIL_FROM;
     if (!token || !from) throw new ServiceUnavailableException("POSTMARK_SERVER_TOKEN or EMAIL_FROM is not configured.");
 

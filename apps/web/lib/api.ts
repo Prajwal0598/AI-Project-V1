@@ -44,6 +44,9 @@ export interface ConversationSummary {
   channel: string;
   status: string;
   lastMessageAt: string | null;
+  escalated: boolean;
+  escalationReason: string | null;
+  outcome: "OPEN" | "SALE" | "SUPPORT" | "ESCALATED" | "LOST" | "ABANDONED";
   customer: { id: string; firstName: string | null; lastName: string | null; phone: string | null };
   identity: { identifier: string; displayName: string | null } | null;
   messages: Message[];
@@ -71,6 +74,10 @@ export interface Business {
   whatsappPhoneNumberId: string | null;
   instagramPageId: string | null;
   supportEmail: string | null;
+  autonomyMaxOrderValue: string | null;
+  whatsappAccessTokenConfigured: boolean;
+  instagramAccessTokenConfigured: boolean;
+  postmarkServerTokenConfigured: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -90,7 +97,8 @@ export interface BusinessStats {
 export interface Order {
   id: string;
   customerId: string;
-  status: "DRAFT" | "PENDING_PAYMENT" | "PAID" | "FULFILLED" | "CANCELLED" | "REFUNDED";
+  status: "DRAFT" | "AWAITING_APPROVAL" | "PENDING_PAYMENT" | "PAID" | "FULFILLED" | "CANCELLED" | "REFUNDED";
+  fulfillmentStatus: "NOT_STARTED" | "PACKED" | "SHIPPED" | "OUT_FOR_DELIVERY" | "DELIVERED" | "FAILED" | "RETURNED";
   subtotal: string;
   shippingFee: string;
   total: string;
@@ -98,6 +106,33 @@ export interface Order {
   paymentMethod: string | null;
   createdAt: string;
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null };
+}
+
+export interface TeamUser {
+  id: string;
+  email: string;
+  name: string | null;
+  role: "OWNER" | "ADMIN" | "MEMBER";
+  createdAt: string;
+}
+
+export interface Me {
+  id: string;
+  email: string;
+  name: string | null;
+  role: "OWNER" | "ADMIN" | "MEMBER";
+  businessId: string;
+}
+
+export interface AiActionLog {
+  id: string;
+  customerId: string | null;
+  conversationId: string | null;
+  orderId: string | null;
+  action: string;
+  reason: string | null;
+  result: string;
+  createdAt: string;
 }
 
 export interface Customer {
@@ -156,14 +191,27 @@ export const api = {
       request<{ accessToken: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     register: (email: string, password: string, name: string, businessName: string) =>
       request<{ accessToken: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password, name, businessName }) }),
+    me: () => request<Me>("/auth/me"),
   },
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">>) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),
+    aiActions: (id: string, limit = 50) => request<AiActionLog[]>(`/businesses/${id}/ai-actions?limit=${limit}`),
+    funnel: (id: string) => request<{ conversations: number; conversationsWithOrder: number; ordersPaid: number; ordersDelivered: number }>(`/businesses/${id}/funnel`),
+    revenueByChannel: (id: string) => request<Record<string, number>>(`/businesses/${id}/revenue-by-channel`),
+    customerMetrics: (id: string) => request<{ payingCustomers: number; repeatPurchaseRate: number; averageOrderValue: number }>(`/businesses/${id}/customer-metrics`),
+    conversationOutcomes: (id: string) => request<Record<string, number>>(`/businesses/${id}/conversation-outcomes`),
+  },
+  users: {
+    list: (businessId: string) => request<TeamUser[]>(`/businesses/${businessId}/users`),
+    create: (businessId: string, data: { email: string; password: string; name: string; role: TeamUser["role"] }) =>
+      request<TeamUser>(`/businesses/${businessId}/users`, { method: "POST", body: JSON.stringify(data) }),
+    updateRole: (userId: string, role: TeamUser["role"]) =>
+      request<TeamUser>(`/users/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }) }),
   },
   conversations: {
     list: (businessId: string) =>
@@ -173,7 +221,11 @@ export const api = {
     send: (id: string, content: string) =>
       request<Message>(`/conversations/${id}/send`, { method: "POST", body: JSON.stringify({ content }) }),
     aiDraft: (id: string) =>
-      request<{ message: Message; orderCreated: { id: string; total: string; currency: string } | null }>(`/conversations/${id}/ai-draft`, { method: "POST" }),
+      request<{ message: Message | null; orderCreated: { id: string; total: string; currency: string } | null }>(`/conversations/${id}/ai-draft`, { method: "POST" }),
+    resume: (id: string) =>
+      request<ConversationDetail>(`/conversations/${id}/resume`, { method: "POST" }),
+    setOutcome: (id: string, outcome: ConversationSummary["outcome"]) =>
+      request<ConversationDetail>(`/conversations/${id}/outcome`, { method: "PATCH", body: JSON.stringify({ outcome }) }),
   },
   customers: {
     list: (businessId: string, search?: string) =>
@@ -189,5 +241,9 @@ export const api = {
     list: (businessId: string) => request<Order[]>(`/businesses/${businessId}/orders`),
     updateStatus: (orderId: string, status: Order["status"]) =>
       request<Order>(`/orders/${orderId}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+    approve: (orderId: string) =>
+      request<Order>(`/orders/${orderId}/approve`, { method: "PATCH" }),
+    updateFulfillment: (orderId: string, fulfillmentStatus: Order["fulfillmentStatus"]) =>
+      request<Order>(`/orders/${orderId}/fulfillment`, { method: "PATCH", body: JSON.stringify({ fulfillmentStatus }) }),
   },
 };

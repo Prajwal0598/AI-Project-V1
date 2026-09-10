@@ -1,10 +1,11 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post } from "@nestjs/common";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { ConversationService } from "./conversation.service";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateMessageDto } from "./dto/create-message.dto";
 import { SendMessageDto } from "./dto/send-message.dto";
+import { UpdateOutcomeDto } from "./dto/update-outcome.dto";
 
 @Controller()
 export class ConversationController {
@@ -34,5 +35,15 @@ export class ConversationController {
   @Post("conversations/:conversationId/send")
   sendMessage(@Param("conversationId") conversationId: string, @GetUser() user: User, @Body() input: SendMessageDto) {
     return this.conversations.sendMessage(conversationId, user.businessId, input.content);
+  }
+
+  @Post("conversations/:conversationId/resume")
+  resume(@Param("conversationId") conversationId: string, @GetUser() user: User) {
+    return this.conversations.resume(conversationId, user.businessId);
+  }
+
+  @Patch("conversations/:conversationId/outcome")
+  setOutcome(@Param("conversationId") conversationId: string, @GetUser() user: User, @Body() input: UpdateOutcomeDto) {
+    return this.conversations.setOutcome(conversationId, user.businessId, input.outcome);
   }
 }

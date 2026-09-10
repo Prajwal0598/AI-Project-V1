@@ -5,9 +5,10 @@ import { PrismaService } from "../../database/prisma.service";
 import { OrderService } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
+import { logAiAction } from "../../common/ai-action-log.helper";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
-const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.PENDING_PAYMENT]);
+const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
 
 // structured-output schema forces the model to always fill these fields rather than
 // deciding whether to invoke a tool — models are far more reliable at schema-fill than tool-choice
@@ -31,9 +32,11 @@ const REPLY_SCHEMA = {
     shippingAddress: { type: ["string", "null"], description: "The customer's shipping address, carried forward once they have given it. Null until then." },
     paymentMethod: { type: ["string", "null"], description: "Either \"UPI\" or \"COD\" once the customer has chosen, carried forward. Null until then." },
     orderConfirmed: { type: "boolean", description: "True only when the customer has given final explicit confirmation (e.g. \"yes\", \"confirm\", \"place the order\") after already being shown the full order summary (items, address, payment method, total)." },
-    cancelOrder: { type: "boolean", description: "True only when the customer explicitly asks to cancel their existing order (e.g. \"cancel my order\", \"I don't want it anymore\"). Never true in the same turn as orderConfirmed." }
+    cancelOrder: { type: "boolean", description: "True only when the customer explicitly asks to cancel their existing order (e.g. \"cancel my order\", \"I don't want it anymore\"). Never true in the same turn as orderConfirmed." },
+    needsHumanReview: { type: "boolean", description: "True when the request is ambiguous, conflicts with earlier information, involves a complaint/legal threat/suspicious payment claim, or anything else you are not confident handling autonomously. Never true in the same turn as orderConfirmed or cancelOrder." },
+    needsHumanReviewReason: { type: ["string", "null"], description: "A short reason for needsHumanReview, or null if false." }
   },
-  required: ["reply", "items", "shippingAddress", "paymentMethod", "orderConfirmed", "cancelOrder"],
+  required: ["reply", "items", "shippingAddress", "paymentMethod", "orderConfirmed", "cancelOrder", "needsHumanReview", "needsHumanReviewReason"],
   additionalProperties: false
 };
 
@@ -52,9 +55,10 @@ function buildOrderKey(items: { productName: string; quantity: number }[], shipp
   return `${itemsKey}|${shippingAddress.trim().toLowerCase()}|${paymentMethod.trim().toLowerCase()}`;
 }
 
-function formatOrderLine(order: { id: string; status: OrderStatus; total: unknown; currency: string; createdAt: Date; items: { name: string; quantity: number }[] }): string {
+function formatOrderLine(order: { id: string; status: OrderStatus; fulfillmentStatus: string; total: unknown; currency: string; createdAt: Date; items: { name: string; quantity: number }[] }): string {
   const itemsText = order.items.length ? order.items.map((i) => `${i.quantity}x ${i.name}`).join(", ") : "(items not recorded)";
-  return `- Order ref ${order.id.slice(-8)}: ${itemsText} — Total ${order.currency} ${order.total} — Status: ${order.status.replace(/_/g, " ")} — placed ${order.createdAt.toISOString().slice(0, 10)}`;
+  const shipping = order.status === "PAID" || order.status === "FULFILLED" ? ` — Shipment: ${order.fulfillmentStatus.replace(/_/g, " ")}` : "";
+  return `- Order ref ${order.id.slice(-8)}: ${itemsText} — Total ${order.currency} ${order.total} — Status: ${order.status.replace(/_/g, " ")}${shipping} — placed ${order.createdAt.toISOString().slice(0, 10)}`;
 }
 
 @Injectable()
@@ -90,6 +94,12 @@ export class AiService {
     });
     if (!conversation) throw new NotFoundException("Conversation not found.");
 
+    // once escalated, the AI stays silent so it can't talk over a human who's now expected to handle this conversation directly
+    if (conversation.escalated) {
+      await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, action: "REPLY_SKIPPED", result: "skipped", reason: "conversation is escalated to a human" });
+      return { message: null, orderCreated: null };
+    }
+
     // exclude never-approved drafts so the model isn't confused by its own unsent past replies
     const sentMessages = [...conversation.messages].reverse().filter((m) => {
       const state = (m.metadata as { state?: string } | null)?.state;
@@ -122,6 +132,7 @@ export class AiService {
 7. ORDER STATUS: if the customer asks about an existing order (status, tracking, "where is my order"), answer using the "Recent orders" data below — never invent a status. Do not set orderConfirmed for a status question.
 8. AMENDING AN ORDER: if the customer wants to add/change items and the "Recent orders" data shows a recent order that is still PENDING PAYMENT, treat this as updating that same order — repeat the SUMMARY/CONFIRMATION steps with the full combined item list (old + new items).
 9. CANCELLATION: if the customer clearly asks to cancel their order, set cancelOrder to true and leave orderConfirmed false. Only do this if the "Recent orders" data shows an order that is still PENDING PAYMENT (not already shipped/cancelled) — otherwise tell them it can no longer be cancelled.
+10. ESCALATION: if the request is ambiguous, conflicts with earlier information, is a complaint or legal threat, involves a suspicious or unverifiable payment claim, or is anything else you are not confident handling on your own, set needsHumanReview to true with a short needsHumanReviewReason, and leave orderConfirmed/cancelOrder false. A team member will take over from here — your reply for this turn should just briefly acknowledge you're looping someone in.
 
 Never invent pricing, stock, policies, discounts, or links — use only the catalogue below. Never include a URL or the word "http" in your reply under any circumstance. Do not request payment-card numbers. Do not mention that you are an AI.
 
@@ -153,8 +164,15 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         const parsed = JSON.parse(raw) as {
           reply: string; items: { productName: string; quantity: number }[];
           shippingAddress: string | null; paymentMethod: string | null; orderConfirmed: boolean; cancelOrder: boolean;
+          needsHumanReview: boolean; needsHumanReviewReason: string | null;
         };
-        this.logger.log(`Structured reply for conversation ${conversationId}: orderConfirmed=${parsed.orderConfirmed} cancelOrder=${parsed.cancelOrder} items=${JSON.stringify(parsed.items)} address=${parsed.shippingAddress ? "set" : "null"} payment=${parsed.paymentMethod}`);
+        this.logger.log(`Structured reply for conversation ${conversationId}: orderConfirmed=${parsed.orderConfirmed} cancelOrder=${parsed.cancelOrder} needsHumanReview=${parsed.needsHumanReview} items=${JSON.stringify(parsed.items)} address=${parsed.shippingAddress ? "set" : "null"} payment=${parsed.paymentMethod}`);
+
+        if (parsed.needsHumanReview) {
+          await this.prisma.conversation.update({ where: { id: conversationId }, data: { escalated: true, escalationReason: parsed.needsHumanReviewReason, outcome: "ESCALATED" } });
+          await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, action: "ESCALATED", result: "paused_for_human", reason: parsed.needsHumanReviewReason ?? undefined });
+          return "Thanks for letting us know — I'm looping in a member of our team who will get back to you shortly.";
+        }
 
         if (parsed.cancelOrder) {
           return await this.handleCancelOrder(conversation, conversationId);
@@ -180,8 +198,13 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         this.logger.log(`create_order result for conversation ${conversationId}: ${JSON.stringify(result)}`);
         if (result.success) {
           orderCreated = { id: result.orderId!, total: result.total!, currency: result.currency! };
-          paymentLink = result.paymentLink ?? null;
           await this.prisma.conversation.update({ where: { id: conversationId }, data: { lastOrderKey: orderKey, activeOrderId: result.orderId } });
+          await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, orderId: result.orderId, action: result.isAmendment ? "ORDER_AMENDED" : "ORDER_CREATED", result: result.status === "AWAITING_APPROVAL" ? "awaiting_approval" : "success" });
+          if (result.status === "AWAITING_APPROVAL") {
+            // held for merchant approval — no payment link yet, and don't let the model claim it's placed/confirmed
+            return `Thanks! Your order total is ${result.currency} ${result.total}, which needs a quick review from our team before we can proceed — we'll confirm shortly.`;
+          }
+          paymentLink = result.paymentLink ?? null;
           return stripHallucinatedLinks(parsed.reply);
         }
         // order creation failed (e.g. no matching product, out of stock) — fall back to a plain clarifying reply instead of a false confirmation
@@ -203,13 +226,14 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     return { message, orderCreated };
   }
 
-  private async handleCancelOrder(conversation: { businessId: string; activeOrderId: string | null }, conversationId: string): Promise<string> {
+  private async handleCancelOrder(conversation: { businessId: string; customerId: string; activeOrderId: string | null }, conversationId: string): Promise<string> {
     if (!conversation.activeOrderId) {
       return "I don't see an active order for you to cancel.";
     }
     try {
       const cancelled = await this.orders.updateStatus(conversation.activeOrderId, conversation.businessId, { status: OrderStatus.CANCELLED });
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { activeOrderId: null } });
+      await logAiAction(this.prisma, { businessId: conversation.businessId, customerId: conversation.customerId, conversationId, orderId: cancelled.id, action: "ORDER_CANCELLED", result: "success" });
       return `Your order (${cancelled.currency} ${cancelled.total}) has been cancelled. Let me know if there's anything else I can help with!`;
     } catch (error) {
       if (error instanceof BadRequestException) return error.message;
@@ -242,7 +266,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     items: { productName: string; quantity: number }[],
     shippingAddress: string,
     paymentMethod: string
-  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[]; paymentLink?: string }> {
+  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[]; paymentLink?: string; status?: string; isAmendment?: boolean }> {
     if (!items?.length) return { success: false, error: "No items specified." };
 
     const { matched, unmatched } = this.matchCatalogueItems(conversation.business.products, items);
@@ -279,8 +303,11 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         total: order.total.toString(),
         currency: order.currency,
         items: matched.map((i) => `${i.quantity}x ${i.name}`),
-        // dummy payment link — simulates a payment gateway checkout page until a real one (e.g. Razorpay) is integrated
-        ...(normalizedPayment === "UPI" ? { paymentLink: `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
+        status: order.status,
+        isAmendment,
+        // dummy payment link — simulates a payment gateway checkout page until a real one (e.g. Razorpay) is integrated;
+        // withheld while the order is awaiting merchant approval
+        ...(normalizedPayment === "UPI" && order.status !== "AWAITING_APPROVAL" ? { paymentLink: `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
         ...(unmatched.length ? { unmatched } : {}),
       };
     } catch (error) {

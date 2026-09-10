@@ -35,6 +35,7 @@ enum MessageDirection {
 
 enum OrderStatus {
   DRAFT
+  AWAITING_APPROVAL
   PENDING_PAYMENT
   PAID
   FULFILLED
@@ -46,6 +47,27 @@ enum UserRole {
   OWNER
   ADMIN
   MEMBER
+}
+
+// tracks shipment progress independently of OrderStatus (payment/lifecycle) once an order is PAID
+enum FulfillmentStatus {
+  NOT_STARTED
+  PACKED
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RETURNED
+}
+
+// how a conversation ultimately resolved — for CRM/revenue reporting
+enum ConversationOutcome {
+  OPEN
+  SALE
+  SUPPORT
+  ESCALATED
+  LOST
+  ABANDONED
 }
 
 enum ActivityEventType {
@@ -66,6 +88,11 @@ model Business {
   whatsappPhoneNumberId String?        @unique
   instagramPageId       String?        @unique
   supportEmail          String?        @unique
+  autonomyMaxOrderValue Decimal?       @db.Decimal(12, 2) // orders above this total require human approval before payment/fulfillment proceeds; null = no cap
+  // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
+  whatsappAccessTokenEncrypted String?
+  instagramAccessTokenEncrypted String?
+  postmarkServerTokenEncrypted   String?
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
   users         User[]
@@ -75,6 +102,7 @@ model Business {
   products      Product[]
   orders        Order[]
   activity      ActivityEvent[]
+  aiActionLogs  AiActionLog[]
 }
 
 model User {
@@ -140,6 +168,9 @@ model Conversation {
   lastMessageAt DateTime?
   lastOrderKey  String?            // fingerprint of the last items+address+payment combo that was actually ordered — blocks re-placing the same order on a repeat/duplicate AI trigger
   activeOrderId String?            // the order this conversation can still amend/cancel (cleared once it's no longer PENDING_PAYMENT)
+  escalated        Boolean         @default(false) // true once the AI has paused itself/been paused for human handoff
+  escalationReason String?
+  outcome          ConversationOutcome @default(OPEN)
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -199,6 +230,7 @@ model Order {
   customerId  String
   conversationId String?  // the conversation this order originated from, so the worker can notify the customer when payment clears
   status      OrderStatus @default(DRAFT)
+  fulfillmentStatus FulfillmentStatus @default(NOT_STARTED)
   subtotal    Decimal     @db.Decimal(12, 2)
   shippingFee Decimal     @default(0) @db.Decimal(12, 2)
   total       Decimal     @db.Decimal(12, 2)
@@ -240,6 +272,23 @@ model ActivityEvent {
   createdAt   DateTime          @default(now())
   business    Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
   customer    Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+}
+
+// records every autonomous decision the AI makes that carries real-world consequence — the audit trail
+// the merchant (and support) can use to see exactly what the AI did, why, and with what outcome
+model AiActionLog {
+  id             String   @id @default(cuid())
+  businessId     String
+  customerId     String?
+  conversationId String?
+  orderId        String?
+  action         String
+  reason         String?
+  result         String
+  createdAt      DateTime @default(now())
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([businessId, createdAt])
 }

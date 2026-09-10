@@ -1,11 +1,10 @@
 // mirrors the send logic in apps/api's ConversationService — duplicated here because the worker is a
 // separate process with its own Prisma client and no access to the API's NestJS DI container.
+import { resolveToken } from "./crypto.helper";
 
 type Channel = "WHATSAPP" | "INSTAGRAM" | "EMAIL" | "FACEBOOK" | "WEB" | "MANUAL";
 
-async function sendWhatsApp(phoneNumberId: string, to: string, content: string): Promise<string | null> {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  if (!accessToken) throw new Error("WHATSAPP_ACCESS_TOKEN is not configured.");
+async function sendWhatsApp(phoneNumberId: string, accessToken: string, to: string, content: string): Promise<string | null> {
   const res = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -16,9 +15,7 @@ async function sendWhatsApp(phoneNumberId: string, to: string, content: string):
   return data.messages?.[0]?.id ?? null;
 }
 
-async function sendInstagram(pageId: string, to: string, content: string): Promise<string | null> {
-  const accessToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
-  if (!accessToken) throw new Error("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
+async function sendInstagram(pageId: string, accessToken: string, to: string, content: string): Promise<string | null> {
   const res = await fetch(`https://graph.facebook.com/v19.0/${pageId}/messages?access_token=${accessToken}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -29,10 +26,9 @@ async function sendInstagram(pageId: string, to: string, content: string): Promi
   return data.message_id ?? null;
 }
 
-async function sendEmail(supportEmail: string, to: string, subject: string | null, content: string): Promise<string | null> {
-  const token = process.env.POSTMARK_SERVER_TOKEN;
+async function sendEmail(supportEmail: string, token: string, to: string, subject: string | null, content: string): Promise<string | null> {
   const from = process.env.EMAIL_FROM;
-  if (!token || !from) throw new Error("POSTMARK_SERVER_TOKEN or EMAIL_FROM is not configured.");
+  if (!from) throw new Error("EMAIL_FROM is not configured.");
   const res = await fetch("https://api.postmarkapp.com/email", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", "X-Postmark-Server-Token": token },
@@ -45,22 +41,28 @@ async function sendEmail(supportEmail: string, to: string, subject: string | nul
 
 export async function sendChannelMessage(
   channel: Channel,
-  business: { whatsappPhoneNumberId: string | null; instagramPageId: string | null; supportEmail: string | null },
+  business: { whatsappPhoneNumberId: string | null; instagramPageId: string | null; supportEmail: string | null; whatsappAccessTokenEncrypted?: string | null; instagramAccessTokenEncrypted?: string | null; postmarkServerTokenEncrypted?: string | null },
   to: string,
   content: string,
   subject: string | null
 ): Promise<string | null> {
   if (channel === "WHATSAPP") {
     if (!business.whatsappPhoneNumberId) throw new Error("WhatsApp phone number ID not configured for this business.");
-    return sendWhatsApp(business.whatsappPhoneNumberId, to, content);
+    const accessToken = resolveToken(business.whatsappAccessTokenEncrypted, "WHATSAPP_ACCESS_TOKEN");
+    if (!accessToken) throw new Error("WHATSAPP_ACCESS_TOKEN is not configured.");
+    return sendWhatsApp(business.whatsappPhoneNumberId, accessToken, to, content);
   }
   if (channel === "INSTAGRAM") {
     if (!business.instagramPageId) throw new Error("Instagram Page ID not configured for this business.");
-    return sendInstagram(business.instagramPageId, to, content);
+    const accessToken = resolveToken(business.instagramAccessTokenEncrypted, "INSTAGRAM_PAGE_ACCESS_TOKEN");
+    if (!accessToken) throw new Error("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
+    return sendInstagram(business.instagramPageId, accessToken, to, content);
   }
   if (channel === "EMAIL") {
     if (!business.supportEmail) throw new Error("Support email not configured for this business.");
-    return sendEmail(business.supportEmail, to, subject, content);
+    const token = resolveToken(business.postmarkServerTokenEncrypted, "POSTMARK_SERVER_TOKEN");
+    if (!token) throw new Error("POSTMARK_SERVER_TOKEN is not configured.");
+    return sendEmail(business.supportEmail, token, to, subject, content);
   }
   throw new Error(`Send is only supported for WhatsApp, Instagram, and Email — got ${channel}.`);
 }

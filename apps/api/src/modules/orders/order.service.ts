@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { ActivityEventType, OrderStatus, Prisma } from "@prisma/client";
+import { ActivityEventType, FulfillmentStatus, OrderStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
@@ -9,7 +9,7 @@ import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
 // an order can still have its items/address changed by the customer up until it's marked paid
-const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.PENDING_PAYMENT]);
+const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
 
 @Injectable()
 export class OrderService {
@@ -38,18 +38,21 @@ export class OrderService {
   async create(businessId: string, input: CreateOrderDto) {
     const customer = await this.prisma.customer.findFirst({ where: { id: input.customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");
+    const business = await this.prisma.business.findUnique({ where: { id: businessId } });
 
     const shippingFee = input.shippingFee ?? 0;
-    // orders created with a payment method already chosen (e.g. via the AI conversational flow) go
-    // straight to PENDING_PAYMENT and start the simulated autonomous payment/shipment progression
-    const initialStatus = input.paymentMethod ? OrderStatus.PENDING_PAYMENT : OrderStatus.DRAFT;
 
     const order = await this.prisma.$transaction(async (tx) => {
       await this.reserveStock(tx, businessId, input.items ?? []);
       const subtotal = input.items?.length ? input.items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0) : input.subtotal;
       const total = subtotal + shippingFee;
+      // orders with a payment method already chosen (e.g. via the AI conversational flow) are ready to proceed
+      // straight to PENDING_PAYMENT and start the simulated autonomous payment/shipment progression — unless the
+      // total exceeds the merchant's autonomy threshold, in which case it waits for a human to approve it first
+      const exceedsAutonomyLimit = business?.autonomyMaxOrderValue != null && total > Number(business.autonomyMaxOrderValue);
+      const initialStatus = !input.paymentMethod ? OrderStatus.DRAFT : exceedsAutonomyLimit ? OrderStatus.AWAITING_APPROVAL : OrderStatus.PENDING_PAYMENT;
 
-      return tx.order.create({
+      const created = await tx.order.create({
         data: {
           businessId,
           customerId: input.customerId,
@@ -67,6 +70,7 @@ export class OrderService {
         },
         include: { items: true },
       });
+      return created;
     });
 
     await this.prisma.activityEvent.create({
@@ -74,9 +78,51 @@ export class OrderService {
     });
     await recalculateLeadScore(this.prisma, input.customerId, businessId);
 
-    if (input.paymentMethod) await this.queues.scheduleOrderProgress(order.id, businessId);
+    // approval-pending orders don't start the payment/fulfillment simulation until a human approves them
+    if (input.paymentMethod && order.status === OrderStatus.PENDING_PAYMENT) await this.queues.scheduleOrderProgress(order.id, businessId);
+    // safety net: auto-cancel and release stock if the order is abandoned in either waiting state
+    if (order.status === OrderStatus.PENDING_PAYMENT || order.status === OrderStatus.AWAITING_APPROVAL) {
+      await this.queues.scheduleOrderExpiry(order.id, businessId, order.status);
+    }
 
     return order;
+  }
+
+  /** Approves an order that exceeded the merchant's autonomy threshold, letting payment/fulfillment proceed. */
+  async approve(orderId: string, businessId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
+    if (!order) throw new NotFoundException("Order not found.");
+    if (order.status !== OrderStatus.AWAITING_APPROVAL) {
+      throw new BadRequestException(`Order is ${order.status.toLowerCase()} and is not awaiting approval.`);
+    }
+    const updated = await this.prisma.order.update({ where: { id: orderId }, data: { status: OrderStatus.PENDING_PAYMENT } });
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order approved by merchant — ${updated.currency} ${updated.total}` },
+    });
+    await this.queues.scheduleOrderProgress(order.id, businessId);
+    await this.queues.scheduleOrderExpiry(order.id, businessId, OrderStatus.PENDING_PAYMENT);
+    return updated;
+  }
+
+  /** Manually advances (or corrects) an order's shipment tracking — only once the order is actually paid. */
+  async updateFulfillmentStatus(orderId: string, businessId: string, status: FulfillmentStatus) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
+    if (!order) throw new NotFoundException("Order not found.");
+    if (order.status !== OrderStatus.PAID && order.status !== OrderStatus.FULFILLED) {
+      throw new BadRequestException("Fulfillment can only be tracked once the order is paid.");
+    }
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        fulfillmentStatus: status,
+        // DELIVERED completes the order lifecycle; FAILED/RETURNED are left for the merchant to resolve manually
+        ...(status === FulfillmentStatus.DELIVERED ? { status: OrderStatus.FULFILLED } : {}),
+      },
+    });
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Fulfillment updated — ${status.replace(/_/g, " ").toLowerCase()}` },
+    });
+    return updated;
   }
 
   /** Replaces an amendable order's items entirely (releasing old stock, reserving new stock) and recomputes totals. */
@@ -87,6 +133,7 @@ export class OrderService {
       throw new BadRequestException(`Order is ${order.status.toLowerCase()} and can no longer be changed.`);
     }
     if (!items.length) throw new BadRequestException("At least one item is required.");
+    const business = await this.prisma.business.findUnique({ where: { id: businessId } });
 
     const updated = await this.prisma.$transaction(async (tx) => {
       await this.releaseStock(tx, order.items);
@@ -94,11 +141,15 @@ export class OrderService {
       await tx.orderItem.deleteMany({ where: { orderId } });
       const subtotal = items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0);
       const total = subtotal + Number(order.shippingFee);
+      // if the amended total now exceeds the autonomy threshold, it needs a fresh human approval even if it was already approved/pending payment
+      const exceedsAutonomyLimit = business?.autonomyMaxOrderValue != null && total > Number(business.autonomyMaxOrderValue);
+      const status = exceedsAutonomyLimit && order.status === OrderStatus.PENDING_PAYMENT ? OrderStatus.AWAITING_APPROVAL : order.status;
       return tx.order.update({
         where: { id: orderId },
         data: {
           subtotal,
           total,
+          status,
           shippingAddress: (shippingAddress ?? order.shippingAddress ?? undefined) as object | undefined,
           items: { create: items.map((i) => ({ productId: i.productId ?? null, name: i.name, quantity: i.quantity, unitPrice: i.unitPrice })) },
         },
@@ -132,6 +183,10 @@ export class OrderService {
     });
     // recalculate lead score since a paid/fulfilled status now contributes to the score
     await recalculateLeadScore(this.prisma, order.customerId, businessId);
+    // label the conversation as a completed sale for CRM/revenue reporting
+    if (order.conversationId && (input.status === OrderStatus.PAID || input.status === OrderStatus.FULFILLED)) {
+      await this.prisma.conversation.update({ where: { id: order.conversationId }, data: { outcome: "SALE" } });
+    }
 
     return updated;
   }

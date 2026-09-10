@@ -6,6 +6,7 @@ import type { Order } from "../../lib/api";
 
 const STATUS_NEXT: Record<Order["status"], Order["status"] | null> = {
   DRAFT: "PENDING_PAYMENT",
+  AWAITING_APPROVAL: null, // requires the dedicated Approve action, not a normal status advance
   PENDING_PAYMENT: "PAID",
   PAID: "FULFILLED",
   FULFILLED: null,
@@ -15,11 +16,22 @@ const STATUS_NEXT: Record<Order["status"], Order["status"] | null> = {
 
 const STATUS_COLOR: Record<Order["status"], string> = {
   DRAFT: "",
+  AWAITING_APPROVAL: "intent hot",
   PENDING_PAYMENT: "source-chip",
   PAID: "intent",
   FULFILLED: "intent hot",
   CANCELLED: "",
   REFUNDED: "",
+};
+
+const FULFILLMENT_NEXT: Record<Order["fulfillmentStatus"], Order["fulfillmentStatus"] | null> = {
+  NOT_STARTED: "PACKED",
+  PACKED: "SHIPPED",
+  SHIPPED: "OUT_FOR_DELIVERY",
+  OUT_FOR_DELIVERY: "DELIVERED",
+  DELIVERED: null,
+  FAILED: null,
+  RETURNED: null,
 };
 
 function custName(c: Order["customer"]) {
@@ -49,10 +61,26 @@ export default function OrdersPage() {
     } catch (err) { console.error(err); }
   }
 
+  async function approve(order: Order) {
+    try {
+      const updated = await api.orders.approve(order.id);
+      setOrders(prev => prev.map(o => o.id === updated.id ? { ...o, status: updated.status } : o));
+    } catch (err) { console.error(err); }
+  }
+
+  async function advanceFulfillment(order: Order) {
+    const next = FULFILLMENT_NEXT[order.fulfillmentStatus];
+    if (!next) return;
+    try {
+      const updated = await api.orders.updateFulfillment(order.id, next);
+      setOrders(prev => prev.map(o => o.id === updated.id ? { ...o, status: updated.status, fulfillmentStatus: updated.fulfillmentStatus } : o));
+    } catch (err) { console.error(err); }
+  }
+
   return <AppShell title="Orders" subtitle="Track and manage every customer order.">
     <div className="data-card lead-table">
       <div className="table-head">
-        <span>Order</span><span>Customer</span><span>Total</span><span>Payment</span><span>Status</span><span>Date</span><span></span>
+        <span>Order</span><span>Customer</span><span>Total</span><span>Payment</span><span>Status</span><span>Shipment</span><span>Date</span><span></span>
       </div>
       {loading && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
       {!loading && orders.length === 0 && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>No orders yet.</p>}
@@ -63,10 +91,21 @@ export default function OrdersPage() {
           <span><strong>{o.currency} {o.total}</strong></span>
           <span className="source-chip">{o.paymentMethod ?? "—"}</span>
           <span className={`stage-chip ${STATUS_COLOR[o.status]}`}>{o.status.replace("_", " ")}</span>
+          <span className="activity-copy">{(o.status === "PAID" || o.status === "FULFILLED") ? o.fulfillmentStatus.replace(/_/g, " ") : "—"}</span>
           <span className="activity-copy">{fmtDate(o.createdAt)}</span>
+          {o.status === "AWAITING_APPROVAL" && (
+            <button className="filter-button" style={{ fontSize: 10 }} onClick={() => approve(o)}>
+              ✓ Approve
+            </button>
+          )}
           {STATUS_NEXT[o.status] && (
             <button className="filter-button" style={{ fontSize: 10 }} onClick={() => advance(o)}>
               → {STATUS_NEXT[o.status]!.replace("_", " ")}
+            </button>
+          )}
+          {(o.status === "PAID" || o.status === "FULFILLED") && FULFILLMENT_NEXT[o.fulfillmentStatus] && (
+            <button className="filter-button" style={{ fontSize: 10 }} onClick={() => advanceFulfillment(o)}>
+              📦 {FULFILLMENT_NEXT[o.fulfillmentStatus]!.replace(/_/g, " ")}
             </button>
           )}
         </div>

@@ -91,13 +91,36 @@ export default function InboxPage() {
     setAiReplying(true); setError("");
     try {
       const result = await api.conversations.aiDraft(selected.id);
-      setSelected(prev => prev ? { ...prev, messages: [...prev.messages, result.message] } : null);
+      if (result.message) {
+        setSelected(prev => prev ? { ...prev, messages: [...prev.messages, result.message!] } : null);
+      } else {
+        // the AI stayed silent (e.g. this conversation was just escalated) — refresh to pick up the new state
+        const refreshed = await api.conversations.get(selected.id);
+        setSelected(refreshed);
+        if (refreshed.escalated) setError("This conversation has been escalated to a human — the AI will stay quiet until you resume it.");
+      }
       if (result.orderCreated) {
         setError(`✓ Order created — ${result.orderCreated.currency} ${result.orderCreated.total} (#${result.orderCreated.id.slice(-8).toUpperCase()})`);
       }
       loadList();
     } catch (err) { setError(err instanceof Error ? err.message : "AI could not generate a reply."); }
     finally { setAiReplying(false); }
+  }
+
+  async function resumeAi() {
+    if (!selected) return;
+    try {
+      const updated = await api.conversations.resume(selected.id);
+      setSelected(prev => prev ? { ...prev, escalated: updated.escalated, escalationReason: updated.escalationReason } : null);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not resume the AI."); }
+  }
+
+  async function changeOutcome(outcome: ConversationSummary["outcome"]) {
+    if (!selected) return;
+    try {
+      const updated = await api.conversations.setOutcome(selected.id, outcome);
+      setSelected(prev => prev ? { ...prev, outcome: updated.outcome } : null);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not update the outcome label."); }
   }
 
   const visibleMessages = (selected?.messages ?? []).filter(
@@ -130,8 +153,22 @@ export default function InboxPage() {
                 <b>{customerName(selected.customer)}</b>
                 <small><i /> {selected.channel}</small>
               </div>
+              <select value={selected.outcome} onChange={e => changeOutcome(e.target.value as ConversationSummary["outcome"])} className="filter-button" style={{ fontSize: 11 }}>
+                <option value="OPEN">Open</option>
+                <option value="SALE">Sale</option>
+                <option value="SUPPORT">Support</option>
+                <option value="ESCALATED">Escalated</option>
+                <option value="LOST">Lost</option>
+                <option value="ABANDONED">Abandoned</option>
+              </select>
               <button className="filter-button">Customer profile</button>
             </header>
+            {selected.escalated && (
+              <div style={{ background: "#fff8e8", border: "1px solid #f3dfa8", color: "#8a6a1f", fontSize: 12, padding: "8px 14px", margin: "0 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>⚠ Escalated to a human{selected.escalationReason ? ` — ${selected.escalationReason}` : ""}. The AI won't reply until you resume it.</span>
+                <button onClick={resumeAi} style={{ textDecoration: "underline", fontWeight: 600 }}>Resume AI</button>
+              </div>
+            )}
             {error && <div style={{ background: error.startsWith("✓") ? "#eefaf3" : "#fff3f2", border: `1px solid ${error.startsWith("✓") ? "#bfe8d3" : "#fcd9d6"}`, color: error.startsWith("✓") ? "#237a52" : "#b94940", fontSize: 12, padding: "8px 14px", margin: "0 16px" }}>{error} <button onClick={() => setError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
             <div className="message-stream" ref={streamRef}>
               {visibleMessages.map((m: Message) => (
@@ -142,8 +179,8 @@ export default function InboxPage() {
               ))}
             </div>
             <footer>
-              <button className="ai-draft-button" onClick={generateAiReply} disabled={aiReplying}>
-                {aiReplying ? "AI replying…" : "Generate AI reply"}
+              <button className="ai-draft-button" onClick={generateAiReply} disabled={aiReplying || selected.escalated}>
+                {aiReplying ? "AI replying…" : selected.escalated ? "AI paused (escalated)" : "Generate AI reply"}
               </button>
               <input placeholder="Reply to customer…" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} />
               <button className="send-button" onClick={send} disabled={sending || !input.trim()}>Send</button>
