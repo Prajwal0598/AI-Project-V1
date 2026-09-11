@@ -65,7 +65,7 @@ export class OrderService {
           paymentMethod: input.paymentMethod?.trim() || null,
           status: initialStatus,
           items: input.items?.length
-            ? { create: input.items.map((i) => ({ productId: i.productId ?? null, name: i.name, quantity: i.quantity, unitPrice: i.unitPrice })) }
+            ? { create: input.items.map((i) => ({ productId: i.productId ?? null, variantId: i.variantId ?? null, name: i.name, quantity: i.quantity, unitPrice: i.unitPrice })) }
             : undefined,
         },
         include: { items: true },
@@ -151,7 +151,7 @@ export class OrderService {
           total,
           status,
           shippingAddress: (shippingAddress ?? order.shippingAddress ?? undefined) as object | undefined,
-          items: { create: items.map((i) => ({ productId: i.productId ?? null, name: i.name, quantity: i.quantity, unitPrice: i.unitPrice })) },
+          items: { create: items.map((i) => ({ productId: i.productId ?? null, variantId: i.variantId ?? null, name: i.name, quantity: i.quantity, unitPrice: i.unitPrice })) },
         },
         include: { items: true },
       });
@@ -191,33 +191,33 @@ export class OrderService {
     return updated;
   }
 
-  /** Validates stock for items linked to a real product and decrements it — throws if any item is out of stock. */
+  /** Validates stock for items linked to a real variant and decrements it — throws if any item is out of stock. */
   private async reserveStock(tx: Prisma.TransactionClient, businessId: string, items: OrderItemInputDto[]) {
     for (const item of items) {
-      if (!item.productId) continue; // free-text items with no catalogue link have no stock to track
-      const product = await tx.product.findFirst({ where: { id: item.productId, businessId } });
-      if (!product) throw new BadRequestException(`Product not found: ${item.name}`);
-      if (product.inventory === null) continue; // untracked stock
+      if (!item.variantId) continue; // free-text items with no catalogue link have no stock to track
+      const variant = await tx.variant.findFirst({ where: { id: item.variantId, businessId } });
+      if (!variant) throw new BadRequestException(`Product not found: ${item.name}`);
+      if (variant.inventory === null) continue; // untracked stock
 
       // conditional update: only decrements if stock is still sufficient at the moment the row is written,
       // so two concurrent orders for the last unit can't both pass a stale read and oversell
-      const result = await tx.product.updateMany({
-        where: { id: product.id, inventory: { gte: item.quantity } },
+      const result = await tx.variant.updateMany({
+        where: { id: variant.id, inventory: { gte: item.quantity } },
         data: { inventory: { decrement: item.quantity } },
       });
       if (result.count === 0) {
-        throw new BadRequestException(`Not enough stock for "${product.name}" — only ${product.inventory} left.`);
+        throw new BadRequestException(`Not enough stock for "${item.name}" — only ${variant.inventory} left.`);
       }
     }
   }
 
   /** Restores stock for an order's items — used on cancellation/refund and before replacing an order's items. */
-  private async releaseStock(tx: Prisma.TransactionClient, items: { productId: string | null; quantity: number }[]) {
+  private async releaseStock(tx: Prisma.TransactionClient, items: { variantId: string | null; quantity: number }[]) {
     for (const item of items) {
-      if (!item.productId) continue;
-      const product = await tx.product.findUnique({ where: { id: item.productId } });
-      if (product?.inventory !== null && product !== null) {
-        await tx.product.update({ where: { id: product.id }, data: { inventory: { increment: item.quantity } } });
+      if (!item.variantId) continue;
+      const variant = await tx.variant.findUnique({ where: { id: item.variantId } });
+      if (variant?.inventory !== null && variant !== null) {
+        await tx.variant.update({ where: { id: variant.id }, data: { inventory: { increment: item.quantity } } });
       }
     }
   }

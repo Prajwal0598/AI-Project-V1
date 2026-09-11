@@ -13,7 +13,7 @@ export async function processFollowUp(job: Job<FollowUpJobData>) {
     where: { id: conversationId, businessId },
     include: {
       customer: true,
-      business: { include: { products: { where: { active: true }, take: 20, orderBy: { updatedAt: "desc" } } } },
+      business: { include: { products: { where: { active: true }, take: 20, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } },
       messages: { orderBy: { sentAt: "asc" }, take: 20 },
     },
   });
@@ -33,7 +33,7 @@ export async function processFollowUp(job: Job<FollowUpJobData>) {
   const customerName = [conversation.customer.firstName, conversation.customer.lastName].filter(Boolean).join(" ") || "the customer";
   const lastInbound = [...conversation.messages].reverse().find(m => m.direction === MessageDirection.INBOUND);
   const catalog = conversation.business.products.length
-    ? conversation.business.products.map(p => `${p.name} — ${p.currency} ${p.price}`).join("\n")
+    ? conversation.business.products.filter(p => p.variants[0]).map(p => `${p.name} — ${p.variants[0].currency} ${p.variants[0].price}`).join("\n")
     : "No product catalogue connected.";
 
   const instructions = `You are the AI sales copilot for ${conversation.business.name}. The customer has not received a reply yet. Write one short, warm follow-up message. Acknowledge their enquiry, reference what they asked if known, and offer to help. Do not mention you are an AI. Keep it under 2 sentences.`;

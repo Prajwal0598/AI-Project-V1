@@ -12,13 +12,14 @@ import { JwtAuthGuard } from "./modules/auth/jwt-auth.guard";
 import { ProductModule } from "./modules/products/product.module";
 import { OrderModule } from "./modules/orders/order.module";
 import { UserModule } from "./modules/users/user.module";
+import { ImportModule } from "./modules/imports/import.module";
 import { WebhooksModule } from "./modules/webhooks/webhooks.module";
 import { QueueModule } from "./queue/queue.module";
 
 @Module({
   imports: [
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]), // default: 100 req/min per IP across the API
-    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, WebhooksModule, QueueModule,
+    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, ImportModule, WebhooksModule, QueueModule,
   ],
   controllers: [HealthController],
   providers: [

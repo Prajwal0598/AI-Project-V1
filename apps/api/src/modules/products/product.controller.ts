@@ -1,9 +1,14 @@
-import { Body, Controller, ForbiddenException, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, NotFoundException, Param, Patch, Post, Res, UploadedFile, UseInterceptors } from "@nestjs/common";
+import type { Response } from "express";
+import { FileInterceptor } from "@nestjs/platform-express";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
+import { Public } from "../auth/public.decorator";
 import { ProductService } from "./product.service";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
+import { UpdateVariantDto } from "./dto/update-variant.dto";
+import { buildProductImageUrl, productImageUploadOptions, resolveProductImagePath } from "./image-storage";
 
 @Controller()
 export class ProductController {
@@ -24,5 +29,25 @@ export class ProductController {
   @Patch("products/:productId")
   update(@Param("productId") productId: string, @GetUser() user: User, @Body() input: UpdateProductDto) {
     return this.products.update(productId, user.businessId, input);
+  }
+
+  @Patch("variants/:variantId")
+  updateVariant(@Param("variantId") variantId: string, @GetUser() user: User, @Body() input: UpdateVariantDto) {
+    return this.products.updateVariant(variantId, user.businessId, input);
+  }
+
+  @Post("products/:productId/image")
+  @UseInterceptors(FileInterceptor("image", productImageUploadOptions))
+  async uploadImage(@Param("productId") productId: string, @GetUser() user: User, @UploadedFile() file: Express.Multer.File) {
+    const imageUrl = buildProductImageUrl(file.filename);
+    return this.products.setImage(productId, user.businessId, imageUrl);
+  }
+
+  @Public()
+  @Get("uploads/products/:filename")
+  serveImage(@Param("filename") filename: string, @Res() res: Response) {
+    let filePath: string;
+    try { filePath = resolveProductImagePath(filename); } catch { throw new NotFoundException(); }
+    res.sendFile(filePath, (err) => { if (err) res.status(404).end(); });
   }
 }

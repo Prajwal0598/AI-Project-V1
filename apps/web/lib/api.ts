@@ -1,6 +1,14 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
 const TOKEN_KEY = "relay_token";
 
+// product images are stored as a relative path (e.g. "/api/uploads/products/x.jpg") so this dashboard can
+// always reach them via the local API origin, independent of whatever public URL WhatsApp needs to fetch them from
+export function resolveImageUrl(imageUrl: string | null): string | null {
+  if (!imageUrl) return null;
+  if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
+  return `${API_URL.replace(/\/api$/, "")}${imageUrl}`;
+}
+
 // ─── Token helpers ────────────────────────────────────────────────────────────
 
 export function getToken(): string | null {
@@ -149,14 +157,52 @@ export interface Customer {
   updatedAt: string;
 }
 
-export interface Product {
+export interface Variant {
   id: string;
-  name: string;
-  description: string | null;
+  productId: string;
+  sku: string | null;
   price: string;
   currency: string;
   inventory: number | null;
   active: boolean;
+}
+
+export interface Product {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  brand: string | null;
+  imageUrl: string | null;
+  active: boolean;
+  source: "MANUAL" | "IMPORT";
+  variants: Variant[];
+}
+
+export interface ImportJob {
+  id: string;
+  businessId: string;
+  filename: string;
+  sourceType: "CSV" | "XLSX";
+  status: "PENDING" | "READY_FOR_REVIEW" | "COMMITTING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  rowsDetected: number;
+  rowsReady: number;
+  rowsWarning: number;
+  rowsError: number;
+  createdAt: string;
+}
+
+export interface ImportRow {
+  id: string;
+  importJobId: string;
+  rowNumber: number;
+  rawData: Record<string, unknown>;
+  normalizedData: Record<string, unknown> | null;
+  status: "READY" | "WARNING" | "ERROR";
+  validationErrors: string[] | null;
+  matchedProductId: string | null;
+  action: "CREATE" | "UPDATE" | "SKIP" | null;
+  committedProductId: string | null;
 }
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
@@ -170,6 +216,26 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init.headers as Record<string, string> | undefined),
     },
+  });
+  if (res.status === 401) {
+    clearToken();
+    window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string };
+    throw new Error(body.message ?? `API error ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+// like `request`, but for multipart file uploads — the browser sets its own Content-Type/boundary for FormData
+async function upload<T>(path: string, formData: FormData): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    body: formData,
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   });
   if (res.status === 401) {
     clearToken();
@@ -234,8 +300,31 @@ export const api = {
   products: {
     list: (businessId: string) =>
       request<Product[]>(`/businesses/${businessId}/products`),
-    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number }) =>
+    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number; sku?: string; category?: string; brand?: string }) =>
       request<Product>(`/businesses/${businessId}/products`, { method: "POST", body: JSON.stringify(data) }),
+    update: (productId: string, data: Partial<{ name: string; description: string; category: string; brand: string; active: boolean }>) =>
+      request<Product>(`/products/${productId}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateVariant: (variantId: string, data: Partial<{ sku: string; price: number; currency: string; inventory: number; active: boolean }>) =>
+      request<Variant>(`/variants/${variantId}`, { method: "PATCH", body: JSON.stringify(data) }),
+    uploadImage: (productId: string, file: File) => {
+      const formData = new FormData();
+      formData.append("image", file);
+      return upload<Product>(`/products/${productId}/image`, formData);
+    },
+  },
+  imports: {
+    list: (businessId: string) => request<ImportJob[]>(`/businesses/${businessId}/imports`),
+    create: (businessId: string, file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return upload<ImportJob>(`/businesses/${businessId}/imports`, formData);
+    },
+    get: (id: string) => request<ImportJob>(`/imports/${id}`),
+    rows: (id: string) => request<ImportRow[]>(`/imports/${id}/rows`),
+    updateRow: (jobId: string, rowId: string, data: { normalizedData?: Record<string, unknown>; action?: ImportRow["action"] }) =>
+      request<ImportRow>(`/imports/${jobId}/rows/${rowId}`, { method: "PATCH", body: JSON.stringify(data) }),
+    commit: (id: string) => request<{ created: number; updated: number; skipped: number }>(`/imports/${id}/commit`, { method: "POST" }),
+    cancel: (id: string) => request<ImportJob>(`/imports/${id}/cancel`, { method: "POST" }),
   },
   orders: {
     list: (businessId: string) => request<Order[]>(`/businesses/${businessId}/orders`),

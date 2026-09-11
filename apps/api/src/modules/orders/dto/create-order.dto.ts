@@ -6,6 +6,10 @@ export class OrderItemInputDto {
   @IsString()
   productId?: string;
 
+  @IsOptional()
+  @IsString()
+  variantId?: string;
+
   @IsString()
   @IsNotEmpty()
   name!: string;

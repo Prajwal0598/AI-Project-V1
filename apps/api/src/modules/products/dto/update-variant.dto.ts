@@ -1,23 +1,7 @@
-import { IsBoolean, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min } from "class-validator";
+import { IsBoolean, IsNumber, IsOptional, IsPositive, IsString, Min } from "class-validator";
 import { Type } from "class-transformer";
 
-export class UpdateProductDto {
-  @IsOptional()
-  @IsString()
-  name?: string;
-
-  @IsOptional()
-  @IsString()
-  description?: string;
-
-  @IsOptional()
-  @IsString()
-  category?: string;
-
-  @IsOptional()
-  @IsString()
-  brand?: string;
-
+export class UpdateVariantDto {
   @IsOptional()
   @IsString()
   sku?: string;
@@ -33,10 +17,16 @@ export class UpdateProductDto {
   currency?: string;
 
   @IsOptional()
-  @IsInt()
+  @IsNumber({ maxDecimalPlaces: 0 })
   @Min(0)
   @Type(() => Number)
   inventory?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  compareAtPrice?: number;
 
   @IsOptional()
   @IsBoolean()

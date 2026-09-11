@@ -7,6 +7,7 @@ coverage/
 .env
 .env.local
 *.log
+apps/api/uploads/
 
 .cdk
 package-lock.json

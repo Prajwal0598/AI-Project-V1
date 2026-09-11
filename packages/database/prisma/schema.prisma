@@ -60,6 +60,26 @@ enum FulfillmentStatus {
   RETURNED
 }
 
+enum ProductSource {
+  MANUAL
+  IMPORT
+}
+
+enum ImportStatus {
+  PENDING
+  READY_FOR_REVIEW
+  COMMITTING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ImportRowStatus {
+  READY
+  WARNING
+  ERROR
+}
+
 // how a conversation ultimately resolved — for CRM/revenue reporting
 enum ConversationOutcome {
   OPEN
@@ -100,6 +120,8 @@ model Business {
   identities    Identity[]
   conversations Conversation[]
   products      Product[]
+  variants      Variant[]
+  importJobs    ImportJob[]
   orders        Order[]
   activity      ActivityEvent[]
   aiActionLogs  AiActionLog[]
@@ -208,20 +230,90 @@ model LeadScore {
 }
 
 model Product {
-  id          String   @id @default(cuid())
+  id          String        @id @default(cuid())
   businessId  String
   name        String
   description String?
-  price       Decimal  @db.Decimal(12, 2)
-  currency    String   @default("INR")
-  inventory   Int?
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category    String?
+  brand       String?
+  imageUrl    String?
+  active      Boolean       @default(true)
+  source      ProductSource @default(MANUAL)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  business    Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  variants    Variant[]
   orderItems  OrderItem[]
 
   @@index([businessId, active])
+}
+
+// a sellable unit — every Product has at least one (the "default" variant for products without size/color options)
+model Variant {
+  id             String   @id @default(cuid())
+  businessId     String
+  productId      String
+  sku            String?
+  barcode        String?
+  attributes     Json?    // e.g. { "size": "M", "color": "Red" } — null for single-variant products
+  price          Decimal  @db.Decimal(12, 2)
+  currency       String   @default("INR")
+  compareAtPrice Decimal? @db.Decimal(12, 2)
+  costPrice      Decimal? @db.Decimal(12, 2)
+  inventory      Int?
+  weight         Decimal? @db.Decimal(10, 3) // kg — captured now for future courier integration
+  length         Decimal? @db.Decimal(10, 2) // cm
+  width          Decimal? @db.Decimal(10, 2)
+  height         Decimal? @db.Decimal(10, 2)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  orderItems     OrderItem[]
+
+  @@index([businessId, active])
+  @@index([productId])
+  @@unique([businessId, sku])
+}
+
+// one uploaded catalogue file being parsed/validated/committed into products+variants
+model ImportJob {
+  id            String       @id @default(cuid())
+  businessId    String
+  filename      String
+  sourceType    String       // "CSV" | "XLSX"
+  status        ImportStatus @default(PENDING)
+  rowsDetected  Int          @default(0)
+  rowsReady     Int          @default(0)
+  rowsWarning   Int          @default(0)
+  rowsError     Int          @default(0)
+  columnMapping Json?        // detected source-header -> canonical-field mapping, shown/confirmed on the review screen
+  createdById   String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  business      Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  rows          ImportRow[]
+
+  @@index([businessId, createdAt])
+}
+
+// one source row (e.g. one CSV line) within an ImportJob, tracked from raw data through to commit
+model ImportRow {
+  id               String          @id @default(cuid())
+  importJobId      String
+  rowNumber        Int
+  rawData          Json            // original source fields, verbatim
+  normalizedData   Json?           // mapped onto the canonical product schema
+  status           ImportRowStatus @default(READY)
+  validationErrors Json?           // string[]
+  matchedProductId String?         // set when an existing SKU match was found
+  action           String?         // "CREATE" | "UPDATE" | "SKIP" — merchant's resolution for this row, defaults based on validation
+  committedProductId String?       // set once this row has been committed to a real Product
+  createdAt        DateTime        @default(now())
+  importJob        ImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([importJobId, status])
 }
 
 model Order {
@@ -252,12 +344,14 @@ model OrderItem {
   id        String   @id @default(cuid())
   orderId   String
   productId String?
+  variantId String?
   name      String
   quantity  Int
   unitPrice Decimal  @db.Decimal(12, 2)
   createdAt DateTime @default(now())
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variant   Variant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([orderId])
 }

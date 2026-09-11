@@ -13,7 +13,9 @@ async function bootstrap() {
   }
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix("api");
-  app.use(helmet());
+  // default "same-origin" CORP blocks the browser (not curl) from loading uploaded product images
+  // from the API's origin (:4000) when embedded in the web app (:3000) via <img>
+  app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
   app.enableCors({
     origin: process.env.WEB_ORIGIN?.split(",") ?? "http://localhost:3000",
     credentials: true

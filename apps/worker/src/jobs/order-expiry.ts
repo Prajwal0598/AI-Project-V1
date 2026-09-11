@@ -14,10 +14,10 @@ export async function processOrderExpiry(job: Job<OrderExpiryJobData>) {
 
   await prisma.$transaction(async (tx) => {
     for (const item of order.items) {
-      if (!item.productId) continue;
-      const product = await tx.product.findUnique({ where: { id: item.productId } });
-      if (product?.inventory !== null && product !== null) {
-        await tx.product.update({ where: { id: product.id }, data: { inventory: { increment: item.quantity } } });
+      if (!item.variantId) continue;
+      const variant = await tx.variant.findUnique({ where: { id: item.variantId } });
+      if (variant?.inventory !== null && variant !== null) {
+        await tx.variant.update({ where: { id: variant.id }, data: { inventory: { increment: item.quantity } } });
       }
     }
     await tx.order.update({ where: { id: orderId }, data: { status: OrderStatus.CANCELLED } });

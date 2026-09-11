@@ -6,6 +6,7 @@ import { OrderService } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
+import { toPublicImageUrl } from "../products/image-storage";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -34,9 +35,14 @@ const REPLY_SCHEMA = {
     orderConfirmed: { type: "boolean", description: "True only when the customer has given final explicit confirmation (e.g. \"yes\", \"confirm\", \"place the order\") after already being shown the full order summary (items, address, payment method, total)." },
     cancelOrder: { type: "boolean", description: "True only when the customer explicitly asks to cancel their existing order (e.g. \"cancel my order\", \"I don't want it anymore\"). Never true in the same turn as orderConfirmed." },
     needsHumanReview: { type: "boolean", description: "True when the request is ambiguous, conflicts with earlier information, involves a complaint/legal threat/suspicious payment claim, or anything else you are not confident handling autonomously. Never true in the same turn as orderConfirmed or cancelOrder." },
-    needsHumanReviewReason: { type: ["string", "null"], description: "A short reason for needsHumanReview, or null if false." }
+    needsHumanReviewReason: { type: ["string", "null"], description: "A short reason for needsHumanReview, or null if false." },
+    showProductImages: {
+      type: "array",
+      description: "Exact catalogue product names (from the list below) to present to the customer this turn, each sent automatically as its own message (photo+name+price, or name+price as text if no photo) right after your reply. Use this to share the full catalogue (list every product name here) or to answer 'show me X' for specific products. Do not repeat these names/prices in your own reply text. Empty if nothing should be shown this turn.",
+      items: { type: "string" }
+    }
   },
-  required: ["reply", "items", "shippingAddress", "paymentMethod", "orderConfirmed", "cancelOrder", "needsHumanReview", "needsHumanReviewReason"],
+  required: ["reply", "items", "shippingAddress", "paymentMethod", "orderConfirmed", "cancelOrder", "needsHumanReview", "needsHumanReviewReason", "showProductImages"],
   additionalProperties: false
 };
 
@@ -88,7 +94,7 @@ export class AiService {
       where: { id: conversationId, businessId },
       include: {
         customer: true,
-        business: { include: { products: { where: { active: true }, take: 30, orderBy: { updatedAt: "desc" } } } }, // cap keeps AI prompt within safe token limits
+        business: { include: { products: { where: { active: true }, take: 30, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } }, // cap keeps AI prompt within safe token limits
         messages: { orderBy: { sentAt: "desc" }, take: 20 } // most recent 20; reversed below into chronological order
       }
     });
@@ -110,7 +116,12 @@ export class AiService {
       return `${speaker}: ${message.content}`;
     }).join("\n");
     const catalog = conversation.business.products.length
-      ? conversation.business.products.map((product) => `${product.name} — ${product.currency} ${product.price}${product.inventory === null ? "" : ` (stock: ${product.inventory})`}`).join("\n")
+      ? conversation.business.products
+          .filter((product) => product.variants[0])
+          .map((product) => {
+            const variant = product.variants[0];
+            return `${product.name} — ${variant.currency} ${variant.price}${variant.inventory === null ? "" : ` (stock: ${variant.inventory})`}`;
+          }).join("\n")
       : "No product catalogue is connected.";
 
     // grounds status/cancellation questions in real data instead of letting the model guess — it has no tool-calling access to this
@@ -121,7 +132,7 @@ export class AiService {
 
     const instructions = `You are the autonomous sales copilot for ${conversation.business.name}. Follow this order-taking flow strictly, one step per turn — never skip or combine steps:
 
-1. GREETING: if the customer just said hi/hey or the conversation is just starting, greet them warmly and share the product catalogue below.
+1. GREETING: if the customer just said hi/hey or the conversation is just starting, greet them warmly in one short sentence, then list every product name from the catalogue below in "showProductImages" so each is sent to the customer as its own card right after your reply. Do not list product names or prices in your own reply text.
 2. ITEMS: once you know which products and quantities they want (from anywhere in the conversation), carry those forward in "items" every turn from now on.
 3. ADDRESS: if items are known but no shipping address has been given yet, ask for their shipping address. Do not ask again once given — carry it forward in "shippingAddress".
 4. PAYMENT METHOD: if items and address are known but no payment method chosen, ask "Would you like to pay via UPI or Pay on Delivery (COD)?". Carry the chosen method forward in "paymentMethod" exactly as "UPI" or "COD".
@@ -133,6 +144,7 @@ export class AiService {
 8. AMENDING AN ORDER: if the customer wants to add/change items and the "Recent orders" data shows a recent order that is still PENDING PAYMENT, treat this as updating that same order — repeat the SUMMARY/CONFIRMATION steps with the full combined item list (old + new items).
 9. CANCELLATION: if the customer clearly asks to cancel their order, set cancelOrder to true and leave orderConfirmed false. Only do this if the "Recent orders" data shows an order that is still PENDING PAYMENT (not already shipped/cancelled) — otherwise tell them it can no longer be cancelled.
 10. ESCALATION: if the request is ambiguous, conflicts with earlier information, is a complaint or legal threat, involves a suspicious or unverifiable payment claim, or is anything else you are not confident handling on your own, set needsHumanReview to true with a short needsHumanReviewReason, and leave orderConfirmed/cancelOrder false. A team member will take over from here — your reply for this turn should just briefly acknowledge you're looping someone in.
+11. PRODUCT CARDS: whenever you want to present one or more products to the customer — sharing the full catalogue (step 1) or answering "show me X"/"what do you have in Y" — list the exact catalogue name(s) in "showProductImages". Each is sent automatically as its own message (photo+name+price, or name+price as text if no photo) right after your reply, so never repeat those names or prices yourself in the "reply" text. Never list a product that isn't in the catalogue below.
 
 Never invent pricing, stock, policies, discounts, or links — use only the catalogue below. Never include a URL or the word "http" in your reply under any circumstance. Do not request payment-card numbers. Do not mention that you are an AI.
 
@@ -149,6 +161,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
 
     let orderCreated: { id: string; total: string; currency: string } | null = null;
     let paymentLink: string | null = null;
+    let imagesToSend: string[] = [];
 
     const content = await (async () => {
       try {
@@ -164,8 +177,9 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         const parsed = JSON.parse(raw) as {
           reply: string; items: { productName: string; quantity: number }[];
           shippingAddress: string | null; paymentMethod: string | null; orderConfirmed: boolean; cancelOrder: boolean;
-          needsHumanReview: boolean; needsHumanReviewReason: string | null;
+          needsHumanReview: boolean; needsHumanReviewReason: string | null; showProductImages: string[];
         };
+        imagesToSend = parsed.showProductImages ?? [];
         this.logger.log(`Structured reply for conversation ${conversationId}: orderConfirmed=${parsed.orderConfirmed} cancelOrder=${parsed.cancelOrder} needsHumanReview=${parsed.needsHumanReview} items=${JSON.stringify(parsed.items)} address=${parsed.shippingAddress ? "set" : "null"} payment=${parsed.paymentMethod}`);
 
         if (parsed.needsHumanReview) {
@@ -223,6 +237,30 @@ ${transcript || "No previous messages. Greet the customer and share the product 
       await this.conversations.sendMessage(conversationId, conversation.businessId, `Complete your UPI payment here: ${paymentLink}\n\nYour order will be confirmed as soon as we receive your payment.`);
     }
 
+    // present each flagged catalogue product as its own message — photo+name+price when a photo is on file,
+    // otherwise name+price as plain text — instead of one big text block; capped to avoid spamming
+    if (imagesToSend.length) {
+      const normalize = (s: string) => s.trim().toLowerCase();
+      const catalogueProducts = conversation.business.products.filter((p) => p.variants[0]);
+      const toSend = imagesToSend
+        .map((name) => catalogueProducts.find((p) => normalize(p.name) === normalize(name)))
+        .filter((p): p is typeof catalogueProducts[number] => !!p)
+        .slice(0, 20);
+      for (const product of toSend) {
+        const variant = product.variants[0];
+        const caption = `${product.name}\n${variant.currency} ${variant.price}`;
+        try {
+          if (product.imageUrl) {
+            await this.conversations.sendImage(conversationId, conversation.businessId, toPublicImageUrl(product.imageUrl), caption);
+          } else {
+            await this.conversations.sendMessage(conversationId, conversation.businessId, caption);
+          }
+        } catch (error) {
+          this.logger.error(`Failed to send product card for "${product.name}"`, error instanceof Error ? error.stack : String(error));
+        }
+      }
+    }
+
     return { message, orderCreated };
   }
 
@@ -244,24 +282,25 @@ ${transcript || "No previous messages. Greet the customer and share the product 
 
   /** Matches free-text item names against the business's catalogue, tolerating simple plural/singular differences. */
   private matchCatalogueItems(
-    catalogue: { id: string; name: string; price: unknown; currency: string }[],
+    catalogue: { id: string; name: string; variants: { id: string; price: unknown; currency: string }[] }[],
     items: { productName: string; quantity: number }[]
-  ): { matched: { productId: string; name: string; price: number; currency: string; quantity: number }[]; unmatched: string[] } {
+  ): { matched: { productId: string; variantId: string; name: string; price: number; currency: string; quantity: number }[]; unmatched: string[] } {
     const normalize = (s: string) => s.trim().toLowerCase().replace(/s$/, "");
-    const matched: { productId: string; name: string; price: number; currency: string; quantity: number }[] = [];
+    const matched: { productId: string; variantId: string; name: string; price: number; currency: string; quantity: number }[] = [];
     const unmatched: string[] = [];
     for (const item of items) {
       const target = normalize(item.productName);
       const product = catalogue.find((p) => normalize(p.name) === target)
         ?? catalogue.find((p) => normalize(p.name).includes(target) || target.includes(normalize(p.name)));
-      if (product) matched.push({ productId: product.id, name: product.name, price: Number(product.price), currency: product.currency, quantity: Math.max(1, item.quantity) });
+      const variant = product?.variants[0];
+      if (product && variant) matched.push({ productId: product.id, variantId: variant.id, name: product.name, price: Number(variant.price), currency: variant.currency, quantity: Math.max(1, item.quantity) });
       else unmatched.push(item.productName);
     }
     return { matched, unmatched };
   }
 
   private async executeCreateOrder(
-    conversation: { businessId: string; customerId: string; activeOrderId: string | null; business: { products: { id: string; name: string; price: unknown; currency: string }[] } },
+    conversation: { businessId: string; customerId: string; activeOrderId: string | null; business: { products: { id: string; name: string; variants: { id: string; price: unknown; currency: string }[] }[] } },
     conversationId: string,
     items: { productName: string; quantity: number }[],
     shippingAddress: string,
@@ -276,7 +315,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
 
     // "UPI" or "COD" — anything else from the model falls back to COD (pay on delivery) as the safer default
     const normalizedPayment = /upi/i.test(paymentMethod) ? "UPI" : "COD";
-    const orderItems: OrderItemInputDto[] = matched.map((i) => ({ productId: i.productId, name: i.name, quantity: i.quantity, unitPrice: i.price }));
+    const orderItems: OrderItemInputDto[] = matched.map((i) => ({ productId: i.productId, variantId: i.variantId, name: i.name, quantity: i.quantity, unitPrice: i.price }));
 
     // if there's still an unpaid order open in this conversation, amend it in place instead of creating an overlapping second order
     const activeOrder = conversation.activeOrderId

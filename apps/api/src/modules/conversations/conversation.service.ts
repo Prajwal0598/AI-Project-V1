@@ -190,4 +190,88 @@ export class ConversationService {
     const data = await res.json() as { MessageID?: string };
     return data.MessageID ?? null;
   }
+
+  /** Sends a product photo as a standalone image message — WhatsApp/Instagram only (no inline image support for email here). */
+  async sendImage(conversationId: string, businessId: string, imageUrl: string, caption?: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, businessId },
+      include: { identity: true, business: true },
+    });
+    if (!conversation) throw new NotFoundException("Conversation not found.");
+    if (!conversation.identity?.identifier) {
+      throw new BadRequestException("No channel identity linked to this conversation.");
+    }
+
+    const providerMessageId = conversation.channel === Channel.WHATSAPP
+      ? await this.sendWhatsAppImage(conversation.business, conversation.identity.identifier, imageUrl, caption)
+      : conversation.channel === Channel.INSTAGRAM
+        ? await this.sendInstagramImage(conversation.business, conversation.identity.identifier, imageUrl)
+        : (() => { throw new BadRequestException("Image send is only supported for WhatsApp and Instagram currently."); })();
+
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data: { conversationId, direction: MessageDirection.OUTBOUND, content: caption?.trim() || "[image]", providerMessageId, sentAt: now, metadata: { type: "image", imageUrl } },
+      });
+      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: now } });
+      return message;
+    });
+  }
+
+  private async sendWhatsAppImage(business: { whatsappPhoneNumberId: string | null; whatsappAccessTokenEncrypted: string | null }, to: string, imageUrl: string, caption?: string): Promise<string | null> {
+    if (!business.whatsappPhoneNumberId) {
+      throw new BadRequestException("WhatsApp phone number ID not configured for this business — set it via PATCH /api/businesses/:id.");
+    }
+    const accessToken = this.resolveToken(business.whatsappAccessTokenEncrypted, "WHATSAPP_ACCESS_TOKEN");
+    if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
+
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to,
+          type: "image",
+          image: { link: imageUrl, ...(caption ? { caption } : {}) },
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new ServiceUnavailableException(`WhatsApp API error: ${JSON.stringify(errBody)}`);
+    }
+    const data = await res.json() as { messages?: { id: string }[] };
+    return data.messages?.[0]?.id ?? null;
+  }
+
+  private async sendInstagramImage(business: { instagramPageId: string | null; instagramAccessTokenEncrypted: string | null }, to: string, imageUrl: string): Promise<string | null> {
+    if (!business.instagramPageId) {
+      throw new BadRequestException("Instagram Page ID not configured for this business — set it via PATCH /api/businesses/:id.");
+    }
+    const accessToken = this.resolveToken(business.instagramAccessTokenEncrypted, "INSTAGRAM_PAGE_ACCESS_TOKEN");
+    if (!accessToken) throw new ServiceUnavailableException("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
+
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${business.instagramPageId}/messages?access_token=${accessToken}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: to },
+          message: { attachment: { type: "image", payload: { url: imageUrl, is_reusable: true } } },
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new ServiceUnavailableException(`Instagram API error: ${JSON.stringify(errBody)}`);
+    }
+    const data = await res.json() as { message_id?: string };
+    return data.message_id ?? null;
+  }
 }
