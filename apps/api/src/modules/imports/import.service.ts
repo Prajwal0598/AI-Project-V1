@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ImportRowStatus, ImportStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { CategoryService } from "../categories/category.service";
 import { detectColumnMapping, normalizeRawRow, NormalizedRow } from "./field-mapping";
 import { detectSourceType, parseFile } from "./file-parser";
 import { validateRow } from "./validate-row";
@@ -10,7 +11,10 @@ const MAX_ROWS = 2000;
 
 @Injectable()
 export class ImportService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly categories: CategoryService,
+  ) {}
 
   async findAll(businessId: string) {
     return this.prisma.importJob.findMany({ where: { businessId }, orderBy: { createdAt: "desc" } });
@@ -157,6 +161,7 @@ export class ImportService {
     for (const groupRows of groups.values()) {
       const matchedProductId = groupRows.find((r) => r.action === "UPDATE" && r.matchedProductId)?.matchedProductId ?? null;
       const first = groupRows[0].normalizedData as NormalizedRow;
+      const categoryId = await this.categories.resolveIdByName(businessId, first.category);
 
       let productId: string;
       if (matchedProductId) {
@@ -165,7 +170,7 @@ export class ImportService {
           data: {
             name: first.name ?? undefined,
             description: first.description ?? undefined,
-            category: first.category ?? undefined,
+            categoryId: categoryId ?? undefined,
             brand: first.brand ?? undefined,
           },
         });
@@ -177,7 +182,7 @@ export class ImportService {
             businessId,
             name: first.name!,
             description: first.description ?? null,
-            category: first.category ?? null,
+            categoryId,
             brand: first.brand ?? null,
             source: "IMPORT",
           },

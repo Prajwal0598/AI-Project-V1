@@ -274,4 +274,73 @@ export class ConversationService {
     const data = await res.json() as { message_id?: string };
     return data.message_id ?? null;
   }
+
+  /** Sends a WhatsApp reply-buttons message (max 3 buttons, 20 chars each) — used for the shopping-flow menu/nav. */
+  async sendButtons(conversationId: string, businessId: string, body: string, buttons: { id: string; title: string }[]) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, include: { identity: true, business: true } });
+    if (!conversation) throw new NotFoundException("Conversation not found.");
+    if (!conversation.identity?.identifier) throw new BadRequestException("No channel identity linked to this conversation.");
+    if (conversation.channel !== Channel.WHATSAPP) throw new BadRequestException("Interactive buttons are only supported on WhatsApp currently.");
+
+    const providerMessageId = await this.sendWhatsAppInteractive(conversation.business, conversation.identity.identifier, {
+      type: "button",
+      body: { text: body },
+      action: { buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title.slice(0, 20) } })) },
+    });
+    return this.persistOutboundInteractive(conversationId, body, providerMessageId, { type: "buttons", buttons });
+  }
+
+  /** Sends a WhatsApp list message (max 10 rows total) — used for category/product/variant browsing. */
+  async sendList(conversationId: string, businessId: string, body: string, buttonText: string, sections: { title?: string; rows: { id: string; title: string; description?: string }[] }[]) {
+    const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, include: { identity: true, business: true } });
+    if (!conversation) throw new NotFoundException("Conversation not found.");
+    if (!conversation.identity?.identifier) throw new BadRequestException("No channel identity linked to this conversation.");
+    if (conversation.channel !== Channel.WHATSAPP) throw new BadRequestException("Interactive lists are only supported on WhatsApp currently.");
+
+    const providerMessageId = await this.sendWhatsAppInteractive(conversation.business, conversation.identity.identifier, {
+      type: "list",
+      body: { text: body },
+      action: {
+        button: buttonText.slice(0, 20),
+        sections: sections.map((s) => ({
+          ...(s.title ? { title: s.title.slice(0, 24) } : {}),
+          rows: s.rows.map((r) => ({ id: r.id, title: r.title.slice(0, 24), ...(r.description ? { description: r.description.slice(0, 72) } : {}) })),
+        })),
+      },
+    });
+    return this.persistOutboundInteractive(conversationId, body, providerMessageId, { type: "list", sections });
+  }
+
+  private async persistOutboundInteractive(conversationId: string, content: string, providerMessageId: string | null, metadata: Record<string, unknown>) {
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({ data: { conversationId, direction: MessageDirection.OUTBOUND, content, providerMessageId, sentAt: now, metadata: metadata as object } });
+      await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: now } });
+      return message;
+    });
+  }
+
+  private async sendWhatsAppInteractive(business: { whatsappPhoneNumberId: string | null; whatsappAccessTokenEncrypted: string | null }, to: string, interactive: Record<string, unknown>): Promise<string | null> {
+    if (!business.whatsappPhoneNumberId) {
+      throw new BadRequestException("WhatsApp phone number ID not configured for this business — set it via PATCH /api/businesses/:id.");
+    }
+    const accessToken = this.resolveToken(business.whatsappAccessTokenEncrypted, "WHATSAPP_ACCESS_TOKEN");
+    if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
+
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to, type: "interactive", interactive }),
+      },
+    );
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new ServiceUnavailableException(`WhatsApp API error: ${JSON.stringify(errBody)}`);
+    }
+    const data = await res.json() as { messages?: { id: string }[] };
+    return data.messages?.[0]?.id ?? null;
+  }
 }

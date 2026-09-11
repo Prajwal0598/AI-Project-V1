@@ -3,8 +3,13 @@ import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
+import { ShoppingFlowService } from "../shopping-flow/shopping-flow.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { parseWhatsAppWebhook, ParsedWhatsAppMessage } from "./whatsapp-parser";
+
+// simple greetings/explicit menu requests trigger the deterministic shopping menu instead of the AI —
+// anything else (natural language questions, search, etc.) still goes to the existing AI assistant
+const GREETING_RE = /^\s*(hi+|hello+|hey+|helo+|start|menu|shop|shopping)\s*[!.?]*\s*$/i;
 
 @Injectable()
 export class WhatsAppWebhookService {
@@ -14,6 +19,7 @@ export class WhatsAppWebhookService {
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
     private readonly ai: AiService,
+    private readonly shoppingFlow: ShoppingFlowService,
   ) {}
 
   async ingest(body: unknown): Promise<void> {
@@ -99,6 +105,38 @@ export class WhatsAppWebhookService {
     });
 
     await recalculateLeadScore(this.prisma, customer.id, business.id);
+
+    // interactive button/list taps are always routed to the deterministic shopping flow, never the AI
+    if (msg.interactiveId) {
+      try {
+        await this.shoppingFlow.handleInteractive(conversation.id, business.id, msg.interactiveId);
+      } catch (err) {
+        this.logger.error(`Shopping flow failed to handle interactive reply for conversation ${conversation.id}`, err);
+      }
+      return;
+    }
+
+    // any state where the customer has already engaged the shopping flow handles its own free text
+    // (quantity/address entry, checkout nudges, or a product search) rather than falling through to the AI
+    if (conversation.shoppingState !== "IDLE") {
+      try {
+        const handled = await this.shoppingFlow.handleFreeText(conversation.id, business.id, conversation, msg.text);
+        if (handled) return;
+      } catch (err) {
+        this.logger.error(`Shopping flow failed to handle free text for conversation ${conversation.id}`, err);
+        return;
+      }
+    }
+
+    // a plain greeting (or explicit "menu"/"shop") opens the deterministic menu instead of the AI catalogue dump
+    if (conversation.shoppingState === "IDLE" && GREETING_RE.test(msg.text)) {
+      try {
+        await this.shoppingFlow.sendMainMenu(conversation.id, business.id);
+      } catch (err) {
+        this.logger.error(`Shopping flow failed to send the main menu for conversation ${conversation.id}`, err);
+      }
+      return;
+    }
 
     // fully autonomous reply — no human approval step
     try {

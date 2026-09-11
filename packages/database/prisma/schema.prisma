@@ -80,6 +80,26 @@ enum ImportRowStatus {
   ERROR
 }
 
+enum CartStatus {
+  ACTIVE
+  CHECKED_OUT
+  ABANDONED
+}
+
+// deterministic WhatsApp shopping-flow state (button/list navigation) — kept separate from the free-text AI flow
+enum ShoppingState {
+  IDLE
+  MAIN_MENU
+  BROWSING_CATEGORIES
+  BROWSING_PRODUCTS
+  VIEWING_PRODUCT
+  AWAITING_QUANTITY
+  CART_REVIEW
+  COLLECTING_ADDRESS
+  COLLECTING_PAYMENT
+  ORDER_CONFIRMATION
+}
+
 // how a conversation ultimately resolved — for CRM/revenue reporting
 enum ConversationOutcome {
   OPEN
@@ -121,6 +141,8 @@ model Business {
   conversations Conversation[]
   products      Product[]
   variants      Variant[]
+  categories    Category[]
+  carts         Cart[]
   importJobs    ImportJob[]
   orders        Order[]
   activity      ActivityEvent[]
@@ -154,6 +176,7 @@ model Customer {
   conversations Conversation[]
   leadScore     LeadScore?
   orders        Order[]
+  carts         Cart[]
   activity      ActivityEvent[]
 
   @@index([businessId, updatedAt])
@@ -193,6 +216,13 @@ model Conversation {
   escalated        Boolean         @default(false) // true once the AI has paused itself/been paused for human handoff
   escalationReason String?
   outcome          ConversationOutcome @default(OPEN)
+  // deterministic WhatsApp shopping flow (button/list taps) — separate from the free-text AI flow above
+  shoppingState    ShoppingState   @default(IDLE)
+  activeCategoryId String?         // category currently being browsed (BROWSING_PRODUCTS)
+  activeProductId  String?         // product currently being viewed (VIEWING_PRODUCT / AWAITING_QUANTITY)
+  pendingVariantId String?         // variant chosen while awaiting a quantity reply
+  pendingAddress   String?         // shipping address collected mid-checkout, before payment method is chosen
+  pendingPaymentMethod String?     // "UPI" | "COD" chosen mid-checkout, before final order confirmation
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -200,6 +230,7 @@ model Conversation {
   identity      Identity?          @relation(fields: [identityId], references: [id], onDelete: SetNull)
   messages      Message[]
   orders        Order[]
+  carts         Cart[]
 
   @@index([businessId, status, lastMessageAt])
   @@index([customerId, lastMessageAt])
@@ -232,9 +263,9 @@ model LeadScore {
 model Product {
   id          String        @id @default(cuid())
   businessId  String
+  categoryId  String?
   name        String
   description String?
-  category    String?
   brand       String?
   imageUrl    String?
   active      Boolean       @default(true)
@@ -242,10 +273,31 @@ model Product {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   business    Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category    Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   variants    Variant[]
   orderItems  OrderItem[]
 
   @@index([businessId, active])
+  @@index([categoryId])
+}
+
+// merchant-defined product grouping for category-first WhatsApp browsing (supports one level of subcategory via parentId)
+model Category {
+  id         String   @id @default(cuid())
+  businessId String
+  name       String
+  parentId   String?
+  sortOrder  Int      @default(0)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  business   Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  parent     Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children   Category[] @relation("CategoryChildren")
+  products   Product[]
+
+  @@index([businessId, active, sortOrder])
+  @@index([parentId])
 }
 
 // a sellable unit — every Product has at least one (the "default" variant for products without size/color options)
@@ -271,10 +323,43 @@ model Variant {
   business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   orderItems     OrderItem[]
+  cartItems      CartItem[]
 
   @@index([businessId, active])
   @@index([productId])
   @@unique([businessId, sku])
+}
+
+// carts driving the WhatsApp interactive shopping flow through to checkout — a conversation can have many
+// over time (one per shopping session), but at most one ACTIVE cart per conversation (enforced in CartService)
+model Cart {
+  id             String     @id @default(cuid())
+  businessId     String
+  conversationId String
+  customerId     String
+  status         CartStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items          CartItem[]
+
+  @@index([businessId, status])
+  @@index([conversationId, status])
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  variantId String
+  quantity  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant   Variant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
 }
 
 // one uploaded catalogue file being parsed/validated/committed into products+variants

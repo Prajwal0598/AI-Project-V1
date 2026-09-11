@@ -7,6 +7,7 @@ import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
 import { toPublicImageUrl } from "../products/image-storage";
+import { CartService } from "../cart/cart.service";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -77,6 +78,7 @@ export class AiService {
     private readonly prisma: PrismaService,
     private readonly orders: OrderService,
     private readonly conversations: ConversationService,
+    private readonly cart: CartService,
   ) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey) this.client = new OpenAI({ apiKey });
@@ -317,6 +319,21 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     const normalizedPayment = /upi/i.test(paymentMethod) ? "UPI" : "COD";
     const orderItems: OrderItemInputDto[] = matched.map((i) => ({ productId: i.productId, variantId: i.variantId, name: i.name, quantity: i.quantity, unitPrice: i.price }));
 
+    // fold in anything the customer already added via the button-driven shopping flow in this same conversation,
+    // so switching between tapping buttons and typing free text never silently drops an item — but the model
+    // already re-reads the full transcript (including the shopping flow's own "Added X to cart" messages) and
+    // typically re-lists cart items in its own "items" itself, so only ADD a cart item when the model hasn't
+    // already accounted for that variant; never increment an existing quantity, or it gets double-counted
+    const activeCart = await this.cart.findActiveForConversation(conversationId, conversation.businessId);
+    if (activeCart?.items.length) {
+      const byVariant = new Set(orderItems.map((i) => i.variantId));
+      for (const cartItem of activeCart.items) {
+        if (byVariant.has(cartItem.variantId)) continue;
+        orderItems.push({ productId: cartItem.variant.productId, variantId: cartItem.variantId, name: cartItem.variant.product.name, quantity: cartItem.quantity, unitPrice: Number(cartItem.variant.price) });
+        byVariant.add(cartItem.variantId);
+      }
+    }
+
     // if there's still an unpaid order open in this conversation, amend it in place instead of creating an overlapping second order
     const activeOrder = conversation.activeOrderId
       ? await this.prisma.order.findUnique({ where: { id: conversation.activeOrderId } })
@@ -336,6 +353,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
             paymentMethod: normalizedPayment,
             items: orderItems,
           });
+      if (activeCart?.items.length) await this.cart.clear(activeCart.id, conversation.businessId);
       return {
         success: true,
         orderId: order.id,

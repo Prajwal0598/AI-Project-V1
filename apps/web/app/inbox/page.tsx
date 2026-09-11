@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { AppShell } from "../../components/app-shell";
-import { api, getBusinessId } from "../../lib/api";
+import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
 import type { ConversationSummary, ConversationDetail, Message } from "../../lib/api";
 
 function customerName(c: { firstName: string | null; lastName: string | null; phone: string | null }) {
@@ -171,12 +171,34 @@ export default function InboxPage() {
             )}
             {error && <div style={{ background: error.startsWith("✓") ? "#eefaf3" : "#fff3f2", border: `1px solid ${error.startsWith("✓") ? "#bfe8d3" : "#fcd9d6"}`, color: error.startsWith("✓") ? "#237a52" : "#b94940", fontSize: 12, padding: "8px 14px", margin: "0 16px" }}>{error} <button onClick={() => setError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
             <div className="message-stream" ref={streamRef}>
-              {visibleMessages.map((m: Message) => (
-                <div key={m.id} className={`bubble ${m.direction === "OUTBOUND" ? "outbound" : "inbound"}`}>
-                  {m.content}
-                  <time style={{ display: "block", fontSize: 10, opacity: 0.55, marginTop: 4 }}>{fmtTime(m.sentAt)}</time>
-                </div>
-              ))}
+              {visibleMessages.map((m: Message) => {
+                const meta = m.metadata as { type?: string; imageUrl?: string; buttons?: { id: string; title: string }[]; sections?: { title?: string; rows: { id: string; title: string; description?: string }[] }[] } | null;
+                return (
+                  <div key={m.id} className={`bubble ${m.direction === "OUTBOUND" ? "outbound" : "inbound"}`}>
+                    {meta?.type === "image" && meta.imageUrl && (
+                      <img src={resolveImageUrl(meta.imageUrl) ?? undefined} alt={m.content} style={{ display: "block", maxWidth: 220, borderRadius: 8, marginBottom: 6 }} />
+                    )}
+                    {m.content}
+                    {meta?.type === "buttons" && meta.buttons && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                        {meta.buttons.map(b => (
+                          <span key={b.id} style={{ border: "1px solid rgba(255,255,255,0.4)", borderRadius: 14, padding: "3px 10px", fontSize: 11 }}>{b.title}</span>
+                        ))}
+                      </div>
+                    )}
+                    {meta?.type === "list" && meta.sections && (
+                      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                        {meta.sections.flatMap(s => s.rows).map(r => (
+                          <div key={r.id} style={{ border: "1px solid rgba(255,255,255,0.35)", borderRadius: 8, padding: "4px 8px", fontSize: 11 }}>
+                            <strong>{r.title}</strong>{r.description ? <span style={{ opacity: 0.75 }}> — {r.description}</span> : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <time style={{ display: "block", fontSize: 10, opacity: 0.55, marginTop: 4 }}>{fmtTime(m.sentAt)}</time>
+                  </div>
+                );
+              })}
             </div>
             <footer>
               <button className="ai-draft-button" onClick={generateAiReply} disabled={aiReplying || selected.escalated}>

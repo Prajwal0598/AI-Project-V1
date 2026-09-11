@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../database/prisma.service";
+import { CategoryService } from "../categories/category.service";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
 import { UpdateVariantDto } from "./dto/update-variant.dto";
@@ -9,7 +10,10 @@ const DEFAULT_VARIANT_ORDER = { variants: { orderBy: { createdAt: "asc" as const
 
 @Injectable()
 export class ProductService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly categories: CategoryService,
+  ) {}
 
   async findAll(businessId: string) {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
@@ -20,12 +24,13 @@ export class ProductService {
   async create(businessId: string, input: CreateProductDto) {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
     if (!business) throw new NotFoundException("Business not found.");
+    const categoryId = await this.categories.resolveIdByName(businessId, input.category);
     return this.prisma.product.create({
       data: {
         businessId,
         name: input.name.trim(),
         description: input.description?.trim() || null,
-        category: input.category?.trim() || null,
+        categoryId,
         brand: input.brand?.trim() || null,
         active: input.active ?? true,
         variants: {
@@ -47,13 +52,14 @@ export class ProductService {
     const product = await this.prisma.product.findFirst({ where: { id: productId, businessId }, include: DEFAULT_VARIANT_ORDER });
     if (!product) throw new NotFoundException("Product not found.");
     const defaultVariant = product.variants[0];
+    const categoryId = input.category !== undefined ? await this.categories.resolveIdByName(businessId, input.category) : undefined;
 
     const updated = await this.prisma.product.update({
       where: { id: productId },
       data: {
         ...(input.name !== undefined && { name: input.name.trim() }),
         ...(input.description !== undefined && { description: input.description?.trim() || null }),
-        ...(input.category !== undefined && { category: input.category?.trim() || null }),
+        ...(categoryId !== undefined && { categoryId }),
         ...(input.brand !== undefined && { brand: input.brand?.trim() || null }),
         ...(input.active !== undefined && { active: input.active }),
       },
