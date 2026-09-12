@@ -65,6 +65,14 @@ enum ProductSource {
   IMPORT
 }
 
+// merchant-controlled visibility: DRAFT/HIDDEN are never shown to customers; "out of stock" is a computed
+// display state (PUBLISHED product where every variant's inventory is 0), not a separate stored status
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  HIDDEN
+}
+
 enum ImportStatus {
   PENDING
   READY_FOR_REVIEW
@@ -268,7 +276,7 @@ model Product {
   description String?
   brand       String?
   imageUrl    String?
-  active      Boolean       @default(true)
+  status      ProductStatus @default(PUBLISHED)
   source      ProductSource @default(MANUAL)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
@@ -277,7 +285,7 @@ model Product {
   variants    Variant[]
   orderItems  OrderItem[]
 
-  @@index([businessId, active])
+  @@index([businessId, status])
   @@index([categoryId])
 }
 

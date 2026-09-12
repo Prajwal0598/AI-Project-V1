@@ -96,7 +96,7 @@ export class AiService {
       where: { id: conversationId, businessId },
       include: {
         customer: true,
-        business: { include: { products: { where: { active: true }, take: 30, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } }, // cap keeps AI prompt within safe token limits
+        business: { include: { products: { where: { status: "PUBLISHED" }, take: 30, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } }, // cap keeps AI prompt within safe token limits
         messages: { orderBy: { sentAt: "desc" }, take: 20 } // most recent 20; reversed below into chronological order
       }
     });

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../database/prisma.service";
 import { CreateCategoryDto } from "./dto/create-category.dto";
 import { UpdateCategoryDto } from "./dto/update-category.dto";
@@ -8,7 +8,12 @@ export class CategoryService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(businessId: string) {
-    return this.prisma.category.findMany({ where: { businessId }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] });
+    const categories = await this.prisma.category.findMany({
+      where: { businessId },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      include: { _count: { select: { products: true } } },
+    });
+    return categories.map(({ _count, ...c }) => ({ ...c, productCount: _count.products }));
   }
 
   async create(businessId: string, input: CreateCategoryDto) {
@@ -32,8 +37,13 @@ export class CategoryService {
   }
 
   async remove(categoryId: string, businessId: string) {
-    const category = await this.prisma.category.findFirst({ where: { id: categoryId, businessId } });
+    const category = await this.prisma.category.findFirst({
+      where: { id: categoryId, businessId },
+      include: { _count: { select: { products: true, children: true } } },
+    });
     if (!category) throw new NotFoundException("Category not found.");
+    if (category._count.products > 0) throw new BadRequestException(`Move or reassign the ${category._count.products} product(s) in this category before deleting it.`);
+    if (category._count.children > 0) throw new BadRequestException("Delete or reassign this category's subcategories before deleting it.");
     await this.prisma.category.delete({ where: { id: categoryId } });
   }
 

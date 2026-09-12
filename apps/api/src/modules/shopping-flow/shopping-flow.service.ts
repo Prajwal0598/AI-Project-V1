@@ -108,7 +108,7 @@ export class ShoppingFlowService {
     const filters = parseSearchQuery(text);
     const products = await this.prisma.product.findMany({
       where: {
-        businessId, active: true,
+        businessId, status: "PUBLISHED",
         ...(filters.keywords.length ? { OR: filters.keywords.flatMap((k) => [
           { name: { contains: k, mode: "insensitive" as const } },
           { description: { contains: k, mode: "insensitive" as const } },
@@ -151,7 +151,7 @@ export class ShoppingFlowService {
 
   private async showProducts(conversationId: string, businessId: string, categoryId: string | null) {
     const products = await this.prisma.product.findMany({
-      where: { businessId, active: true, ...(categoryId ? { categoryId } : {}) },
+      where: { businessId, status: "PUBLISHED", ...(categoryId ? { categoryId } : {}) },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
       take: MAX_LIST_ROWS,
     });
@@ -173,7 +173,7 @@ export class ShoppingFlowService {
 
   private async showProductDetail(conversationId: string, businessId: string, productId: string) {
     const product = await this.prisma.product.findFirst({
-      where: { id: productId, businessId, active: true },
+      where: { id: productId, businessId, status: "PUBLISHED" },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" } } },
     });
     if (!product || !product.variants.length) {

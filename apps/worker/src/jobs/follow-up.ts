@@ -13,7 +13,7 @@ export async function processFollowUp(job: Job<FollowUpJobData>) {
     where: { id: conversationId, businessId },
     include: {
       customer: true,
-      business: { include: { products: { where: { active: true }, take: 20, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } },
+      business: { include: { products: { where: { status: "PUBLISHED" }, take: 20, orderBy: { updatedAt: "desc" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } } },
       messages: { orderBy: { sentAt: "asc" }, take: 20 },
     },
   });

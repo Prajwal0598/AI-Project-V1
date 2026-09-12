@@ -185,6 +185,7 @@ export class ImportService {
             categoryId,
             brand: first.brand ?? null,
             source: "IMPORT",
+            status: "DRAFT", // imported products start hidden from customers until the merchant reviews and publishes them
           },
         });
         productId = product.id;

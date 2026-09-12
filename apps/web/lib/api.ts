@@ -167,15 +167,28 @@ export interface Variant {
   active: boolean;
 }
 
+export type ProductStatus = "DRAFT" | "PUBLISHED" | "HIDDEN";
+
+export interface Category {
+  id: string;
+  businessId: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+  active: boolean;
+  productCount: number;
+}
+
 export interface Product {
   id: string;
   name: string;
   description: string | null;
-  category: string | null;
+  category: { id: string; name: string } | null;
   brand: string | null;
   imageUrl: string | null;
-  active: boolean;
+  status: ProductStatus;
   source: "MANUAL" | "IMPORT";
+  updatedAt: string;
   variants: Variant[];
 }
 
@@ -300,9 +313,9 @@ export const api = {
   products: {
     list: (businessId: string) =>
       request<Product[]>(`/businesses/${businessId}/products`),
-    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number; sku?: string; category?: string; brand?: string }) =>
+    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number; sku?: string; category?: string; brand?: string; status?: ProductStatus }) =>
       request<Product>(`/businesses/${businessId}/products`, { method: "POST", body: JSON.stringify(data) }),
-    update: (productId: string, data: Partial<{ name: string; description: string; category: string; brand: string; active: boolean }>) =>
+    update: (productId: string, data: Partial<{ name: string; description: string; category: string; brand: string; status: ProductStatus }>) =>
       request<Product>(`/products/${productId}`, { method: "PATCH", body: JSON.stringify(data) }),
     updateVariant: (variantId: string, data: Partial<{ sku: string; price: number; currency: string; inventory: number; active: boolean }>) =>
       request<Variant>(`/variants/${variantId}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -311,6 +324,20 @@ export const api = {
       formData.append("image", file);
       return upload<Product>(`/products/${productId}/image`, formData);
     },
+    remove: (productId: string) =>
+      request<{ id: string }>(`/products/${productId}`, { method: "DELETE" }),
+    bulk: (businessId: string, data: { productIds: string[]; action: "publish" | "hide" | "draft" | "delete" | "setCategory"; category?: string }) =>
+      request<{ affected: number }>(`/businesses/${businessId}/products/bulk`, { method: "PATCH", body: JSON.stringify(data) }),
+  },
+  categories: {
+    list: (businessId: string) =>
+      request<Category[]>(`/businesses/${businessId}/categories`),
+    create: (businessId: string, data: { name: string; parentId?: string; sortOrder?: number }) =>
+      request<Category>(`/businesses/${businessId}/categories`, { method: "POST", body: JSON.stringify(data) }),
+    update: (categoryId: string, data: Partial<{ name: string; parentId: string | null; sortOrder: number; active: boolean }>) =>
+      request<Category>(`/categories/${categoryId}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (categoryId: string) =>
+      request<void>(`/categories/${categoryId}`, { method: "DELETE" }),
   },
   imports: {
     list: (businessId: string) => request<ImportJob[]>(`/businesses/${businessId}/imports`),
