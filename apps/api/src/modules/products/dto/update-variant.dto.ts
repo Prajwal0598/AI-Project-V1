@@ -31,4 +31,11 @@ export class UpdateVariantDto {
   @IsOptional()
   @IsBoolean()
   active?: boolean;
+
+  // overrides the business default low-stock threshold for this variant; null clears the override
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 0 })
+  @Min(0)
+  @Type(() => Number)
+  lowStockThreshold?: number | null;
 }

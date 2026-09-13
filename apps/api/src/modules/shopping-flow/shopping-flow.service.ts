@@ -4,6 +4,7 @@ import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
 import { OrderService } from "../orders/order.service";
 import { toPublicImageUrl } from "../products/image-storage";
+import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 
 const MAX_LIST_ROWS = 10;
 
@@ -47,6 +48,7 @@ export class ShoppingFlowService {
     private readonly conversations: ConversationService,
     private readonly cart: CartService,
     private readonly orders: OrderService,
+    private readonly signals: CustomerSignalService,
   ) {}
 
   async sendMainMenu(conversationId: string, businessId: string) {
@@ -67,7 +69,7 @@ export class ShoppingFlowService {
     if (actionId === "menu_cart") return this.showCart(conversationId, businessId, conversation.customerId);
     if (actionId === "menu_orders") return this.showOrders(conversationId, businessId, conversation.customerId);
     if (actionId.startsWith("cat_")) return this.showProducts(conversationId, businessId, actionId.slice(4));
-    if (actionId.startsWith("prod_")) return this.showProductDetail(conversationId, businessId, actionId.slice(5));
+    if (actionId.startsWith("prod_")) return this.showProductDetail(conversationId, businessId, actionId.slice(5), conversation.customerId);
     if (actionId.startsWith("variant_")) return this.askQuantity(conversationId, businessId, actionId.slice(8));
     if (actionId === "cart_checkout") return this.beginCheckout(conversationId, businessId, conversation.customerId);
     if (actionId === "cart_clear") return this.clearCart(conversationId, businessId, conversation.customerId);
@@ -171,7 +173,7 @@ export class ShoppingFlowService {
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId } });
   }
 
-  private async showProductDetail(conversationId: string, businessId: string, productId: string) {
+  private async showProductDetail(conversationId: string, businessId: string, productId: string, customerId: string) {
     const product = await this.prisma.product.findFirst({
       where: { id: productId, businessId, status: "PUBLISHED" },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" } } },
@@ -180,6 +182,8 @@ export class ShoppingFlowService {
       await this.conversations.sendMessage(conversationId, businessId, "Sorry, that product is no longer available.");
       return;
     }
+
+    await this.signals.record(businessId, customerId, "PRODUCT_VIEWED", { productId });
 
     const first = product.variants[0];
     const caption = `${product.name}${product.description ? `\n${product.description}` : ""}\n${first.currency} ${first.price}`;

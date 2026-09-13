@@ -19,6 +19,8 @@ export default function SettingsPage() {
   const [igPageId, setIgPageId] = useState("");
   const [supportEmail, setSupportEmail] = useState("");
   const [autonomyMaxOrderValue, setAutonomyMaxOrderValue] = useState("");
+  const [defaultLowStockThreshold, setDefaultLowStockThreshold] = useState("");
+  const [proactiveSuggestionsEnabled, setProactiveSuggestionsEnabled] = useState(false);
   const [waAccessToken, setWaAccessToken] = useState("");
   const [igAccessToken, setIgAccessToken] = useState("");
   const [postmarkToken, setPostmarkToken] = useState("");
@@ -36,6 +38,8 @@ export default function SettingsPage() {
       setIgPageId(b.instagramPageId ?? "");
       setSupportEmail(b.supportEmail ?? "");
       setAutonomyMaxOrderValue(b.autonomyMaxOrderValue ?? "");
+      setDefaultLowStockThreshold(String(b.defaultLowStockThreshold ?? 5));
+      setProactiveSuggestionsEnabled(b.proactiveSuggestionsEnabled);
     }).catch(console.error);
     api.auth.me().then(setMe).catch(console.error);
     loadTeam();
@@ -77,6 +81,8 @@ export default function SettingsPage() {
         instagramPageId: igPageId.trim() || null,
         supportEmail: supportEmail.trim() || null,
         autonomyMaxOrderValue: autonomyMaxOrderValue.trim() ? Number(autonomyMaxOrderValue) : null,
+        defaultLowStockThreshold: defaultLowStockThreshold.trim() ? Number(defaultLowStockThreshold) : undefined,
+        proactiveSuggestionsEnabled,
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
         ...(postmarkToken && { postmarkServerToken: postmarkToken }),
@@ -209,6 +215,32 @@ export default function SettingsPage() {
           <input value={autonomyMaxOrderValue} onChange={e => setAutonomyMaxOrderValue(e.target.value)} placeholder="e.g. 5000 (leave blank for no limit)" inputMode="decimal" />
         </div>
         <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Orders above this total are held for your approval on the Orders page instead of being placed automatically. Escalated conversations (ambiguous requests, complaints) also pause the AI until you resolve them from the Inbox.</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>Inventory</h2>
+      <p>Get notified on the Products page when a product's stock runs low.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <div className="login-field">
+          <label>Default low-stock threshold</label>
+          <input value={defaultLowStockThreshold} onChange={e => setDefaultLowStockThreshold(e.target.value)} placeholder="e.g. 5" inputMode="numeric" />
+        </div>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Applies to any product variant without its own custom threshold (set per-variant on the Products page).</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>Proactive AI Suggestions</h2>
+      <p>Relay watches conversations, carts, and inventory for sales opportunities (abandoned carts, product enquiries, back-in-stock) and drafts a message for your review in the <a href="/suggestions">Suggestions</a> inbox.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+          <input type="checkbox" checked={proactiveSuggestionsEnabled} onChange={e => setProactiveSuggestionsEnabled(e.target.checked)} />
+          Enable Proactive AI Suggestions
+        </label>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Every suggestion requires your review and approval before sending — nothing is messaged to a customer automatically. Off by default.</p>
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </section>

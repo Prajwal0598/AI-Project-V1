@@ -2,16 +2,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
-import type { Category, ImportJob, ImportRow, Product, ProductStatus, Variant } from "../../lib/api";
+import type { Category, ImportJob, ImportRow, InventoryAlert, Product, ProductStatus, StockAdjustment, Variant } from "../../lib/api";
 
 const STATUS_COLOR: Record<ImportRow["status"], string> = { READY: "#237a52", WARNING: "#8a6a1f", ERROR: "#b94940" };
 
 const PRODUCT_STATUS_LABEL: Record<ProductStatus, string> = { DRAFT: "Draft", PUBLISHED: "Published", HIDDEN: "Hidden" };
 const PRODUCT_STATUS_COLOR: Record<ProductStatus, string> = { DRAFT: "#8a6a1f", PUBLISHED: "#237a52", HIDDEN: "#777484" };
 
-const LOW_STOCK_THRESHOLD = 5;
-
-interface VariantEdit { sku: string; price: string; inventory: string; active: boolean }
+interface VariantEdit { sku: string; price: string; inventory: string; active: boolean; lowStockThreshold: string }
 
 function defaultVariant(p: Product): Variant | undefined {
   return p.variants[0];
@@ -22,13 +20,19 @@ function isOutOfStock(p: Product): boolean {
   return v ? v.inventory === 0 : false;
 }
 
-function isLowStock(p: Product): boolean {
+function isLowStock(p: Product, defaultThreshold: number): boolean {
   const v = defaultVariant(p);
-  return v ? v.inventory !== null && v.inventory > 0 && v.inventory <= LOW_STOCK_THRESHOLD : false;
+  if (!v || v.inventory === null || v.inventory <= 0) return false;
+  const threshold = v.lowStockThreshold ?? defaultThreshold;
+  return v.inventory <= threshold;
 }
 
 function fmtDate(d: string) {
   return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function fmtDateTime(d: string) {
+  return new Date(d).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 export default function ProductsPage() {
@@ -50,6 +54,7 @@ export default function ProductsPage() {
   const [rows, setRows] = useState<ImportRow[]>([]);
   const [committing, setCommitting] = useState(false);
   const [commitSummary, setCommitSummary] = useState<{ created: number; updated: number; skipped: number } | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
 
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editName, setEditName] = useState("");
@@ -79,6 +84,14 @@ export default function ProductsPage() {
   const [renamingCategoryId, setRenamingCategoryId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  // inventory alerts + threshold
+  const [defaultThreshold, setDefaultThreshold] = useState(5);
+  const [alerts, setAlerts] = useState<InventoryAlert[]>([]);
+  const [showAlerts, setShowAlerts] = useState(false);
+  const [history, setHistory] = useState<StockAdjustment[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   function loadProducts() {
     const bizId = getBusinessId();
     if (!bizId) return;
@@ -91,7 +104,14 @@ export default function ProductsPage() {
     api.categories.list(bizId).then(setCategories).catch(console.error);
   }
 
-  useEffect(() => { loadProducts(); loadCategories(); }, []);
+  function loadInventoryMeta() {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    api.businesses.get(bizId).then(b => setDefaultThreshold(b.defaultLowStockThreshold ?? 5)).catch(console.error);
+    api.inventory.alerts(bizId).then(setAlerts).catch(console.error);
+  }
+
+  useEffect(() => { loadProducts(); loadCategories(); loadInventoryMeta(); }, []);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -107,9 +127,9 @@ export default function ProductsPage() {
     total: products.length,
     published: products.filter(p => p.status === "PUBLISHED").length,
     draft: products.filter(p => p.status === "DRAFT").length,
-    lowStock: products.filter(isLowStock).length,
+    lowStock: products.filter(p => isLowStock(p, defaultThreshold)).length,
     outOfStock: products.filter(isOutOfStock).length,
-  }), [products]);
+  }), [products, defaultThreshold]);
 
   const allVisibleSelected = filtered.length > 0 && filtered.every(p => selected.has(p.id));
 
@@ -186,6 +206,21 @@ export default function ProductsPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "Could not update row."); }
   }
 
+  async function suggestWithAi() {
+    if (!job) return;
+    setSuggesting(true);
+    try {
+      await api.imports.suggest(job.id);
+      const refreshedRows = await api.imports.rows(job.id);
+      setRows(refreshedRows);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not generate AI suggestions."); }
+    finally { setSuggesting(false); }
+  }
+
+  function acceptSuggestion(rowId: string, field: "category" | "description", value: string) {
+    editRow(rowId, field, value);
+  }
+
   async function commitImport() {
     if (!job) return;
     setCommitting(true);
@@ -216,14 +251,29 @@ export default function ProductsPage() {
     setEditImageUrl(p.imageUrl);
     const variantState: Record<string, VariantEdit> = {};
     for (const v of p.variants) {
-      variantState[v.id] = { sku: v.sku ?? "", price: v.price, inventory: v.inventory == null ? "" : String(v.inventory), active: v.active };
+      variantState[v.id] = { sku: v.sku ?? "", price: v.price, inventory: v.inventory == null ? "" : String(v.inventory), active: v.active, lowStockThreshold: v.lowStockThreshold == null ? "" : String(v.lowStockThreshold) };
     }
     setEditVariants(variantState);
+    setShowHistory(false);
+    setHistory([]);
     setError("");
   }
 
   function updateEditVariant(variantId: string, patch: Partial<VariantEdit>) {
     setEditVariants(prev => ({ ...prev, [variantId]: { ...prev[variantId], ...patch } }));
+  }
+
+  async function loadHistory() {
+    const bizId = getBusinessId();
+    if (!bizId || !editingProduct) return;
+    setShowHistory(true);
+    setLoadingHistory(true);
+    try {
+      const variantId = editingProduct.variants[0]?.id;
+      const entries = await api.inventory.adjustments(bizId, variantId);
+      setHistory(entries);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not load stock history."); }
+    finally { setLoadingHistory(false); }
   }
 
   async function uploadImage(file: File) {
@@ -258,6 +308,7 @@ export default function ProductsPage() {
           price: parseFloat(edit.price),
           inventory: edit.inventory === "" ? undefined : parseInt(edit.inventory, 10),
           active: edit.active,
+          lowStockThreshold: edit.lowStockThreshold === "" ? null : parseInt(edit.lowStockThreshold, 10),
         });
         updatedVariants.push(updated);
       }
@@ -265,6 +316,7 @@ export default function ProductsPage() {
       setProducts(prev => prev.map(p => (p.id === merged.id ? merged : p)));
       setEditingProduct(null);
       loadCategories();
+      loadInventoryMeta();
     } catch (err) { setError(err instanceof Error ? err.message : "Could not save product changes."); }
     finally { setSavingEdit(false); }
   }
@@ -316,6 +368,7 @@ export default function ProductsPage() {
 
   return <AppShell title="Products" subtitle="Give your AI agent accurate products, pricing, and availability." action={
     <div style={{ display: "flex", gap: 8 }}>
+      <button onClick={() => setShowAlerts(true)}>⚠️ Inventory alerts{alerts.length ? ` (${alerts.length})` : ""}</button>
       <button onClick={() => setShowCategories(true)}>Manage categories</button>
       <button onClick={() => setShowImport(true)}>Import Product Catalogue</button>
       <button className="primary-button" onClick={() => setShow(true)}>+ Add product</button>
@@ -334,6 +387,27 @@ export default function ProductsPage() {
       <article className="metric-card"><p>Low stock</p><h2>{summary.lowStock}</h2></article>
       <article className="metric-card"><p>Out of stock</p><h2>{summary.outOfStock}</h2></article>
     </div>
+
+    {showAlerts && <div className="data-card" style={{ marginBottom: 16, padding: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Inventory alerts</h3>
+      {alerts.length === 0 && <p style={{ color: "var(--muted)", fontSize: 12 }}>No active alerts — every tracked product is above its low-stock threshold.</p>}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <tbody>
+          {alerts.map(a => (
+            <tr key={a.id} style={{ borderBottom: "1px solid var(--border)" }}>
+              <td style={{ padding: 6 }}><strong>{a.product.name}</strong>{a.variant.sku && <span style={{ color: "var(--muted)" }}> ({a.variant.sku})</span>}</td>
+              <td style={{ padding: 6, color: a.type === "OUT_OF_STOCK" ? "#b94940" : "#8a6a1f", fontWeight: 600 }}>{a.type === "OUT_OF_STOCK" ? "Out of stock" : "Low stock"}</td>
+              <td style={{ padding: 6, color: "var(--muted)" }}>{a.inventoryAtTrigger} left (threshold {a.threshold})</td>
+              <td style={{ padding: 6, color: "var(--muted)" }}>{fmtDateTime(a.createdAt)}</td>
+              <td style={{ padding: 6, textAlign: "right" }}>
+                <button onClick={() => { const p = products.find(pr => pr.id === a.productId); if (p) { setShowAlerts(false); openEdit(p); } }}>Manage stock</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 12 }}><button onClick={() => setShowAlerts(false)}>Close</button></div>
+    </div>}
 
     {showCategories && <div className="data-card" style={{ marginBottom: 16, padding: 16 }}>
       <h3 style={{ marginTop: 0 }}>Manage categories</h3>
@@ -422,21 +496,37 @@ export default function ProductsPage() {
               <th style={{ padding: 6 }}>SKU</th>
               <th style={{ padding: 6 }}>Price</th>
               <th style={{ padding: 6 }}>Stock</th>
+              <th style={{ padding: 6 }}>Low stock at</th>
               <th style={{ padding: 6 }}>Active</th>
             </tr>
           </thead>
           <tbody>
             {editingProduct.variants.map(v => {
-              const edit = editVariants[v.id] ?? { sku: "", price: "", inventory: "", active: true };
+              const edit = editVariants[v.id] ?? { sku: "", price: "", inventory: "", active: true, lowStockThreshold: "" };
               return <tr key={v.id} style={{ borderBottom: "1px solid var(--border)" }}>
                 <td style={{ padding: 6 }}><input value={edit.sku} onChange={e => updateEditVariant(v.id, { sku: e.target.value })} style={{ width: 110 }} /></td>
                 <td style={{ padding: 6 }}><input value={edit.price} onChange={e => updateEditVariant(v.id, { price: e.target.value })} style={{ width: 80 }} /></td>
                 <td style={{ padding: 6 }}><input value={edit.inventory} onChange={e => updateEditVariant(v.id, { inventory: e.target.value })} placeholder="Unlimited" style={{ width: 80 }} /></td>
+                <td style={{ padding: 6 }}><input value={edit.lowStockThreshold} onChange={e => updateEditVariant(v.id, { lowStockThreshold: e.target.value })} placeholder={`Default (${defaultThreshold})`} style={{ width: 100 }} /></td>
                 <td style={{ padding: 6 }}><input type="checkbox" checked={edit.active} onChange={e => updateEditVariant(v.id, { active: e.target.checked })} /></td>
               </tr>;
             })}
           </tbody>
         </table>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <button onClick={loadHistory}>{showHistory ? "Refresh stock history" : "View stock history"}</button>
+        {showHistory && <div style={{ marginTop: 8, maxHeight: 200, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 6, padding: 8 }}>
+          {loadingHistory && <p style={{ fontSize: 12, color: "var(--muted)" }}>Loading…</p>}
+          {!loadingHistory && history.length === 0 && <p style={{ fontSize: 12, color: "var(--muted)" }}>No stock changes recorded yet.</p>}
+          {!loadingHistory && history.map(h => (
+            <div key={h.id} style={{ fontSize: 12, display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
+              <span>{h.delta > 0 ? "+" : ""}{h.delta} ({h.reason.replace(/_/g, " ").toLowerCase()}) — {h.previousInventory ?? "—"} → {h.newInventory ?? "—"}</span>
+              <span style={{ color: "var(--muted)" }}>{fmtDateTime(h.createdAt)}</span>
+            </div>
+          ))}
+        </div>}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "space-between" }}>
@@ -471,6 +561,8 @@ export default function ProductsPage() {
               <th style={{ padding: 6 }}>SKU</th>
               <th style={{ padding: 6 }}>Price</th>
               <th style={{ padding: 6 }}>Stock</th>
+              <th style={{ padding: 6 }}>Category</th>
+              <th style={{ padding: 6 }}>Description</th>
               <th style={{ padding: 6 }}>Status</th>
               <th style={{ padding: 6 }}>Notes</th>
             </tr>
@@ -478,12 +570,22 @@ export default function ProductsPage() {
           <tbody>
             {rows.map(r => {
               const d = (r.normalizedData ?? {}) as Record<string, unknown>;
+              const catSuggestion = r.aiSuggestions?.category;
+              const descSuggestion = r.aiSuggestions?.description;
               return <tr key={r.id} style={{ borderBottom: "1px solid var(--border)" }}>
                 <td style={{ padding: 6 }}>{r.rowNumber}</td>
                 <td style={{ padding: 6 }}><input defaultValue={String(d.name ?? "")} onBlur={e => e.target.value !== String(d.name ?? "") && editRow(r.id, "name", e.target.value)} style={{ width: 140 }} /></td>
                 <td style={{ padding: 6 }}><input defaultValue={String(d.sku ?? "")} onBlur={e => e.target.value !== String(d.sku ?? "") && editRow(r.id, "sku", e.target.value)} style={{ width: 90 }} /></td>
                 <td style={{ padding: 6 }}><input defaultValue={String(d.price ?? "")} onBlur={e => e.target.value !== String(d.price ?? "") && editRow(r.id, "price", e.target.value)} style={{ width: 80 }} /></td>
                 <td style={{ padding: 6 }}><input defaultValue={String(d.inventory ?? "")} onBlur={e => e.target.value !== String(d.inventory ?? "") && editRow(r.id, "inventory", e.target.value)} style={{ width: 70 }} /></td>
+                <td style={{ padding: 6 }}>
+                  <input defaultValue={String(d.category ?? "")} onBlur={e => e.target.value !== String(d.category ?? "") && editRow(r.id, "category", e.target.value)} style={{ width: 110 }} />
+                  {catSuggestion && <div style={{ marginTop: 3, color: "#6c52c7" }}>✨ {catSuggestion.value} <small style={{ color: "var(--muted)" }}>({catSuggestion.confidence})</small> <button onClick={() => acceptSuggestion(r.id, "category", catSuggestion.value)} style={{ textDecoration: "underline" }}>Accept</button></div>}
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input defaultValue={String(d.description ?? "")} onBlur={e => e.target.value !== String(d.description ?? "") && editRow(r.id, "description", e.target.value)} style={{ width: 160 }} />
+                  {descSuggestion && <div style={{ marginTop: 3, color: "#6c52c7", maxWidth: 200 }}>✨ {descSuggestion.value} <button onClick={() => acceptSuggestion(r.id, "description", descSuggestion.value)} style={{ textDecoration: "underline" }}>Accept</button></div>}
+                </td>
                 <td style={{ padding: 6, color: STATUS_COLOR[r.status], fontWeight: 600 }}>{r.status}</td>
                 <td style={{ padding: 6, color: "var(--muted)" }}>{r.validationErrors?.join("; ") ?? ""}</td>
               </tr>;
@@ -493,6 +595,7 @@ export default function ProductsPage() {
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button className="primary-button" onClick={commitImport} disabled={committing}>{committing ? "Importing…" : `Import Products (${job.rowsReady + job.rowsWarning})`}</button>
+        <button onClick={suggestWithAi} disabled={suggesting}>{suggesting ? "Thinking…" : "✨ Suggest categories & descriptions with AI"}</button>
         <button onClick={cancelImport}>Cancel import</button>
       </div>
     </div>}
@@ -543,7 +646,7 @@ export default function ProductsPage() {
       {filtered.map(p => {
         const v = defaultVariant(p);
         const outOfStock = isOutOfStock(p);
-        const lowStock = isLowStock(p);
+        const lowStock = isLowStock(p, defaultThreshold);
         return <div className="table-row" key={p.id} style={{ gridTemplateColumns: "28px 46px 1.6fr 1fr .9fr .9fr .9fr .9fr 70px" }}>
           <span><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} /></span>
           <span>{p.imageUrl

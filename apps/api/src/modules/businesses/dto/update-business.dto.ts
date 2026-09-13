@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, Min } from "class-validator";
+import { IsBoolean, IsNumber, IsOptional, IsString, Min } from "class-validator";
 import { Type } from "class-transformer";
 
 export class UpdateBusinessDto {
@@ -36,6 +36,18 @@ export class UpdateBusinessDto {
   @Min(0)
   @Type(() => Number)
   autonomyMaxOrderValue?: number | null;
+
+  // used by any variant without its own lowStockThreshold override
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  defaultLowStockThreshold?: number;
+
+  // master switch for the AI Opportunities/Suggestions inbox — off by default so existing businesses see no behavior change
+  @IsOptional()
+  @IsBoolean()
+  proactiveSuggestionsEnabled?: boolean;
 
   // plaintext in transit (HTTPS), encrypted at rest — an empty string clears the stored credential
   @IsOptional()

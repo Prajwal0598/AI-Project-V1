@@ -83,6 +83,8 @@ export interface Business {
   instagramPageId: string | null;
   supportEmail: string | null;
   autonomyMaxOrderValue: string | null;
+  defaultLowStockThreshold: number;
+  proactiveSuggestionsEnabled: boolean;
   whatsappAccessTokenConfigured: boolean;
   instagramAccessTokenConfigured: boolean;
   postmarkServerTokenConfigured: boolean;
@@ -164,6 +166,7 @@ export interface Variant {
   price: string;
   currency: string;
   inventory: number | null;
+  lowStockThreshold: number | null;
   active: boolean;
 }
 
@@ -192,6 +195,73 @@ export interface Product {
   variants: Variant[];
 }
 
+export interface InventoryAlert {
+  id: string;
+  businessId: string;
+  productId: string;
+  variantId: string;
+  type: "LOW_STOCK" | "OUT_OF_STOCK";
+  status: "ACTIVE" | "RESOLVED";
+  inventoryAtTrigger: number;
+  threshold: number;
+  createdAt: string;
+  resolvedAt: string | null;
+  product: { id: string; name: string; imageUrl: string | null };
+  variant: { id: string; sku: string | null; attributes: Record<string, string> | null };
+}
+
+export interface StockAdjustment {
+  id: string;
+  businessId: string;
+  productId: string;
+  variantId: string;
+  delta: number;
+  previousInventory: number | null;
+  newInventory: number | null;
+  reason: "MANUAL_EDIT" | "ORDER_RESERVED" | "ORDER_RELEASED" | "IMPORT";
+  note: string | null;
+  createdById: string | null;
+  createdAt: string;
+  product: { id: string; name: string };
+  variant: { id: string; sku: string | null };
+}
+
+export type OpportunityType = "ABANDONED_CART" | "PRODUCT_ENQUIRY" | "BACK_IN_STOCK";
+export type OpportunityPriority = "LOW" | "MEDIUM" | "HIGH";
+export type OpportunityStatus = "NEW" | "SENT" | "DISMISSED" | "SNOOZED" | "CONVERTED" | "EXPIRED";
+
+export interface Opportunity {
+  id: string;
+  businessId: string;
+  customerId: string;
+  type: OpportunityType;
+  priority: OpportunityPriority;
+  score: number;
+  confidence: number;
+  reason: string;
+  estimatedValue: string | null;
+  status: OpportunityStatus;
+  relatedProductId: string | null;
+  relatedCartId: string | null;
+  snoozedUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+  customer: { id: string; firstName: string | null; lastName: string | null; phone: string | null; email: string | null };
+  relatedProduct: { id: string; name: string; imageUrl: string | null } | null;
+  suggestion: { id: string; message: string; editedMessage: string | null } | null;
+  outcome: { id: string; sentAt: string | null; orderId: string | null; attributedRevenue: string | null } | null;
+}
+
+export interface OpportunitySummary {
+  opportunitiesDetected: number;
+  highPriority: number;
+  potentialRevenue: number;
+  awaitingAction: number;
+  messagesSentToday: number;
+  ordersInfluenced: number;
+  revenueInfluenced: number;
+}
+
 export interface ImportJob {
   id: string;
   businessId: string;
@@ -216,6 +286,10 @@ export interface ImportRow {
   matchedProductId: string | null;
   action: "CREATE" | "UPDATE" | "SKIP" | null;
   committedProductId: string | null;
+  aiSuggestions: {
+    category?: { value: string; confidence: "high" | "medium" | "low" };
+    description?: { value: string; confidence: "high" | "medium" | "low" };
+  } | null;
 }
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
@@ -275,7 +349,7 @@ export const api = {
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),
@@ -317,7 +391,7 @@ export const api = {
       request<Product>(`/businesses/${businessId}/products`, { method: "POST", body: JSON.stringify(data) }),
     update: (productId: string, data: Partial<{ name: string; description: string; category: string; brand: string; status: ProductStatus }>) =>
       request<Product>(`/products/${productId}`, { method: "PATCH", body: JSON.stringify(data) }),
-    updateVariant: (variantId: string, data: Partial<{ sku: string; price: number; currency: string; inventory: number; active: boolean }>) =>
+    updateVariant: (variantId: string, data: Partial<{ sku: string; price: number; currency: string; inventory: number; active: boolean; lowStockThreshold: number | null }>) =>
       request<Variant>(`/variants/${variantId}`, { method: "PATCH", body: JSON.stringify(data) }),
     uploadImage: (productId: string, file: File) => {
       const formData = new FormData();
@@ -339,6 +413,11 @@ export const api = {
     remove: (categoryId: string) =>
       request<void>(`/categories/${categoryId}`, { method: "DELETE" }),
   },
+  inventory: {
+    alerts: (businessId: string) => request<InventoryAlert[]>(`/businesses/${businessId}/inventory/alerts`),
+    adjustments: (businessId: string, variantId?: string) =>
+      request<StockAdjustment[]>(`/businesses/${businessId}/inventory/adjustments${variantId ? `?variantId=${variantId}` : ""}`),
+  },
   imports: {
     list: (businessId: string) => request<ImportJob[]>(`/businesses/${businessId}/imports`),
     create: (businessId: string, file: File) => {
@@ -352,6 +431,7 @@ export const api = {
       request<ImportRow>(`/imports/${jobId}/rows/${rowId}`, { method: "PATCH", body: JSON.stringify(data) }),
     commit: (id: string) => request<{ created: number; updated: number; skipped: number }>(`/imports/${id}/commit`, { method: "POST" }),
     cancel: (id: string) => request<ImportJob>(`/imports/${id}/cancel`, { method: "POST" }),
+    suggest: (id: string) => request<{ suggested: number; consideredRows: number; remainingRows: number }>(`/imports/${id}/suggest`, { method: "POST" }),
   },
   orders: {
     list: (businessId: string) => request<Order[]>(`/businesses/${businessId}/orders`),
@@ -361,5 +441,17 @@ export const api = {
       request<Order>(`/orders/${orderId}/approve`, { method: "PATCH" }),
     updateFulfillment: (orderId: string, fulfillmentStatus: Order["fulfillmentStatus"]) =>
       request<Order>(`/orders/${orderId}/fulfillment`, { method: "PATCH", body: JSON.stringify({ fulfillmentStatus }) }),
+  },
+  opportunities: {
+    list: (businessId: string, status?: OpportunityStatus) =>
+      request<Opportunity[]>(`/businesses/${businessId}/opportunities${status ? `?status=${status}` : ""}`),
+    summary: (businessId: string) => request<OpportunitySummary>(`/businesses/${businessId}/opportunities/summary`),
+    send: (opportunityId: string, editedMessage?: string) =>
+      request<Opportunity>(`/opportunities/${opportunityId}/send`, { method: "POST", body: JSON.stringify({ editedMessage }) }),
+    updateMessage: (opportunityId: string, message: string) =>
+      request<Opportunity>(`/opportunities/${opportunityId}/message`, { method: "PATCH", body: JSON.stringify({ message }) }),
+    dismiss: (opportunityId: string) => request<Opportunity>(`/opportunities/${opportunityId}/dismiss`, { method: "POST" }),
+    snooze: (opportunityId: string, hours?: 4 | 24 | 72) =>
+      request<Opportunity>(`/opportunities/${opportunityId}/snooze`, { method: "POST", body: JSON.stringify({ hours }) }),
   },
 };

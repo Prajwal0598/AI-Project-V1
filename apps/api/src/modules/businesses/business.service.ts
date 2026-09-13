@@ -116,6 +116,8 @@ export class BusinessService {
         ...(input.instagramPageId !== undefined && { instagramPageId: input.instagramPageId?.trim() || null }),
         ...(input.supportEmail !== undefined && { supportEmail: input.supportEmail?.trim().toLowerCase() || null }),
         ...(input.autonomyMaxOrderValue !== undefined && { autonomyMaxOrderValue: input.autonomyMaxOrderValue }),
+        ...(input.defaultLowStockThreshold !== undefined && { defaultLowStockThreshold: input.defaultLowStockThreshold }),
+        ...(input.proactiveSuggestionsEnabled !== undefined && { proactiveSuggestionsEnabled: input.proactiveSuggestionsEnabled }),
         ...(input.whatsappAccessToken !== undefined && { whatsappAccessTokenEncrypted: input.whatsappAccessToken.trim() ? encryptSecret(input.whatsappAccessToken.trim()) : null }),
         ...(input.instagramAccessToken !== undefined && { instagramAccessTokenEncrypted: input.instagramAccessToken.trim() ? encryptSecret(input.instagramAccessToken.trim()) : null }),
         ...(input.postmarkServerToken !== undefined && { postmarkServerTokenEncrypted: input.postmarkServerToken.trim() ? encryptSecret(input.postmarkServerToken.trim()) : null }),

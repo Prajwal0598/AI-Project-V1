@@ -5,6 +5,8 @@ import { QueueService } from "../../queue/queue.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { CreateOrderDto, OrderItemInputDto } from "./dto/create-order.dto";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
+import { InventoryService } from "../inventory/inventory.service";
+import { OpportunityService } from "../opportunities/opportunity.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
@@ -16,6 +18,8 @@ export class OrderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
+    private readonly inventory: InventoryService,
+    private readonly opportunities: OpportunityService,
   ) {}
 
   async findAll(businessId: string) {
@@ -77,6 +81,7 @@ export class OrderService {
       data: { businessId, customerId: input.customerId, type: ActivityEventType.ORDER_PLACED, summary: `Order placed — ${order.currency} ${order.total}` },
     });
     await recalculateLeadScore(this.prisma, input.customerId, businessId);
+    await this.opportunities.attachOrderOutcome(businessId, input.customerId, order);
 
     // approval-pending orders don't start the payment/fulfillment simulation until a human approves them
     if (input.paymentMethod && order.status === OrderStatus.PENDING_PAYMENT) await this.queues.scheduleOrderProgress(order.id, businessId);
@@ -136,7 +141,7 @@ export class OrderService {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      await this.releaseStock(tx, order.items);
+      const restocked = await this.releaseStock(tx, order.items);
       await this.reserveStock(tx, businessId, items);
       await tx.orderItem.deleteMany({ where: { orderId } });
       const subtotal = items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0);
@@ -144,7 +149,7 @@ export class OrderService {
       // if the amended total now exceeds the autonomy threshold, it needs a fresh human approval even if it was already approved/pending payment
       const exceedsAutonomyLimit = business?.autonomyMaxOrderValue != null && total > Number(business.autonomyMaxOrderValue);
       const status = exceedsAutonomyLimit && order.status === OrderStatus.PENDING_PAYMENT ? OrderStatus.AWAITING_APPROVAL : order.status;
-      return tx.order.update({
+      const result = await tx.order.update({
         where: { id: orderId },
         data: {
           subtotal,
@@ -155,14 +160,16 @@ export class OrderService {
         },
         include: { items: true },
       });
+      return { order: result, restocked };
     });
 
     await this.prisma.activityEvent.create({
-      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order items updated — new total ${updated.currency} ${updated.total}` },
+      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order items updated — new total ${updated.order.currency} ${updated.order.total}` },
     });
     await recalculateLeadScore(this.prisma, order.customerId, businessId);
+    for (const productId of updated.restocked) await this.inventory.notifyBackInStock(businessId, productId);
 
-    return updated;
+    return updated.order;
   }
 
   async updateStatus(orderId: string, businessId: string, input: UpdateOrderStatusDto) {
@@ -173,9 +180,10 @@ export class OrderService {
     }
 
     const releasingStock = input.status === OrderStatus.CANCELLED || input.status === OrderStatus.REFUNDED;
-    const updated = await this.prisma.$transaction(async (tx) => {
-      if (releasingStock) await this.releaseStock(tx, order.items);
-      return tx.order.update({ where: { id: orderId }, data: { status: input.status } });
+    const { updated, restocked } = await this.prisma.$transaction(async (tx) => {
+      const restockedIds = releasingStock ? await this.releaseStock(tx, order.items) : [];
+      const result = await tx.order.update({ where: { id: orderId }, data: { status: input.status } });
+      return { updated: result, restocked: restockedIds };
     });
 
     await this.prisma.activityEvent.create({
@@ -187,6 +195,7 @@ export class OrderService {
     if (order.conversationId && (input.status === OrderStatus.PAID || input.status === OrderStatus.FULFILLED)) {
       await this.prisma.conversation.update({ where: { id: order.conversationId }, data: { outcome: "SALE" } });
     }
+    for (const productId of restocked) await this.inventory.notifyBackInStock(businessId, productId);
 
     return updated;
   }
@@ -208,18 +217,32 @@ export class OrderService {
       if (result.count === 0) {
         throw new BadRequestException(`Not enough stock for "${item.name}" — only ${variant.inventory} left.`);
       }
+      await this.inventory.recordAdjustment(tx, {
+        businessId, productId: variant.productId, variantId: variant.id,
+        previousInventory: variant.inventory, newInventory: variant.inventory - item.quantity,
+        reason: "ORDER_RESERVED", threshold: variant.lowStockThreshold,
+      });
     }
   }
 
-  /** Restores stock for an order's items — used on cancellation/refund and before replacing an order's items. */
-  private async releaseStock(tx: Prisma.TransactionClient, items: { variantId: string | null; quantity: number }[]) {
+  /** Restores stock for an order's items — used on cancellation/refund and before replacing an order's items.
+   * Returns the productIds that came back into stock, so the caller can notify interested customers after its transaction commits. */
+  private async releaseStock(tx: Prisma.TransactionClient, items: { variantId: string | null; quantity: number }[]): Promise<string[]> {
+    const restockedProductIds: string[] = [];
     for (const item of items) {
       if (!item.variantId) continue;
       const variant = await tx.variant.findUnique({ where: { id: item.variantId } });
       if (variant?.inventory !== null && variant !== null) {
         await tx.variant.update({ where: { id: variant.id }, data: { inventory: { increment: item.quantity } } });
+        const result = await this.inventory.recordAdjustment(tx, {
+          businessId: variant.businessId, productId: variant.productId, variantId: variant.id,
+          previousInventory: variant.inventory, newInventory: variant.inventory + item.quantity,
+          reason: "ORDER_RELEASED", threshold: variant.lowStockThreshold,
+        });
+        if (result.restocked) restockedProductIds.push(variant.productId);
       }
     }
+    return restockedProductIds;
   }
 }
 

@@ -6,6 +6,8 @@ import { detectColumnMapping, normalizeRawRow, NormalizedRow } from "./field-map
 import { detectSourceType, parseFile } from "./file-parser";
 import { validateRow } from "./validate-row";
 import { UpdateImportRowDto } from "./dto/update-import-row.dto";
+import { ImportAiService } from "./import-ai.service";
+import { InventoryService } from "../inventory/inventory.service";
 
 const MAX_ROWS = 2000;
 
@@ -14,6 +16,8 @@ export class ImportService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly categories: CategoryService,
+    private readonly ai: ImportAiService,
+    private readonly inventory: InventoryService,
   ) {}
 
   async findAll(businessId: string) {
@@ -106,6 +110,10 @@ export class ImportService {
     if (!row) throw new NotFoundException("Import row not found.");
 
     const mergedNormalized: NormalizedRow = { ...(row.normalizedData as NormalizedRow), ...(input.normalizedData as NormalizedRow ?? {}) };
+    // once the merchant sets a field themselves (typed or accepted a suggestion), the pending suggestion for it is stale — drop it
+    const suggestions = { ...(row.aiSuggestions as Record<string, unknown> | null) };
+    for (const key of Object.keys(input.normalizedData ?? {})) delete suggestions[key];
+
     const allRows = await this.prisma.importRow.findMany({ where: { importJobId: jobId }, orderBy: { rowNumber: "asc" } });
     const { existingBySku, existingNamesLower } = await this.loadExistingCatalogue(businessId);
 
@@ -130,11 +138,37 @@ export class ImportService {
           validationErrors: result.errors as object,
           matchedProductId: result.matchedProductId,
           action: r.id === rowId && input.action ? input.action : result.action,
+          ...(r.id === rowId && { aiSuggestions: Object.keys(suggestions).length ? suggestions as object : Prisma.JsonNull }),
         },
       });
     }
     await this.prisma.importJob.update({ where: { id: jobId }, data: { rowsReady, rowsWarning, rowsError } });
     return this.prisma.importRow.findUnique({ where: { id: rowId } });
+  }
+
+  /** Asks the AI to suggest a category and/or description for every row still missing one — never overwrites data the file/merchant already provided. */
+  async suggest(jobId: string, businessId: string) {
+    const job = await this.findOne(jobId, businessId);
+    if (job.status !== ImportStatus.READY_FOR_REVIEW) throw new BadRequestException(`Import is ${job.status.toLowerCase()} and can no longer be edited.`);
+
+    const allRows = await this.prisma.importRow.findMany({ where: { importJobId: jobId, status: { not: ImportRowStatus.ERROR } }, orderBy: { rowNumber: "asc" } });
+    const eligible = allRows
+      .map((r) => ({ rowNumber: r.rowNumber, id: r.id, data: (r.normalizedData ?? {}) as NormalizedRow }))
+      .filter((r) => !r.data.category || !r.data.description);
+    if (!eligible.length) throw new BadRequestException("Every row already has a category and description — nothing to suggest.");
+
+    const batch = eligible.slice(0, this.ai.maxRowsPerCall);
+    const categories = await this.prisma.category.findMany({ where: { businessId }, select: { name: true } });
+    const suggestions = await this.ai.suggest(batch.map(({ rowNumber, data }) => ({ rowNumber, data })), categories.map((c) => c.name));
+
+    const byRowNumber = new Map(batch.map((r) => [r.rowNumber, r.id]));
+    for (const s of suggestions) {
+      const rowId = byRowNumber.get(s.rowNumber);
+      if (!rowId) continue;
+      const { rowNumber, ...fields } = s;
+      await this.prisma.importRow.update({ where: { id: rowId }, data: { aiSuggestions: fields as object } });
+    }
+    return { suggested: suggestions.length, consideredRows: batch.length, remainingRows: eligible.length - batch.length };
   }
 
   /** Creates/updates real Product+Variant records for every non-blocked row. Error rows are never silently inserted. */
@@ -158,6 +192,7 @@ export class ImportService {
     }
 
     let created = 0, updated = 0;
+    const restockedProductIds = new Set<string>();
     for (const groupRows of groups.values()) {
       const matchedProductId = groupRows.find((r) => r.action === "UPDATE" && r.matchedProductId)?.matchedProductId ?? null;
       const first = groupRows[0].normalizedData as NormalizedRow;
@@ -199,35 +234,55 @@ export class ImportService {
         if (row.action === "UPDATE" && row.matchedProductId) {
           const variant = await this.prisma.variant.findFirst({ where: { businessId, productId: row.matchedProductId } });
           if (variant) {
-            await this.prisma.variant.update({
-              where: { id: variant.id },
-              data: {
-                price: n.price, currency: n.currency ?? variant.currency,
-                inventory: n.inventory ?? variant.inventory,
-                compareAtPrice: n.compareAtPrice ?? variant.compareAtPrice,
-                costPrice: n.costPrice ?? variant.costPrice,
-                barcode: n.barcode ?? variant.barcode,
-                weight: n.weight ?? variant.weight,
-                length: n.length ?? variant.length, width: n.width ?? variant.width, height: n.height ?? variant.height,
-                attributes: (attributes ?? variant.attributes ?? Prisma.JsonNull) as object,
-              },
+            const newInventory = n.inventory ?? variant.inventory;
+            await this.prisma.$transaction(async (tx) => {
+              await tx.variant.update({
+                where: { id: variant.id },
+                data: {
+                  price: n.price, currency: n.currency ?? variant.currency,
+                  inventory: newInventory,
+                  compareAtPrice: n.compareAtPrice ?? variant.compareAtPrice,
+                  costPrice: n.costPrice ?? variant.costPrice,
+                  barcode: n.barcode ?? variant.barcode,
+                  weight: n.weight ?? variant.weight,
+                  length: n.length ?? variant.length, width: n.width ?? variant.width, height: n.height ?? variant.height,
+                  attributes: (attributes ?? variant.attributes ?? Prisma.JsonNull) as object,
+                },
+              });
+              if (n.inventory !== undefined && n.inventory !== variant.inventory) {
+                const result = await this.inventory.recordAdjustment(tx, {
+                  businessId, productId: variant.productId, variantId: variant.id,
+                  previousInventory: variant.inventory, newInventory,
+                  reason: "IMPORT", threshold: variant.lowStockThreshold,
+                });
+                if (result.restocked) restockedProductIds.add(variant.productId);
+              }
             });
           }
         } else {
-          await this.prisma.variant.create({
-            data: {
-              businessId, productId,
-              sku: n.sku ?? null,
-              price: n.price!,
-              currency: n.currency ?? "INR",
-              inventory: n.inventory ?? null,
-              barcode: n.barcode ?? null,
-              compareAtPrice: n.compareAtPrice ?? null,
-              costPrice: n.costPrice ?? null,
-              weight: n.weight ?? null,
-              length: n.length ?? null, width: n.width ?? null, height: n.height ?? null,
-              attributes: (attributes ?? Prisma.JsonNull) as object,
-            },
+          await this.prisma.$transaction(async (tx) => {
+            const created = await tx.variant.create({
+              data: {
+                businessId, productId,
+                sku: n.sku ?? null,
+                price: n.price!,
+                currency: n.currency ?? "INR",
+                inventory: n.inventory ?? null,
+                barcode: n.barcode ?? null,
+                compareAtPrice: n.compareAtPrice ?? null,
+                costPrice: n.costPrice ?? null,
+                weight: n.weight ?? null,
+                length: n.length ?? null, width: n.width ?? null, height: n.height ?? null,
+                attributes: (attributes ?? Prisma.JsonNull) as object,
+              },
+            });
+            if (created.inventory !== null) {
+              await this.inventory.recordAdjustment(tx, {
+                businessId, productId, variantId: created.id,
+                previousInventory: null, newInventory: created.inventory,
+                reason: "IMPORT",
+              });
+            }
           });
         }
         await this.prisma.importRow.update({ where: { id: row.id }, data: { committedProductId: productId } });
@@ -235,6 +290,7 @@ export class ImportService {
     }
 
     await this.prisma.importJob.update({ where: { id: jobId }, data: { status: ImportStatus.COMPLETED } });
+    for (const productId of restockedProductIds) await this.inventory.notifyBackInStock(businessId, productId);
     return { created, updated, skipped };
   }
 

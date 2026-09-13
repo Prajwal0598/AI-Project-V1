@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/app-shell";
 import { api, getBusinessId } from "../lib/api";
-import type { BusinessStats, ActivityEvent } from "../lib/api";
+import type { BusinessStats, ActivityEvent, OpportunitySummary } from "../lib/api";
 
 export default function Home() {
   const [period, setPeriod] = useState<"This week" | "Last week">("This week");
@@ -12,6 +12,7 @@ export default function Home() {
   const [stats, setStats] = useState<BusinessStats | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [showAllActivity, setShowAllActivity] = useState(false);
+  const [opportunitySummary, setOpportunitySummary] = useState<OpportunitySummary | null>(null);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
   const router = useRouter();
 
@@ -23,6 +24,7 @@ export default function Home() {
     const bizId = getBusinessId();
     if (!bizId) return;
     api.businesses.stats(bizId).then(setStats).catch(console.error);
+    api.opportunities.summary(bizId).then(setOpportunitySummary).catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -88,6 +90,16 @@ export default function Home() {
         <article className="metric-card"><div className="metric-header"><span className="metric-icon blue">↗</span><button onClick={() => router.push("/orders")}>View</button></div><p>Orders</p><h2>{stats?.orders ?? "—"}</h2></article>
         <article className="metric-card revenue"><div className="metric-header"><span className="metric-icon yellow">₹</span><button onClick={() => router.push("/orders")}>View</button></div><p>Revenue (paid orders)</p><h2>{stats ? fmtRevenue(stats.revenue) : "—"}</h2></article>
       </div>
+
+      {opportunitySummary && <article className="card" style={{ marginBottom: 20 }}>
+        <div className="card-heading"><div><h3>✦ AI Opportunities</h3><p>Relay is telling you where your next sales are.</p></div><button className="select" onClick={() => router.push("/suggestions")}>Review <i>→</i></button></div>
+        <div className="metric-grid" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginTop: 16, marginBottom: 0 }}>
+          <article className="metric-card"><p>Opportunities detected</p><h2>{opportunitySummary.opportunitiesDetected}</h2></article>
+          <article className="metric-card"><p>Awaiting your action</p><h2>{opportunitySummary.awaitingAction}</h2></article>
+          <article className="metric-card"><p>Potential revenue</p><h2>₹{opportunitySummary.potentialRevenue.toLocaleString("en-IN")}</h2></article>
+          <article className="metric-card"><p>Revenue influenced</p><h2>₹{opportunitySummary.revenueInfluenced.toLocaleString("en-IN")}</h2></article>
+        </div>
+      </article>}
 
       <div className="dashboard-grid">
         <article className="card performance-card">

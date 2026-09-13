@@ -67,6 +67,13 @@ export class ImportController {
     return this.imports.commit(id, user.businessId);
   }
 
+  @Post("imports/:id/suggest")
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.OWNER, UserRole.ADMIN)
+  suggest(@Param("id") id: string, @GetUser() user: { businessId: string }) {
+    return this.imports.suggest(id, user.businessId);
+  }
+
   @Post("imports/:id/cancel")
   @UseGuards(RolesGuard)
   @Roles(UserRole.OWNER, UserRole.ADMIN)

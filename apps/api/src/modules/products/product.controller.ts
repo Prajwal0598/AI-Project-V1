@@ -35,7 +35,7 @@ export class ProductController {
 
   @Patch("products/:productId")
   update(@Param("productId") productId: string, @GetUser() user: User, @Body() input: UpdateProductDto) {
-    return this.products.update(productId, user.businessId, input);
+    return this.products.update(productId, user.businessId, input, user.id);
   }
 
   @Delete("products/:productId")
@@ -45,7 +45,7 @@ export class ProductController {
 
   @Patch("variants/:variantId")
   updateVariant(@Param("variantId") variantId: string, @GetUser() user: User, @Body() input: UpdateVariantDto) {
-    return this.products.updateVariant(variantId, user.businessId, input);
+    return this.products.updateVariant(variantId, user.businessId, input, user.id);
   }
 
   @Post("products/:productId/image")

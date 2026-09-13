@@ -3,6 +3,7 @@ import { CartStatus, OrderStatus } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { OrderService } from "../orders/order.service";
 import type { OrderItemInputDto } from "../orders/dto/create-order.dto";
+import { QueueService } from "../../queue/queue.service";
 
 const CART_INCLUDE = { items: { include: { variant: { include: { product: true } } } } };
 // an order can still be amended (items replaced) up until it's paid — mirrors ai.service.ts's AMENDABLE_STATUSES
@@ -13,6 +14,7 @@ export class CartService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orders: OrderService,
+    private readonly queues: QueueService,
   ) {}
 
   /** Returns the conversation's active cart, creating a fresh one if none exists (or the last one was checked out). */
@@ -51,6 +53,7 @@ export class CartService {
       create: { cartId, variantId, quantity },
       update: { quantity: newQuantity },
     });
+    await this.queues.scheduleAbandonedCartFollowUp(cartId, businessId, cart.customerId);
     return this.get(cartId, businessId);
   }
 
@@ -66,13 +69,17 @@ export class CartService {
       }
       await this.prisma.cartItem.updateMany({ where: { cartId, variantId }, data: { quantity } });
     }
-    return this.get(cartId, businessId);
+    const updated = await this.get(cartId, businessId);
+    if (updated.items.length) await this.queues.scheduleAbandonedCartFollowUp(cartId, businessId, cart.customerId);
+    else await this.queues.cancelAbandonedCartFollowUp(cartId);
+    return updated;
   }
 
   async clear(cartId: string, businessId: string) {
     const cart = await this.prisma.cart.findFirst({ where: { id: cartId, businessId } });
     if (!cart) throw new NotFoundException("Cart not found.");
     await this.prisma.cartItem.deleteMany({ where: { cartId } });
+    await this.queues.cancelAbandonedCartFollowUp(cartId);
     return this.get(cartId, businessId);
   }
 
@@ -121,6 +128,7 @@ export class CartService {
         });
 
     await this.prisma.cart.update({ where: { id: cartId }, data: { status: CartStatus.CHECKED_OUT } });
+    await this.queues.cancelAbandonedCartFollowUp(cartId);
     return order;
   }
 

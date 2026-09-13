@@ -8,6 +8,8 @@ import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CartService } from "../cart/cart.service";
+import { CustomerSignalService } from "../customer-signals/customer-signal.service";
+import { OpportunityService } from "../opportunities/opportunity.service";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -79,6 +81,8 @@ export class AiService {
     private readonly orders: OrderService,
     private readonly conversations: ConversationService,
     private readonly cart: CartService,
+    private readonly signals: CustomerSignalService,
+    private readonly opportunities: OpportunityService,
   ) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey) this.client = new OpenAI({ apiKey });
@@ -259,6 +263,21 @@ ${transcript || "No previous messages. Greet the customer and share the product 
           }
         } catch (error) {
           this.logger.error(`Failed to send product card for "${product.name}"`, error instanceof Error ? error.stack : String(error));
+        }
+      }
+
+      // no purchase resulted this turn — record interest, and (if the merchant has opted in) surface a follow-up opportunity
+      if (!orderCreated) {
+        const customerName = [conversation.customer.firstName, conversation.customer.lastName].filter(Boolean).join(" ") || "there";
+        for (const product of toSend) {
+          const variant = product.variants[0];
+          await this.signals.record(businessId, conversation.customerId, "PRODUCT_ENQUIRY", { productId: product.id });
+          await this.opportunities.createWithAiMessage({
+            businessId, customerId: conversation.customerId, type: "PRODUCT_ENQUIRY",
+            reason: `Asked about ${product.name} but hasn't purchased yet.`,
+            estimatedValue: Number(variant.price), confidence: 0.6, relatedProductId: product.id,
+            customerName, businessName: conversation.business.name, productName: product.name, price: `${variant.currency} ${variant.price}`,
+          });
         }
       }
     }

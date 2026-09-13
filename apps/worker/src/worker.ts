@@ -10,6 +10,7 @@ import { QUEUES, OrderProgressQueueJob } from "./queues";
 import { processFollowUp } from "./jobs/follow-up";
 import { makeOrderProgressProcessor } from "./jobs/order-progress";
 import { processOrderExpiry } from "./jobs/order-expiry";
+import { processAbandonedCart } from "./jobs/abandoned-cart";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -55,14 +56,28 @@ orderExpiryWorker.on("failed", (job, err) => {
   console.error(`[order-expiry] job ${job?.id} failed`, err.message);
 });
 
+const abandonedCartWorker = new Worker(QUEUES.ABANDONED_CART, processAbandonedCart, {
+  connection,
+  concurrency: 3,
+});
+
+abandonedCartWorker.on("completed", (job, result) => {
+  console.log(`[abandoned-cart] job ${job.id} completed`, result);
+});
+
+abandonedCartWorker.on("failed", (job, err) => {
+  console.error(`[abandoned-cart] job ${job?.id} failed`, err.message);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}`);
 
 process.on("SIGTERM", async () => {
   await followUpWorker.close();
   await orderProgressWorker.close();
   await orderProgressQueue.close();
   await orderExpiryWorker.close();
+  await abandonedCartWorker.close();
   await connection.quit();
   process.exit(0);
 });

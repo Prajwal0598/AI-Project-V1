@@ -7,6 +7,7 @@ import { UpdateProductDto } from "./dto/update-product.dto";
 import { UpdateVariantDto } from "./dto/update-variant.dto";
 import { BulkUpdateProductsDto } from "./dto/bulk-update-products.dto";
 import { deleteProductImageFile } from "./image-storage";
+import { InventoryService } from "../inventory/inventory.service";
 
 const DEFAULT_INCLUDE = {
   variants: { orderBy: { createdAt: "asc" as const } },
@@ -18,6 +19,7 @@ export class ProductService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly categories: CategoryService,
+    private readonly inventory: InventoryService,
   ) {}
 
   async findAll(businessId: string) {
@@ -52,7 +54,7 @@ export class ProductService {
     });
   }
 
-  async update(productId: string, businessId: string, input: UpdateProductDto) {
+  async update(productId: string, businessId: string, input: UpdateProductDto, userId?: string) {
     const product = await this.prisma.product.findFirst({ where: { id: productId, businessId }, include: DEFAULT_INCLUDE });
     if (!product) throw new NotFoundException("Product not found.");
     const defaultVariant = product.variants[0];
@@ -72,15 +74,27 @@ export class ProductService {
 
     // price/currency/inventory/sku live on the default variant — update it in place when provided
     if (defaultVariant && (input.price !== undefined || input.currency !== undefined || input.inventory !== undefined || input.sku !== undefined)) {
-      await this.prisma.variant.update({
-        where: { id: defaultVariant.id },
-        data: {
-          ...(input.price !== undefined && { price: input.price }),
-          ...(input.currency !== undefined && { currency: input.currency.trim() }),
-          ...(input.inventory !== undefined && { inventory: input.inventory }),
-          ...(input.sku !== undefined && { sku: input.sku?.trim() || null }),
-        },
+      let restocked = false;
+      await this.prisma.$transaction(async (tx) => {
+        await tx.variant.update({
+          where: { id: defaultVariant.id },
+          data: {
+            ...(input.price !== undefined && { price: input.price }),
+            ...(input.currency !== undefined && { currency: input.currency.trim() }),
+            ...(input.inventory !== undefined && { inventory: input.inventory }),
+            ...(input.sku !== undefined && { sku: input.sku?.trim() || null }),
+          },
+        });
+        if (input.inventory !== undefined && input.inventory !== defaultVariant.inventory) {
+          const result = await this.inventory.recordAdjustment(tx, {
+            businessId, productId, variantId: defaultVariant.id,
+            previousInventory: defaultVariant.inventory, newInventory: input.inventory,
+            reason: "MANUAL_EDIT", createdById: userId, threshold: defaultVariant.lowStockThreshold,
+          });
+          restocked = result.restocked;
+        }
       });
+      if (restocked) await this.inventory.notifyBackInStock(businessId, productId);
       return this.prisma.product.findUnique({ where: { id: productId }, include: DEFAULT_INCLUDE });
     }
 
@@ -127,20 +141,35 @@ export class ProductService {
   }
 
   /** Updates one specific variant of a product (price/sku/inventory/etc.) — used by the product edit UI for multi-variant products. */
-  async updateVariant(variantId: string, businessId: string, input: UpdateVariantDto) {
+  async updateVariant(variantId: string, businessId: string, input: UpdateVariantDto, userId?: string) {
     const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId } });
     if (!variant) throw new NotFoundException("Variant not found.");
-    return this.prisma.variant.update({
-      where: { id: variantId },
-      data: {
-        ...(input.sku !== undefined && { sku: input.sku?.trim() || null }),
-        ...(input.price !== undefined && { price: input.price }),
-        ...(input.currency !== undefined && { currency: input.currency.trim() }),
-        ...(input.inventory !== undefined && { inventory: input.inventory }),
-        ...(input.compareAtPrice !== undefined && { compareAtPrice: input.compareAtPrice }),
-        ...(input.active !== undefined && { active: input.active }),
-      },
+    let restocked = false;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const saved = await tx.variant.update({
+        where: { id: variantId },
+        data: {
+          ...(input.sku !== undefined && { sku: input.sku?.trim() || null }),
+          ...(input.price !== undefined && { price: input.price }),
+          ...(input.currency !== undefined && { currency: input.currency.trim() }),
+          ...(input.inventory !== undefined && { inventory: input.inventory }),
+          ...(input.compareAtPrice !== undefined && { compareAtPrice: input.compareAtPrice }),
+          ...(input.active !== undefined && { active: input.active }),
+          ...(input.lowStockThreshold !== undefined && { lowStockThreshold: input.lowStockThreshold }),
+        },
+      });
+      if (input.inventory !== undefined && input.inventory !== variant.inventory) {
+        const result = await this.inventory.recordAdjustment(tx, {
+          businessId, productId: variant.productId, variantId,
+          previousInventory: variant.inventory, newInventory: input.inventory,
+          reason: "MANUAL_EDIT", createdById: userId, threshold: saved.lowStockThreshold,
+        });
+        restocked = result.restocked;
+      }
+      return saved;
     });
+    if (restocked) await this.inventory.notifyBackInStock(businessId, variant.productId);
+    return updated;
   }
 
   /** Replaces a product's image, deleting the previous uploaded file (if any) from disk. */

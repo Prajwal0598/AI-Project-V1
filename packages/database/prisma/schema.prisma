@@ -60,6 +60,23 @@ enum FulfillmentStatus {
   RETURNED
 }
 
+enum InventoryAlertType {
+  LOW_STOCK
+  OUT_OF_STOCK
+}
+
+enum InventoryAlertStatus {
+  ACTIVE
+  RESOLVED
+}
+
+enum StockAdjustmentReason {
+  MANUAL_EDIT
+  ORDER_RESERVED
+  ORDER_RELEASED
+  IMPORT
+}
+
 enum ProductSource {
   MANUAL
   IMPORT
@@ -80,6 +97,37 @@ enum ImportStatus {
   COMPLETED
   FAILED
   CANCELLED
+}
+
+// fine-grained per-customer interest events — the raw material the opportunity engine scores/reasons over;
+// deliberately separate from ActivityEvent, which is a coarse CRM timeline, not a queryable signal store
+enum CustomerSignalType {
+  PRODUCT_VIEWED
+  PRODUCT_ENQUIRY
+  BACK_IN_STOCK_WANTED
+}
+
+enum OpportunityType {
+  ABANDONED_CART
+  PRODUCT_ENQUIRY
+  BACK_IN_STOCK
+}
+
+enum OpportunityPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// NEW: not yet actioned. SENT: merchant approved/sent the suggestion. DISMISSED/SNOOZED: merchant chose not
+// to act (yet). CONVERTED: an order was attributed to it after sending. EXPIRED: went stale, never actioned.
+enum OpportunityStatus {
+  NEW
+  SENT
+  DISMISSED
+  SNOOZED
+  CONVERTED
+  EXPIRED
 }
 
 enum ImportRowStatus {
@@ -137,6 +185,8 @@ model Business {
   instagramPageId       String?        @unique
   supportEmail          String?        @unique
   autonomyMaxOrderValue Decimal?       @db.Decimal(12, 2) // orders above this total require human approval before payment/fulfillment proceeds; null = no cap
+  defaultLowStockThreshold Int         @default(5) // used by any variant without its own lowStockThreshold override
+  proactiveSuggestionsEnabled Boolean  @default(false) // master switch — off by default so existing businesses see no behavior change until they opt in
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?
@@ -155,6 +205,10 @@ model Business {
   orders        Order[]
   activity      ActivityEvent[]
   aiActionLogs  AiActionLog[]
+  inventoryAlerts   InventoryAlert[]
+  stockAdjustments  StockAdjustment[]
+  customerSignals   CustomerSignal[]
+  opportunities     Opportunity[]
 }
 
 model User {
@@ -186,6 +240,8 @@ model Customer {
   orders        Order[]
   carts         Cart[]
   activity      ActivityEvent[]
+  signals       CustomerSignal[]
+  opportunities Opportunity[]
 
   @@index([businessId, updatedAt])
   @@unique([businessId, email])
@@ -284,6 +340,10 @@ model Product {
   category    Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   variants    Variant[]
   orderItems  OrderItem[]
+  inventoryAlerts   InventoryAlert[]
+  stockAdjustments  StockAdjustment[]
+  customerSignals   CustomerSignal[]
+  opportunities     Opportunity[]
 
   @@index([businessId, status])
   @@index([categoryId])
@@ -321,6 +381,7 @@ model Variant {
   compareAtPrice Decimal? @db.Decimal(12, 2)
   costPrice      Decimal? @db.Decimal(12, 2)
   inventory      Int?
+  lowStockThreshold Int?  // overrides Business.defaultLowStockThreshold for this specific variant; null = use the business default
   weight         Decimal? @db.Decimal(10, 3) // kg — captured now for future courier integration
   length         Decimal? @db.Decimal(10, 2) // cm
   width          Decimal? @db.Decimal(10, 2)
@@ -332,6 +393,9 @@ model Variant {
   product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   orderItems     OrderItem[]
   cartItems      CartItem[]
+  inventoryAlerts   InventoryAlert[]
+  stockAdjustments  StockAdjustment[]
+  customerSignals   CustomerSignal[]
 
   @@index([businessId, active])
   @@index([productId])
@@ -352,6 +416,7 @@ model Cart {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
   items          CartItem[]
+  opportunities  Opportunity[]
 
   @@index([businessId, status])
   @@index([conversationId, status])
@@ -403,6 +468,7 @@ model ImportRow {
   matchedProductId String?         // set when an existing SKU match was found
   action           String?         // "CREATE" | "UPDATE" | "SKIP" — merchant's resolution for this row, defaults based on validation
   committedProductId String?       // set once this row has been committed to a real Product
+  aiSuggestions    Json?           // { category?: { value, confidence }, description?: { value, confidence } } — proposed, unconfirmed until the merchant accepts one into normalizedData
   createdAt        DateTime        @default(now())
   importJob        ImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
 
@@ -428,6 +494,7 @@ model Order {
   customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   items       OrderItem[]
+  opportunityOutcome OpportunityOutcome?
 
   @@index([businessId, status, createdAt])
   @@index([customerId, createdAt])
@@ -478,4 +545,118 @@ model AiActionLog {
   business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([businessId, createdAt])
+}
+
+// at most one ACTIVE alert per variant at a time (enforced in InventoryService, not the DB) — auto-resolved once restocked above threshold
+model InventoryAlert {
+  id                 String               @id @default(cuid())
+  businessId         String
+  productId          String
+  variantId          String
+  type               InventoryAlertType
+  status             InventoryAlertStatus @default(ACTIVE)
+  inventoryAtTrigger Int
+  threshold          Int
+  createdAt          DateTime             @default(now())
+  resolvedAt         DateTime?
+  business           Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product            Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant            Variant              @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, status])
+  @@index([variantId, status])
+}
+
+// full inventory audit trail — every stock-changing event, whatever the source
+model StockAdjustment {
+  id                String                @id @default(cuid())
+  businessId        String
+  productId         String
+  variantId         String
+  delta             Int                   // positive = stock increased, negative = decreased
+  previousInventory Int?
+  newInventory      Int?
+  reason            StockAdjustmentReason
+  note              String?
+  createdById       String?               // set for MANUAL_EDIT; null for system-driven reasons
+  createdAt         DateTime              @default(now())
+  business          Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product           Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant           Variant               @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, variantId, createdAt])
+  @@index([businessId, createdAt])
+}
+
+// raw interest events the opportunity engine reasons over (e.g. "customer viewed product X") — kept separate
+// from ActivityEvent (a coarse CRM timeline) so it can be queried/scored efficiently per customer+product
+model CustomerSignal {
+  id         String             @id @default(cuid())
+  businessId String
+  customerId String
+  type       CustomerSignalType
+  productId  String?
+  variantId  String?
+  metadata   Json?
+  createdAt  DateTime           @default(now())
+  business   Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer   Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product    Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variant    Variant?           @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, customerId, type])
+  @@index([businessId, productId, type])
+}
+
+// a detected sales opportunity — surfaced in the merchant's Suggestions inbox for review/send/dismiss/snooze
+model Opportunity {
+  id              String              @id @default(cuid())
+  businessId      String
+  customerId      String
+  type            OpportunityType
+  priority        OpportunityPriority @default(MEDIUM)
+  score           Int                 @default(0) // 0-100, deterministic — drives sort order and priority
+  confidence      Float               @default(0.5) // 0-1, how sure the engine is this is a real opportunity
+  reason          String              // deterministic, grounded explanation — never AI-generated, so it's always auditable
+  estimatedValue  Decimal?            @db.Decimal(12, 2)
+  status          OpportunityStatus   @default(NEW)
+  relatedProductId String?
+  relatedCartId    String?
+  snoozedUntil    DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  business        Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  relatedProduct  Product?            @relation(fields: [relatedProductId], references: [id], onDelete: SetNull)
+  relatedCart     Cart?               @relation(fields: [relatedCartId], references: [id], onDelete: SetNull)
+  suggestion      Suggestion?
+  outcome         OpportunityOutcome?
+
+  @@index([businessId, status, priority])
+  @@index([businessId, customerId, type])
+}
+
+// the AI-generated recommended action for an Opportunity — kept separate so editing the message never touches
+// the Opportunity's own scoring/lifecycle fields
+model Suggestion {
+  id            String      @id @default(cuid())
+  opportunityId String      @unique
+  message       String      // the AI-drafted (or templated) customer-facing message
+  editedMessage String?     // merchant's edit, if any — sent in place of `message` when present
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+}
+
+// what actually happened after a suggestion was sent — the P0 slice of the doc's "Learning" loop
+model OpportunityOutcome {
+  id                String      @id @default(cuid())
+  opportunityId     String      @unique
+  sentAt            DateTime?
+  orderId           String?     @unique
+  attributedRevenue Decimal?    @db.Decimal(12, 2)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  opportunity       Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  order             Order?      @relation(fields: [orderId], references: [id], onDelete: SetNull)
 }
