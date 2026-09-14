@@ -128,6 +128,8 @@ export class ShoppingFlowService {
 
     if (!matches.length) {
       await this.conversations.sendButtons(conversationId, businessId, "No products matched that search.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      // reset to IDLE so a dead-end search doesn't strand the customer outside the greeting/menu path
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE" } });
       return;
     }
 
@@ -160,6 +162,8 @@ export class ShoppingFlowService {
     const available = products.filter((p) => p.variants[0]);
     if (!available.length) {
       await this.conversations.sendButtons(conversationId, businessId, "No products are available here right now.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      // reset to IDLE so this dead-end doesn't strand the customer outside the greeting/menu path
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE" } });
       return;
     }
 

@@ -116,6 +116,18 @@ export class WhatsAppWebhookService {
       return;
     }
 
+    // a plain greeting (or explicit "menu"/"shop") always (re)opens the deterministic menu, regardless of
+    // shopping state — lets a customer restart the flow at any point instead of getting stuck if an earlier
+    // state was left mid-flow (e.g. a dead-end with no matching products) with no other way back to the menu
+    if (GREETING_RE.test(msg.text)) {
+      try {
+        await this.shoppingFlow.sendMainMenu(conversation.id, business.id);
+      } catch (err) {
+        this.logger.error(`Shopping flow failed to send the main menu for conversation ${conversation.id}`, err);
+      }
+      return;
+    }
+
     // any state where the customer has already engaged the shopping flow handles its own free text
     // (quantity/address entry, checkout nudges, or a product search) rather than falling through to the AI
     if (conversation.shoppingState !== "IDLE") {
@@ -126,16 +138,6 @@ export class WhatsAppWebhookService {
         this.logger.error(`Shopping flow failed to handle free text for conversation ${conversation.id}`, err);
         return;
       }
-    }
-
-    // a plain greeting (or explicit "menu"/"shop") opens the deterministic menu instead of the AI catalogue dump
-    if (conversation.shoppingState === "IDLE" && GREETING_RE.test(msg.text)) {
-      try {
-        await this.shoppingFlow.sendMainMenu(conversation.id, business.id);
-      } catch (err) {
-        this.logger.error(`Shopping flow failed to send the main menu for conversation ${conversation.id}`, err);
-      }
-      return;
     }
 
     // fully autonomous reply — no human approval step
