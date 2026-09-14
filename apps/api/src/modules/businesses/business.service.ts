@@ -45,8 +45,8 @@ export class BusinessService {
       this.prisma.conversation.count({ where: { businessId } }),
       this.prisma.conversation.count({ where: { businessId, status: "OPEN" } }),
       this.prisma.order.count({ where: { businessId } }),
-      // orders that need the merchant to actually do something right now: approve, or start fulfillment
-      this.prisma.order.count({ where: { businessId, OR: [{ status: "AWAITING_APPROVAL" }, { status: "PAID", fulfillmentStatus: "NOT_STARTED" }] } }),
+      // orders that need the merchant to actually do something right now: approve, confirm/collect payment, or start fulfillment
+      this.prisma.order.count({ where: { businessId, OR: [{ status: "AWAITING_APPROVAL" }, { status: "PENDING_PAYMENT" }, { status: "PAID", fulfillmentStatus: "NOT_STARTED" }] } }),
       this.prisma.order.aggregate({
         where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] } },
         _sum: { total: true },

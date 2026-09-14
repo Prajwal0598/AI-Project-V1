@@ -201,15 +201,19 @@ export class ShoppingFlowService {
     await this.signals.record(businessId, customerId, "PRODUCT_VIEWED", { productId });
 
     const first = product.variants[0];
-    const caption = `*${product.name}*${product.description ? `\n_${product.description}_` : ""}\n💰 ${fmtMoney(first.price, first.currency)}`;
+    const isSingleVariant = product.variants.length === 1;
+    // for a single variant, fold the quantity/stock prompt into the SAME message as the product photo/caption
+    // instead of a separate follow-up — two separate outbound messages can arrive out of order on WhatsApp
+    // (image delivery is fetched asynchronously by Meta, so a plain-text follow-up can render first)
+    const followUp = isSingleVariant ? (first.inventory === 0 ? "\n\n😔 This item is currently out of stock." : "\n\n🔢 How many would you like? Reply with a number.") : "";
+    const caption = `*${product.name}*${product.description ? `\n_${product.description}_` : ""}\n💰 ${fmtMoney(first.price, first.currency)}${followUp}`;
     if (product.imageUrl) {
       await this.conversations.sendImage(conversationId, businessId, toPublicImageUrl(product.imageUrl), caption);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, caption);
     }
 
-    if (product.variants.length === 1) {
-      await this.conversations.sendMessage(conversationId, businessId, first.inventory === 0 ? "😔 This item is currently out of stock." : "🔢 How many would you like? Reply with a number.");
+    if (isSingleVariant) {
       await this.prisma.conversation.update({
         where: { id: conversationId },
         data: { shoppingState: first.inventory === 0 ? "VIEWING_PRODUCT" : "AWAITING_QUANTITY", activeProductId: productId, pendingVariantId: first.inventory === 0 ? null : first.id },
