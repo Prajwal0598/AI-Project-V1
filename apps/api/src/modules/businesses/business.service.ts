@@ -117,6 +117,7 @@ export class BusinessService {
         ...(input.supportEmail !== undefined && { supportEmail: input.supportEmail?.trim().toLowerCase() || null }),
         ...(input.autonomyMaxOrderValue !== undefined && { autonomyMaxOrderValue: input.autonomyMaxOrderValue }),
         ...(input.defaultLowStockThreshold !== undefined && { defaultLowStockThreshold: input.defaultLowStockThreshold }),
+        ...(input.defaultRepeatPurchaseDays !== undefined && { defaultRepeatPurchaseDays: input.defaultRepeatPurchaseDays }),
         ...(input.proactiveSuggestionsEnabled !== undefined && { proactiveSuggestionsEnabled: input.proactiveSuggestionsEnabled }),
         ...(input.whatsappAccessToken !== undefined && { whatsappAccessTokenEncrypted: input.whatsappAccessToken.trim() ? encryptSecret(input.whatsappAccessToken.trim()) : null }),
         ...(input.instagramAccessToken !== undefined && { instagramAccessTokenEncrypted: input.instagramAccessToken.trim() ? encryptSecret(input.instagramAccessToken.trim()) : null }),

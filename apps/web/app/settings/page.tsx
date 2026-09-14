@@ -29,6 +29,7 @@ export default function SettingsPage() {
   const [postmarkToken, setPostmarkToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     const bizId = getBusinessId();
@@ -92,7 +93,7 @@ export default function SettingsPage() {
   async function save() {
     const bizId = getBusinessId();
     if (!bizId) return;
-    setSaving(true); setSaved(false);
+    setSaving(true); setSaved(false); setSaveError("");
     try {
       const updated = await api.businesses.update(bizId, {
         name: name.trim(),
@@ -112,11 +113,12 @@ export default function SettingsPage() {
       setWaAccessToken(""); setIgAccessToken(""); setPostmarkToken(""); // never keep secrets in the input after saving
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-    } catch (err) { console.error(err); }
+    } catch (err) { setSaveError(err instanceof Error ? err.message : "Could not save settings."); }
     finally { setSaving(false); }
   }
 
   return <AppShell title="Settings" subtitle="Manage your workspace, channels, and AI controls.">
+    {saveError && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{saveError} <button onClick={() => setSaveError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
     <section className="settings-section">
       <h2>Business profile</h2>
       <p>This information is used by the AI agent to personalise replies.</p>

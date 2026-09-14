@@ -44,6 +44,13 @@ export class UpdateBusinessDto {
   @Type(() => Number)
   defaultLowStockThreshold?: number;
 
+  // fallback reorder window (days) used by the REPEAT_PURCHASE opportunity scan when a customer has only bought a product once
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Type(() => Number)
+  defaultRepeatPurchaseDays?: number;
+
   // master switch for the AI Opportunities/Suggestions inbox — off by default so existing businesses see no behavior change
   @IsOptional()
   @IsBoolean()
