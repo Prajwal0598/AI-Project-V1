@@ -6,11 +6,13 @@ import { ValidationPipe } from "@nestjs/common";
 import { config } from "dotenv";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
+import { assertRequiredEnv } from "./common/env";
 
 async function bootstrap() {
   for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
     if (existsSync(path)) config({ path, override: false });
   }
+  assertRequiredEnv();
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix("api");
   // default "same-origin" CORP blocks the browser (not curl) from loading uploaded product images

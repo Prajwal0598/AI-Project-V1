@@ -1,9 +1,10 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import type { User } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { CustomerService } from "./customer.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { CreateIdentityDto } from "./dto/create-identity.dto";
+import { UpdateCustomerDto } from "./dto/update-customer.dto";
 
 @Controller()
 export class CustomerController {
@@ -24,6 +25,11 @@ export class CustomerController {
   @Get("customers/:customerId")
   get(@Param("customerId") customerId: string, @GetUser() user: User) {
     return this.customers.get(customerId, user.businessId);
+  }
+
+  @Patch("customers/:customerId")
+  update(@Param("customerId") customerId: string, @GetUser() user: User, @Body() input: UpdateCustomerDto) {
+    return this.customers.update(customerId, user.businessId, input);
   }
 
   @Post("customers/:customerId/identities")

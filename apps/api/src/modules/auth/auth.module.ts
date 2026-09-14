@@ -10,7 +10,8 @@ import { JwtStrategy } from "./jwt.strategy";
     PassportModule,
     JwtModule.registerAsync({
       useFactory: () => ({
-        secret: process.env.JWT_SECRET ?? "change-me",
+        // no fallback secret — main.ts refuses to boot at all if JWT_SECRET is missing/weak
+        secret: process.env.JWT_SECRET,
         signOptions: { expiresIn: (process.env.JWT_EXPIRES_IN ?? "7d") as `${number}${'s'|'m'|'h'|'d'|'w'|'y'}` },
       }),
     }),

@@ -8,6 +8,7 @@ import { UpdateVariantDto } from "./dto/update-variant.dto";
 import { BulkUpdateProductsDto } from "./dto/bulk-update-products.dto";
 import { deleteProductImageFile } from "./image-storage";
 import { InventoryService } from "../inventory/inventory.service";
+import { OpportunityService } from "../opportunities/opportunity.service";
 
 const DEFAULT_INCLUDE = {
   variants: { orderBy: { createdAt: "asc" as const } },
@@ -20,6 +21,7 @@ export class ProductService {
     private readonly prisma: PrismaService,
     private readonly categories: CategoryService,
     private readonly inventory: InventoryService,
+    private readonly opportunities: OpportunityService,
   ) {}
 
   async findAll(businessId: string) {
@@ -32,7 +34,7 @@ export class ProductService {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
     if (!business) throw new NotFoundException("Business not found.");
     const categoryId = await this.categories.resolveIdByName(businessId, input.category);
-    return this.prisma.product.create({
+    const product = await this.prisma.product.create({
       data: {
         businessId,
         name: input.name.trim(),
@@ -52,6 +54,28 @@ export class ProductService {
       },
       include: DEFAULT_INCLUDE,
     });
+    if (categoryId) this.notifyNewProductMatch(business, product, categoryId).catch(() => undefined);
+    return product;
+  }
+
+  /** Best-effort, fire-and-forget: tells any customer who's previously viewed/enquired about this category (but hasn't been told about this exact product yet) that something new just arrived. */
+  private async notifyNewProductMatch(business: { id: string; name: string }, product: { id: string; name: string }, categoryId: string) {
+    const variant = await this.prisma.variant.findFirst({ where: { productId: product.id }, orderBy: { createdAt: "asc" } });
+    const interested = await this.prisma.customerSignal.findMany({
+      where: { businessId: business.id, type: { in: ["PRODUCT_VIEWED", "PRODUCT_ENQUIRY"] }, product: { categoryId } },
+      select: { customerId: true },
+      distinct: ["customerId"],
+    });
+    for (const { customerId } of interested) {
+      const customer = await this.prisma.customer.findUnique({ where: { id: customerId }, select: { firstName: true, lastName: true } });
+      const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+      await this.opportunities.createWithAiMessage({
+        businessId: business.id, customerId, type: "NEW_PRODUCT_MATCH",
+        reason: "New arrival in a category they've previously shown interest in.",
+        confidence: 0.6, relatedProductId: product.id, estimatedValue: variant ? Number(variant.price) : undefined,
+        customerName, businessName: business.name, productName: product.name, price: variant ? `${variant.currency} ${variant.price}` : undefined,
+      });
+    }
   }
 
   async update(productId: string, businessId: string, input: UpdateProductDto, userId?: string) {

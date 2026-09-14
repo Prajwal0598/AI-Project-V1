@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
-import type { Category, ImportJob, ImportRow, InventoryAlert, Product, ProductStatus, StockAdjustment, Variant } from "../../lib/api";
+import type { Category, ImportJob, ImportRow, InventoryAlert, Product, ProductRelation, ProductStatus, StockAdjustment, Variant } from "../../lib/api";
 
 const STATUS_COLOR: Record<ImportRow["status"], string> = { READY: "#237a52", WARNING: "#8a6a1f", ERROR: "#b94940" };
 
@@ -67,6 +67,11 @@ export default function ProductsPage() {
   const [deletingProduct, setDeletingProduct] = useState(false);
   const [editImageUrl, setEditImageUrl] = useState<string | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
+
+  // cross-sell / upsell relations for the product being edited
+  const [relations, setRelations] = useState<ProductRelation[]>([]);
+  const [newRelationProductId, setNewRelationProductId] = useState("");
+  const [newRelationType, setNewRelationType] = useState<"CROSS_SELL" | "UPSELL">("CROSS_SELL");
 
   // filters
   const [search, setSearch] = useState("");
@@ -256,11 +261,31 @@ export default function ProductsPage() {
     setEditVariants(variantState);
     setShowHistory(false);
     setHistory([]);
+    setRelations([]);
+    setNewRelationProductId("");
+    api.productRelations.list(p.id).then(setRelations).catch(console.error);
     setError("");
   }
 
   function updateEditVariant(variantId: string, patch: Partial<VariantEdit>) {
     setEditVariants(prev => ({ ...prev, [variantId]: { ...prev[variantId], ...patch } }));
+  }
+
+  async function addRelation() {
+    const bizId = getBusinessId();
+    if (!bizId || !editingProduct || !newRelationProductId) return;
+    try {
+      const created = await api.productRelations.create(bizId, { productId: editingProduct.id, relatedProductId: newRelationProductId, type: newRelationType });
+      setRelations(prev => [created, ...prev]);
+      setNewRelationProductId("");
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not add this relation."); }
+  }
+
+  async function removeRelation(id: string) {
+    try {
+      await api.productRelations.remove(id);
+      setRelations(prev => prev.filter(r => r.id !== id));
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not remove this relation."); }
   }
 
   async function loadHistory() {
@@ -527,6 +552,30 @@ export default function ProductsPage() {
             </div>
           ))}
         </div>}
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <h4 style={{ marginBottom: 6 }}>Related products (cross-sell / upsell)</h4>
+        <p style={{ fontSize: 11, color: "var(--muted)", margin: "0 0 8px" }}>Suggested to a customer automatically after they buy this product.</p>
+        {relations.length === 0 && <p style={{ fontSize: 12, color: "var(--muted)" }}>No related products configured.</p>}
+        {relations.map(r => (
+          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
+            <span className="source-chip" style={{ fontSize: 10 }}>{r.type === "CROSS_SELL" ? "Cross-sell" : "Upsell"}</span>
+            <span style={{ flex: 1 }}>{r.relatedProduct.name}</span>
+            <button onClick={() => removeRelation(r.id)}>Remove</button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <select value={newRelationProductId} onChange={e => setNewRelationProductId(e.target.value)} style={{ flex: 1 }}>
+            <option value="">Choose a product…</option>
+            {products.filter(p => p.id !== editingProduct?.id).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <select value={newRelationType} onChange={e => setNewRelationType(e.target.value as "CROSS_SELL" | "UPSELL")}>
+            <option value="CROSS_SELL">Cross-sell</option>
+            <option value="UPSELL">Upsell</option>
+          </select>
+          <button onClick={addRelation} disabled={!newRelationProductId}>Add</button>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "space-between" }}>

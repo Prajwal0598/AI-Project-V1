@@ -7,10 +7,11 @@ import { CreateOrderDto, OrderItemInputDto } from "./dto/create-order.dto";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 import { InventoryService } from "../inventory/inventory.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
+import { ProductRelationService } from "../product-relations/product-relation.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
-// an order can still have its items/address changed by the customer up until it's marked paid
+// an order can still have its items/address changed by the customer up until it's paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
 
 @Injectable()
@@ -20,6 +21,7 @@ export class OrderService {
     private readonly queues: QueueService,
     private readonly inventory: InventoryService,
     private readonly opportunities: OpportunityService,
+    private readonly productRelations: ProductRelationService,
   ) {}
 
   async findAll(businessId: string) {
@@ -82,6 +84,7 @@ export class OrderService {
     });
     await recalculateLeadScore(this.prisma, input.customerId, businessId);
     await this.opportunities.attachOrderOutcome(businessId, input.customerId, order);
+    await this.suggestCrossSellUpsell(businessId, input.customerId, order.items, customer, business?.name ?? "our store");
 
     // approval-pending orders don't start the payment/fulfillment simulation until a human approves them
     if (input.paymentMethod && order.status === OrderStatus.PENDING_PAYMENT) await this.queues.scheduleOrderProgress(order.id, businessId);
@@ -198,6 +201,31 @@ export class OrderService {
     for (const productId of restocked) await this.inventory.notifyBackInStock(businessId, productId);
 
     return updated;
+  }
+
+  /** After a purchase, suggests any merchant-configured cross-sell/upsell companions for the products just bought. */
+  private async suggestCrossSellUpsell(businessId: string, customerId: string, items: { productId: string | null; name: string }[], customer: { firstName: string | null; lastName: string | null } | null, businessName: string) {
+    const purchasedProductIds = new Set(items.map((i) => i.productId).filter((id): id is string => !!id));
+    if (!purchasedProductIds.size) return;
+    const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+
+    for (const item of items) {
+      if (!item.productId) continue;
+      const relations = await this.productRelations.getRelationsFor(businessId, item.productId);
+      for (const relation of relations) {
+        if (purchasedProductIds.has(relation.relatedProductId)) continue; // don't suggest something already in this same order
+        const variant = relation.relatedProduct.variants[0];
+        if (!variant) continue;
+        await this.opportunities.createWithAiMessage({
+          businessId, customerId, type: relation.type,
+          reason: relation.type === "CROSS_SELL"
+            ? `Bought ${item.name}, which pairs with ${relation.relatedProduct.name}.`
+            : `Bought ${item.name} — ${relation.relatedProduct.name} is a premium alternative worth mentioning next time.`,
+          estimatedValue: Number(variant.price), confidence: 0.7, relatedProductId: relation.relatedProductId,
+          customerName, businessName, productName: relation.relatedProduct.name, price: `${variant.currency} ${variant.price}`, basedOnProductName: item.name,
+        });
+      }
+    }
   }
 
   /** Validates stock for items linked to a real variant and decrements it — throws if any item is out of stock. */

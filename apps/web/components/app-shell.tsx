@@ -13,6 +13,7 @@ const items = [
   ["Products", "/products", "P"],
   ["Orders", "/orders", "R"],
   ["Automations", "/automations", "A"],
+  ["Promotions", "/promotions", "%"],
   ["Analytics", "/analytics", "G"],
   ["Settings", "/settings", "S"]
 ];

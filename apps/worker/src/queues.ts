@@ -3,6 +3,9 @@ export const QUEUES = {
   ORDER_PROGRESS: "order-progress",
   ORDER_EXPIRY: "order-expiry",
   ABANDONED_CART: "abandoned-cart",
+  REPEAT_PURCHASE_SCAN: "repeat-purchase-scan",
+  UNANSWERED_CONVERSATION_SCAN: "unanswered-conversation-scan",
+  CUSTOMER_HEALTH_SCAN: "customer-health-scan",
 } as const;
 
 export interface FollowUpJobData {
@@ -38,3 +41,8 @@ export interface AbandonedCartJobData {
   businessId: string;
   customerId: string;
 }
+
+// no meaningful payload — a scheduled/repeatable job that scans every opted-in business each run
+export type RepeatPurchaseScanJobData = Record<string, never>;
+export type UnansweredConversationScanJobData = Record<string, never>;
+export type CustomerHealthScanJobData = Record<string, never>;

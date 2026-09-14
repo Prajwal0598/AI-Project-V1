@@ -24,4 +24,12 @@ export class CustomerSignalService {
     });
     return signals.map((s) => s.customerId);
   }
+
+  /** How many view/enquiry interactions this customer has had with this product recently — repeated interest without a purchase is the HIGH_PURCHASE_INTENT signal. */
+  async countRecentSignals(businessId: string, customerId: string, productId: string, sinceHours = 48): Promise<number> {
+    const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000);
+    return this.prisma.customerSignal.count({
+      where: { businessId, customerId, productId, type: { in: INTEREST_TYPES }, createdAt: { gte: since } },
+    });
+  }
 }

@@ -17,11 +17,13 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
 import { QueueModule } from "./queue/queue.module";
 import { InventoryModule } from "./modules/inventory/inventory.module";
 import { OpportunityModule } from "./modules/opportunities/opportunity.module";
+import { ProductRelationModule } from "./modules/product-relations/product-relation.module";
+import { PromotionModule } from "./modules/promotions/promotion.module";
 
 @Module({
   imports: [
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]), // default: 100 req/min per IP across the API
-    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, ImportModule, WebhooksModule, QueueModule, InventoryModule, OpportunityModule,
+    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, ImportModule, WebhooksModule, QueueModule, InventoryModule, OpportunityModule, ProductRelationModule, PromotionModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -26,6 +26,11 @@ export default function LeadsPage() {
     return custName(c).toLowerCase().includes(q) || c.email?.toLowerCase().includes(q) || c.phone?.includes(q);
   }), [customers, query]);
 
+  async function toggleOptOut(c: Customer) {
+    const updated = await api.customers.update(c.id, { proactiveMessagingOptOut: !c.proactiveMessagingOptOut });
+    setCustomers(prev => prev.map(x => (x.id === c.id ? updated : x)));
+  }
+
   return <AppShell title="Leads" subtitle="Prioritise people most likely to become customers.">
     <div className="filter-row">
       <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search leads" />
@@ -34,7 +39,7 @@ export default function LeadsPage() {
       <span>{filtered.length} {loading ? "…" : "leads"}</span>
     </div>
     <div className="data-card lead-table">
-      <div className="table-head"><span>Customer</span><span>Channel</span><span>Score</span><span>Type</span><span>Activity</span></div>
+      <div className="table-head"><span>Customer</span><span>Channel</span><span>Score</span><span>Type</span><span>Activity</span><span>Proactive msgs</span></div>
       {loading && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
       {!loading && filtered.length === 0 && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>No leads found.</p>}
       {filtered.map(c => (
@@ -44,6 +49,9 @@ export default function LeadsPage() {
           <span className={`intent ${(c.leadScore?.score ?? 0) > 80 ? "hot" : ""}`}>{c.leadScore?.score ?? "—"}{c.leadScore ? "/100" : ""}</span>
           <span className="stage-chip">{c.type === "CUSTOMER" ? "Customer" : "Lead"}</span>
           <span className="activity-copy">{c._count.conversations} conv · {c._count.orders} orders</span>
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--muted)" }}>
+            <input type="checkbox" checked={!c.proactiveMessagingOptOut} onChange={() => toggleOptOut(c)} /> {c.proactiveMessagingOptOut ? "Opted out" : "Allowed"}
+          </label>
         </div>
       ))}
     </div>

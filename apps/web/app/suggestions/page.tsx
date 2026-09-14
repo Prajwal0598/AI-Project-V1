@@ -2,12 +2,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
-import type { Business, Opportunity, OpportunityPriority, OpportunityStatus, OpportunitySummary } from "../../lib/api";
+import type { Business, BestSendHour, Opportunity, OpportunityPriority, OpportunityStatus, OpportunitySummary } from "../../lib/api";
+
+function fmtHour(hour: number): string {
+  const period = hour >= 12 ? "pm" : "am";
+  const h = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h}${period}`;
+}
 
 const TYPE_LABEL: Record<Opportunity["type"], string> = {
   ABANDONED_CART: "Abandoned cart",
   PRODUCT_ENQUIRY: "Product enquiry",
   BACK_IN_STOCK: "Back in stock",
+  HIGH_PURCHASE_INTENT: "High purchase intent",
+  REPEAT_PURCHASE: "Repeat purchase",
+  CROSS_SELL: "Cross-sell",
+  UPSELL: "Upsell",
+  NEW_PRODUCT_MATCH: "New product match",
+  PROMOTION: "Promotion",
+  UNANSWERED_CONVERSATION: "Unanswered conversation",
+  LOW_ENGAGEMENT: "Low engagement",
+  HIGH_VALUE_CUSTOMER: "High-value customer",
 };
 
 const PRIORITY_COLOR: Record<OpportunityPriority, string> = { HIGH: "#b94940", MEDIUM: "#8a6a1f", LOW: "#777484" };
@@ -37,6 +52,7 @@ export default function SuggestionsPage() {
   const [error, setError] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [bestHours, setBestHours] = useState<Record<string, BestSendHour | null>>({});
 
   function load() {
     const bizId = getBusinessId();
@@ -51,6 +67,16 @@ export default function SuggestionsPage() {
   }
 
   useEffect(load, [tab]);
+
+  useEffect(() => {
+    const uncached = [...new Set(opportunities.map(o => o.customerId))].filter(id => !(id in bestHours));
+    if (uncached.length === 0) return;
+    uncached.forEach(customerId => {
+      api.opportunities.bestSendHour(customerId)
+        .then(result => setBestHours(prev => ({ ...prev, [customerId]: result })))
+        .catch(() => setBestHours(prev => ({ ...prev, [customerId]: null })));
+    });
+  }, [opportunities]);
 
   const messageFor = (o: Opportunity) => drafts[o.id] ?? o.suggestion?.editedMessage ?? o.suggestion?.message ?? "";
 
@@ -116,6 +142,7 @@ export default function SuggestionsPage() {
               <span className="source-chip" style={{ fontSize: 10 }}>{TYPE_LABEL[o.type]}</span>
               <h3 style={{ margin: "8px 0 2px" }}>{customerName(o.customer)}</h3>
               <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>{o.reason}</p>
+              {bestHours[o.customerId] && <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 11 }}>💡 Best time to reach them: ~{fmtHour(bestHours[o.customerId]!.hour)} (from {bestHours[o.customerId]!.sampleSize} past replies)</p>}
             </div>
             <div style={{ textAlign: "right" }}>
               {o.relatedProduct && <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>

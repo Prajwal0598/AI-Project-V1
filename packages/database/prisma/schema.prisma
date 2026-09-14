@@ -111,6 +111,26 @@ enum OpportunityType {
   ABANDONED_CART
   PRODUCT_ENQUIRY
   BACK_IN_STOCK
+  HIGH_PURCHASE_INTENT
+  REPEAT_PURCHASE
+  CROSS_SELL
+  UPSELL
+  NEW_PRODUCT_MATCH
+  PROMOTION
+  UNANSWERED_CONVERSATION
+  LOW_ENGAGEMENT
+  HIGH_VALUE_CUSTOMER
+}
+
+enum PromotionTargetSegment {
+  ALL_CUSTOMERS
+  CATEGORY_BUYERS
+  HIGH_VALUE_CUSTOMERS
+}
+
+enum ProductRelationType {
+  CROSS_SELL
+  UPSELL
 }
 
 enum OpportunityPriority {
@@ -187,6 +207,9 @@ model Business {
   autonomyMaxOrderValue Decimal?       @db.Decimal(12, 2) // orders above this total require human approval before payment/fulfillment proceeds; null = no cap
   defaultLowStockThreshold Int         @default(5) // used by any variant without its own lowStockThreshold override
   proactiveSuggestionsEnabled Boolean  @default(false) // master switch — off by default so existing businesses see no behavior change until they opt in
+  defaultRepeatPurchaseDays   Int      @default(30) // fallback reorder window used when a customer has only bought a product once (not enough history to average an interval)
+  defaultLowEngagementDays    Int      @default(45) // a previously-active customer with no activity for this long is eligible for a LOW_ENGAGEMENT win-back nudge
+  highValueLeadScoreThreshold Int      @default(70) // LeadScore.score at/above this marks a customer eligible for HIGH_VALUE_CUSTOMER nudges
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?
@@ -209,6 +232,9 @@ model Business {
   stockAdjustments  StockAdjustment[]
   customerSignals   CustomerSignal[]
   opportunities     Opportunity[]
+  automationRules   AutomationRule[]
+  productRelations  ProductRelation[]
+  promotions        Promotion[]
 }
 
 model User {
@@ -231,6 +257,7 @@ model Customer {
   phone         String?
   type          CustomerType   @default(LEAD)
   tags          String[]       @default([])
+  proactiveMessagingOptOut Boolean @default(false) // customer opted out of proactive/unsolicited AI outreach (still gets normal replies)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -344,6 +371,8 @@ model Product {
   stockAdjustments  StockAdjustment[]
   customerSignals   CustomerSignal[]
   opportunities     Opportunity[]
+  relationsFrom     ProductRelation[] @relation("ProductRelationsFrom")
+  relationsTo       ProductRelation[] @relation("ProductRelationsTo")
 
   @@index([businessId, status])
   @@index([categoryId])
@@ -622,6 +651,7 @@ model Opportunity {
   status          OpportunityStatus   @default(NEW)
   relatedProductId String?
   relatedCartId    String?
+  relatedPromotionId String?          // which broadcast Promotion this PROMOTION-type opportunity came from — without this, two different promotions to the same customer would dedup against each other (they share no relatedProductId/relatedCartId to differentiate)
   snoozedUntil    DateTime?
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
@@ -629,6 +659,7 @@ model Opportunity {
   customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
   relatedProduct  Product?            @relation(fields: [relatedProductId], references: [id], onDelete: SetNull)
   relatedCart     Cart?               @relation(fields: [relatedCartId], references: [id], onDelete: SetNull)
+  relatedPromotion Promotion?         @relation(fields: [relatedPromotionId], references: [id], onDelete: SetNull)
   suggestion      Suggestion?
   outcome         OpportunityOutcome?
 
@@ -659,4 +690,63 @@ model OpportunityOutcome {
   updatedAt         DateTime    @updatedAt
   opportunity       Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
   order             Order?      @relation(fields: [orderId], references: [id], onDelete: SetNull)
+}
+
+// per-business, per-opportunity-type merchant controls — governs whether an opportunity is created at all,
+// whether it auto-sends or waits for approval, and simple guardrails against over-messaging
+model AutomationRule {
+  id                            String          @id @default(cuid())
+  businessId                    String
+  opportunityType               OpportunityType
+  enabled                       Boolean         @default(true)
+  autoSend                      Boolean         @default(false) // false = approval-first (the doc's default for every type except order/status updates)
+  businessHoursStart            Int?            // hour 0-23 local to Business.timezone; null = no restriction
+  businessHoursEnd              Int?            // hour 0-23; auto-send only fires within [start, end)
+  frequencyCapPerCustomerPerDay Int?             // max NEW opportunities of any type created for one customer per day; null = no cap
+  minConfidenceForAutoSend      Float           @default(0) // below this, auto-send is skipped even if enabled — falls back to manual review (doc: "Low-confidence suggestion -> Manual review")
+  personalizedTiming            Boolean         @default(false) // when true, auto-send targets each customer's own inferred best-reply hour instead of the static business-hours window (falls back to businessHours if not enough history)
+  createdAt                     DateTime        @default(now())
+  updatedAt                     DateTime        @updatedAt
+  business                      Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, opportunityType])
+}
+
+// merchant-configured "goes well with" (CROSS_SELL) or "premium alternative" (UPSELL) links between products —
+// drives the CROSS_SELL/UPSELL opportunity types after an order completes; deliberately manual, not
+// auto-derived from purchase-basket analysis (a much larger data-science task, out of scope here)
+model ProductRelation {
+  id               String              @id @default(cuid())
+  businessId       String
+  productId        String              // the product the customer just bought
+  relatedProductId String              // the product to suggest
+  type             ProductRelationType
+  createdAt        DateTime            @default(now())
+  business         Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product          Product             @relation("ProductRelationsFrom", fields: [productId], references: [id], onDelete: Cascade)
+  relatedProduct   Product             @relation("ProductRelationsTo", fields: [relatedProductId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, relatedProductId, type])
+  @@index([businessId, productId])
+}
+
+// merchant-authored discount/promo, broadcast to a chosen customer segment — drives the PROMOTION opportunity
+// type. Deliberately NOT AI-drafted (unlike every other Suggestion message): a promo often carries specific
+// terms/codes the merchant wrote themselves, so the exact text is sent as-is, never touched by the model.
+model Promotion {
+  id                 String                 @id @default(cuid())
+  businessId         String
+  title              String
+  message            String                 // sent verbatim as the Suggestion message for every targeted customer
+  discountDescription String?               // display-only label, e.g. "20% off" — no real coupon/code enforcement (matches the rest of this project's simulated-payment philosophy)
+  targetSegment      PromotionTargetSegment
+  categoryId         String?                // required when targetSegment = CATEGORY_BUYERS
+  broadcastedAt      DateTime?
+  broadcastCount     Int                    @default(0)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  business           Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  opportunities      Opportunity[]
+
+  @@index([businessId, createdAt])
 }

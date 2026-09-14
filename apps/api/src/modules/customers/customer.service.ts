@@ -65,6 +65,15 @@ export class CustomerService {
     return customer;
   }
 
+  async update(customerId: string, businessId: string, input: { proactiveMessagingOptOut?: boolean }) {
+    const customer = await this.prisma.customer.findFirst({ where: { id: customerId, businessId } });
+    if (!customer) throw new NotFoundException("Customer not found.");
+    return this.prisma.customer.update({
+      where: { id: customerId },
+      data: { ...(input.proactiveMessagingOptOut !== undefined && { proactiveMessagingOptOut: input.proactiveMessagingOptOut }) },
+    });
+  }
+
   async addIdentity(customerId: string, businessId: string, input: CreateIdentityDto) {
     const customer = await this.prisma.customer.findFirst({ where: { id: customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");

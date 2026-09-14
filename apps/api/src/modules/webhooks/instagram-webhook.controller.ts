@@ -3,6 +3,7 @@ import type { RawBodyRequest } from "@nestjs/common";
 import type { Request } from "express";
 import { Public } from "../auth/public.decorator";
 import { verifyMetaSignature } from "../../common/meta-signature.helper";
+import { isProduction } from "../../common/env";
 import { InstagramWebhookService } from "./instagram-webhook.service";
 
 @Public()
@@ -31,7 +32,13 @@ export class InstagramWebhookController {
       this.logger.warn("Rejected Instagram webhook — invalid X-Hub-Signature-256.");
       throw new ForbiddenException("Invalid signature.");
     }
-    if (result === "skipped") this.logger.warn("INSTAGRAM_APP_SECRET not configured — webhook signature is NOT being verified.");
+    if (result === "skipped") {
+      if (isProduction()) {
+        this.logger.error("Rejected Instagram webhook — INSTAGRAM_APP_SECRET is not configured in production.");
+        throw new ForbiddenException("Webhook signature verification is not configured.");
+      }
+      this.logger.warn("INSTAGRAM_APP_SECRET not configured — webhook signature is NOT being verified.");
+    }
     void this.instagram.ingest(body);
     return "EVENT_RECEIVED";
   }

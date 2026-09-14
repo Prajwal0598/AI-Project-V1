@@ -11,6 +11,9 @@ import { processFollowUp } from "./jobs/follow-up";
 import { makeOrderProgressProcessor } from "./jobs/order-progress";
 import { processOrderExpiry } from "./jobs/order-expiry";
 import { processAbandonedCart } from "./jobs/abandoned-cart";
+import { processRepeatPurchaseScan } from "./jobs/repeat-purchase-scan";
+import { processUnansweredConversationScan } from "./jobs/unanswered-conversation-scan";
+import { processCustomerHealthScan } from "./jobs/customer-health-scan";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -69,8 +72,65 @@ abandonedCartWorker.on("failed", (job, err) => {
   console.error(`[abandoned-cart] job ${job?.id} failed`, err.message);
 });
 
+const repeatPurchaseScanQueue = new Queue(QUEUES.REPEAT_PURCHASE_SCAN, { connection });
+const repeatPurchaseScanWorker = new Worker(QUEUES.REPEAT_PURCHASE_SCAN, processRepeatPurchaseScan, {
+  connection,
+  concurrency: 1,
+});
+
+repeatPurchaseScanWorker.on("completed", (job, result) => {
+  console.log(`[repeat-purchase-scan] job ${job.id} completed`, result);
+});
+
+repeatPurchaseScanWorker.on("failed", (job, err) => {
+  console.error(`[repeat-purchase-scan] job ${job?.id} failed`, err.message);
+});
+
+// runs once daily at 09:00 server time — scans every opted-in business for customers statistically due to reorder
+repeatPurchaseScanQueue.add("scan", {}, { repeat: { pattern: process.env.REPEAT_PURCHASE_SCAN_CRON ?? "0 9 * * *" }, jobId: "repeat-purchase-scan-daily" }).catch((err) => {
+  console.error("[repeat-purchase-scan] failed to schedule recurring job", err);
+});
+
+const unansweredConversationScanQueue = new Queue(QUEUES.UNANSWERED_CONVERSATION_SCAN, { connection });
+const unansweredConversationScanWorker = new Worker(QUEUES.UNANSWERED_CONVERSATION_SCAN, processUnansweredConversationScan, {
+  connection,
+  concurrency: 1,
+});
+
+unansweredConversationScanWorker.on("completed", (job, result) => {
+  console.log(`[unanswered-conversation-scan] job ${job.id} completed`, result);
+});
+
+unansweredConversationScanWorker.on("failed", (job, err) => {
+  console.error(`[unanswered-conversation-scan] job ${job?.id} failed`, err.message);
+});
+
+// runs every 30 minutes — escalated conversations shouldn't sit unanswered for long
+unansweredConversationScanQueue.add("scan", {}, { repeat: { pattern: process.env.UNANSWERED_CONVERSATION_SCAN_CRON ?? "*/30 * * * *" }, jobId: "unanswered-conversation-scan-recurring" }).catch((err) => {
+  console.error("[unanswered-conversation-scan] failed to schedule recurring job", err);
+});
+
+const customerHealthScanQueue = new Queue(QUEUES.CUSTOMER_HEALTH_SCAN, { connection });
+const customerHealthScanWorker = new Worker(QUEUES.CUSTOMER_HEALTH_SCAN, processCustomerHealthScan, {
+  connection,
+  concurrency: 1,
+});
+
+customerHealthScanWorker.on("completed", (job, result) => {
+  console.log(`[customer-health-scan] job ${job.id} completed`, result);
+});
+
+customerHealthScanWorker.on("failed", (job, err) => {
+  console.error(`[customer-health-scan] job ${job?.id} failed`, err.message);
+});
+
+// runs once daily at 10:00 server time — win-back and high-value check-in nudges
+customerHealthScanQueue.add("scan", {}, { repeat: { pattern: process.env.CUSTOMER_HEALTH_SCAN_CRON ?? "0 10 * * *" }, jobId: "customer-health-scan-daily" }).catch((err) => {
+  console.error("[customer-health-scan] failed to schedule recurring job", err);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}`);
 
 process.on("SIGTERM", async () => {
   await followUpWorker.close();
@@ -78,6 +138,12 @@ process.on("SIGTERM", async () => {
   await orderProgressQueue.close();
   await orderExpiryWorker.close();
   await abandonedCartWorker.close();
+  await repeatPurchaseScanWorker.close();
+  await repeatPurchaseScanQueue.close();
+  await unansweredConversationScanWorker.close();
+  await unansweredConversationScanQueue.close();
+  await customerHealthScanWorker.close();
+  await customerHealthScanQueue.close();
   await connection.quit();
   process.exit(0);
 });

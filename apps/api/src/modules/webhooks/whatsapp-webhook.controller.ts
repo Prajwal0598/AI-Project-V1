@@ -3,6 +3,7 @@ import type { RawBodyRequest } from "@nestjs/common";
 import type { Request } from "express";
 import { Public } from "../auth/public.decorator";
 import { verifyMetaSignature } from "../../common/meta-signature.helper";
+import { isProduction } from "../../common/env";
 import { WhatsAppWebhookService } from "./whatsapp-webhook.service";
 
 @Public()
@@ -31,7 +32,13 @@ export class WhatsAppWebhookController {
       this.logger.warn("Rejected WhatsApp webhook — invalid X-Hub-Signature-256.");
       throw new ForbiddenException("Invalid signature.");
     }
-    if (result === "skipped") this.logger.warn("WHATSAPP_APP_SECRET not configured — webhook signature is NOT being verified.");
+    if (result === "skipped") {
+      if (isProduction()) {
+        this.logger.error("Rejected WhatsApp webhook — WHATSAPP_APP_SECRET is not configured in production.");
+        throw new ForbiddenException("Webhook signature verification is not configured.");
+      }
+      this.logger.warn("WHATSAPP_APP_SECRET not configured — webhook signature is NOT being verified.");
+    }
     void this.whatsapp.ingest(body);
     return "EVENT_RECEIVED";
   }

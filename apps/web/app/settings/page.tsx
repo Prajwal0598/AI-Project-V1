@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId } from "../../lib/api";
-import type { Business, Me, TeamUser } from "../../lib/api";
+import type { AutomationRule, Business, Me, OpportunityType, TeamUser } from "../../lib/api";
 
 export default function SettingsPage() {
   const [biz, setBiz] = useState<Business | null>(null);
@@ -21,6 +21,9 @@ export default function SettingsPage() {
   const [autonomyMaxOrderValue, setAutonomyMaxOrderValue] = useState("");
   const [defaultLowStockThreshold, setDefaultLowStockThreshold] = useState("");
   const [proactiveSuggestionsEnabled, setProactiveSuggestionsEnabled] = useState(false);
+  const [defaultRepeatPurchaseDays, setDefaultRepeatPurchaseDays] = useState("");
+  const [rules, setRules] = useState<AutomationRule[]>([]);
+  const [rulesError, setRulesError] = useState("");
   const [waAccessToken, setWaAccessToken] = useState("");
   const [igAccessToken, setIgAccessToken] = useState("");
   const [postmarkToken, setPostmarkToken] = useState("");
@@ -40,10 +43,27 @@ export default function SettingsPage() {
       setAutonomyMaxOrderValue(b.autonomyMaxOrderValue ?? "");
       setDefaultLowStockThreshold(String(b.defaultLowStockThreshold ?? 5));
       setProactiveSuggestionsEnabled(b.proactiveSuggestionsEnabled);
+      setDefaultRepeatPurchaseDays(String(b.defaultRepeatPurchaseDays ?? 30));
     }).catch(console.error);
     api.auth.me().then(setMe).catch(console.error);
     loadTeam();
+    loadRules();
   }, []);
+
+  function loadRules() {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    api.automationRules.list(bizId).then(setRules).catch(console.error);
+  }
+
+  async function updateRule(type: OpportunityType, patch: Partial<Pick<AutomationRule, "enabled" | "autoSend" | "businessHoursStart" | "businessHoursEnd" | "frequencyCapPerCustomerPerDay" | "minConfidenceForAutoSend" | "personalizedTiming">>) {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    try {
+      const updated = await api.automationRules.update(bizId, type, patch);
+      setRules(prev => prev.map(r => (r.opportunityType === type ? updated : r)));
+    } catch (err) { setRulesError(err instanceof Error ? err.message : "Could not update this rule."); }
+  }
 
   function loadTeam() {
     const bizId = getBusinessId();
@@ -83,6 +103,7 @@ export default function SettingsPage() {
         autonomyMaxOrderValue: autonomyMaxOrderValue.trim() ? Number(autonomyMaxOrderValue) : null,
         defaultLowStockThreshold: defaultLowStockThreshold.trim() ? Number(defaultLowStockThreshold) : undefined,
         proactiveSuggestionsEnabled,
+        defaultRepeatPurchaseDays: defaultRepeatPurchaseDays.trim() ? Number(defaultRepeatPurchaseDays) : undefined,
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
         ...(postmarkToken && { postmarkServerToken: postmarkToken }),
@@ -243,6 +264,51 @@ export default function SettingsPage() {
         <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Every suggestion requires your review and approval before sending — nothing is messaged to a customer automatically. Off by default.</p>
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
+
+      {proactiveSuggestionsEnabled && <div style={{ marginTop: 20 }}>
+        {rulesError && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{rulesError} <button onClick={() => setRulesError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
+        <h4 style={{ marginBottom: 6 }}>Per-type automation</h4>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
+                <th style={{ padding: 6 }}>Type</th>
+                <th style={{ padding: 6 }}>Enabled</th>
+                <th style={{ padding: 6 }}>Auto-send</th>
+                <th style={{ padding: 6 }}>Min confidence</th>
+                <th style={{ padding: 6 }}>Business hours</th>
+                <th style={{ padding: 6 }}>Personalized timing</th>
+                <th style={{ padding: 6 }}>Daily cap / customer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rules.map(r => (
+                <tr key={r.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: 6 }}>{r.opportunityType.replace(/_/g, " ")}</td>
+                  <td style={{ padding: 6 }}><input type="checkbox" checked={r.enabled} onChange={e => updateRule(r.opportunityType, { enabled: e.target.checked })} /></td>
+                  <td style={{ padding: 6 }}><input type="checkbox" checked={r.autoSend} onChange={e => updateRule(r.opportunityType, { autoSend: e.target.checked })} /></td>
+                  <td style={{ padding: 6 }}><input type="number" min={0} max={1} step={0.1} value={r.minConfidenceForAutoSend} onChange={e => updateRule(r.opportunityType, { minConfidenceForAutoSend: Number(e.target.value) })} style={{ width: 60 }} /></td>
+                  <td style={{ padding: 6 }}>
+                    <input type="number" min={0} max={23} placeholder="Start" value={r.businessHoursStart ?? ""} onChange={e => updateRule(r.opportunityType, { businessHoursStart: e.target.value === "" ? null : Number(e.target.value) })} style={{ width: 60, marginRight: 4 }} />
+                    <input type="number" min={0} max={23} placeholder="End" value={r.businessHoursEnd ?? ""} onChange={e => updateRule(r.opportunityType, { businessHoursEnd: e.target.value === "" ? null : Number(e.target.value) })} style={{ width: 60 }} />
+                  </td>
+                  <td style={{ padding: 6 }}><input type="checkbox" checked={r.personalizedTiming} onChange={e => updateRule(r.opportunityType, { personalizedTiming: e.target.checked })} /></td>
+                  <td style={{ padding: 6 }}><input type="number" min={1} placeholder="No cap" value={r.frequencyCapPerCustomerPerDay ?? ""} onChange={e => updateRule(r.opportunityType, { frequencyCapPerCustomerPerDay: e.target.value === "" ? null : Number(e.target.value) })} style={{ width: 80 }} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>Auto-send only fires within the business-hours window (blank = no restriction) and when the opportunity's own confidence meets the minimum; outside either, the suggestion still appears in your inbox for manual approval. "Personalized timing" targets each customer's own usual reply hour (inferred from their message history) instead of the fixed business-hours window, once they have enough history — falls back to business hours otherwise.</p>
+        <div style={{ maxWidth: 420, marginTop: 12 }}>
+          <div className="login-field">
+            <label>Repeat-purchase reminder window (days)</label>
+            <input value={defaultRepeatPurchaseDays} onChange={e => setDefaultRepeatPurchaseDays(e.target.value)} placeholder="e.g. 30" inputMode="numeric" />
+          </div>
+          <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Used to estimate reorder timing for a product a customer has only bought once (customers with 2+ purchases use their own average interval instead).</p>
+          <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+        </div>
+      </div>}
     </section>
   </AppShell>;
 }

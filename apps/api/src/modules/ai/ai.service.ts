@@ -13,6 +13,8 @@ import { OpportunityService } from "../opportunities/opportunity.service";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
+// 3+ interactions with the same product inside the signal-lookback window escalates a plain enquiry to HIGH_PURCHASE_INTENT
+const HIGH_PURCHASE_INTENT_THRESHOLD = 3;
 
 // structured-output schema forces the model to always fill these fields rather than
 // deciding whether to invoke a tool — models are far more reliable at schema-fill than tool-choice
@@ -272,10 +274,17 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         for (const product of toSend) {
           const variant = product.variants[0];
           await this.signals.record(businessId, conversation.customerId, "PRODUCT_ENQUIRY", { productId: product.id });
+          // 3+ interactions with the same product inside 48h is a stronger signal than a one-off enquiry —
+          // escalate to HIGH_PURCHASE_INTENT instead of a plain PRODUCT_ENQUIRY (the per-type dedup means only one of these ever ends up active for this product)
+          const recentSignalCount = await this.signals.countRecentSignals(businessId, conversation.customerId, product.id);
+          const isHighIntent = recentSignalCount >= HIGH_PURCHASE_INTENT_THRESHOLD;
+          if (isHighIntent) await this.opportunities.supersede(businessId, conversation.customerId, "PRODUCT_ENQUIRY", product.id);
           await this.opportunities.createWithAiMessage({
-            businessId, customerId: conversation.customerId, type: "PRODUCT_ENQUIRY",
-            reason: `Asked about ${product.name} but hasn't purchased yet.`,
-            estimatedValue: Number(variant.price), confidence: 0.6, relatedProductId: product.id,
+            businessId, customerId: conversation.customerId, type: isHighIntent ? "HIGH_PURCHASE_INTENT" : "PRODUCT_ENQUIRY",
+            reason: isHighIntent
+              ? `Asked about or viewed ${product.name} ${recentSignalCount} times in the last 48h without purchasing.`
+              : `Asked about ${product.name} but hasn't purchased yet.`,
+            estimatedValue: Number(variant.price), confidence: isHighIntent ? 0.85 : 0.6, relatedProductId: product.id,
             customerName, businessName: conversation.business.name, productName: product.name, price: `${variant.currency} ${variant.price}`,
           });
         }

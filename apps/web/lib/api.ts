@@ -85,6 +85,7 @@ export interface Business {
   autonomyMaxOrderValue: string | null;
   defaultLowStockThreshold: number;
   proactiveSuggestionsEnabled: boolean;
+  defaultRepeatPurchaseDays: number;
   whatsappAccessTokenConfigured: boolean;
   instagramAccessTokenConfigured: boolean;
   postmarkServerTokenConfigured: boolean;
@@ -153,6 +154,7 @@ export interface Customer {
   phone: string | null;
   type: "LEAD" | "CUSTOMER";
   tags: string[];
+  proactiveMessagingOptOut: boolean;
   leadScore: { score: number; reason: string | null } | null;
   identities: { channel: string; identifier: string }[];
   _count: { conversations: number; orders: number };
@@ -226,7 +228,7 @@ export interface StockAdjustment {
   variant: { id: string; sku: string | null };
 }
 
-export type OpportunityType = "ABANDONED_CART" | "PRODUCT_ENQUIRY" | "BACK_IN_STOCK";
+export type OpportunityType = "ABANDONED_CART" | "PRODUCT_ENQUIRY" | "BACK_IN_STOCK" | "HIGH_PURCHASE_INTENT" | "REPEAT_PURCHASE" | "CROSS_SELL" | "UPSELL" | "NEW_PRODUCT_MATCH" | "PROMOTION" | "UNANSWERED_CONVERSATION" | "LOW_ENGAGEMENT" | "HIGH_VALUE_CUSTOMER";
 export type OpportunityPriority = "LOW" | "MEDIUM" | "HIGH";
 export type OpportunityStatus = "NEW" | "SENT" | "DISMISSED" | "SNOOZED" | "CONVERTED" | "EXPIRED";
 
@@ -243,6 +245,7 @@ export interface Opportunity {
   status: OpportunityStatus;
   relatedProductId: string | null;
   relatedCartId: string | null;
+  relatedPromotionId: string | null;
   snoozedUntil: string | null;
   createdAt: string;
   updatedAt: string;
@@ -260,6 +263,73 @@ export interface OpportunitySummary {
   messagesSentToday: number;
   ordersInfluenced: number;
   revenueInfluenced: number;
+}
+
+export interface AutomationRule {
+  id: string;
+  businessId: string;
+  opportunityType: OpportunityType;
+  enabled: boolean;
+  autoSend: boolean;
+  businessHoursStart: number | null;
+  businessHoursEnd: number | null;
+  frequencyCapPerCustomerPerDay: number | null;
+  minConfidenceForAutoSend: number;
+  personalizedTiming: boolean;
+}
+
+export interface OpportunityTypeAnalytics {
+  type: OpportunityType;
+  created: number;
+  sent: number;
+  converted: number;
+  dismissed: number;
+  conversionRate: number;
+  revenueAttributed: number;
+}
+
+export interface MessagePerformance {
+  type: OpportunityType;
+  variant: "original" | "edited";
+  sent: number;
+  converted: number;
+  conversionRate: number;
+}
+
+export interface OpportunityTrendPoint {
+  date: string;
+  created: number;
+  sent: number;
+  revenue: number;
+}
+
+export interface BestSendHour {
+  hour: number;
+  sampleSize: number;
+}
+
+export interface ProductRelation {
+  id: string;
+  businessId: string;
+  productId: string;
+  relatedProductId: string;
+  type: "CROSS_SELL" | "UPSELL";
+  relatedProduct: { id: string; name: string; imageUrl: string | null; variants: Variant[] };
+}
+
+export type PromotionTargetSegment = "ALL_CUSTOMERS" | "CATEGORY_BUYERS" | "HIGH_VALUE_CUSTOMERS";
+
+export interface Promotion {
+  id: string;
+  businessId: string;
+  title: string;
+  message: string;
+  discountDescription: string | null;
+  targetSegment: PromotionTargetSegment;
+  categoryId: string | null;
+  broadcastedAt: string | null;
+  broadcastCount: number;
+  createdAt: string;
 }
 
 export interface ImportJob {
@@ -349,7 +419,7 @@ export const api = {
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; defaultRepeatPurchaseDays?: number; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),
@@ -383,6 +453,8 @@ export const api = {
   customers: {
     list: (businessId: string, search?: string) =>
       request<Customer[]>(`/businesses/${businessId}/customers${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+    update: (customerId: string, data: Partial<{ proactiveMessagingOptOut: boolean }>) =>
+      request<Customer>(`/customers/${customerId}`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   products: {
     list: (businessId: string) =>
@@ -453,5 +525,27 @@ export const api = {
     dismiss: (opportunityId: string) => request<Opportunity>(`/opportunities/${opportunityId}/dismiss`, { method: "POST" }),
     snooze: (opportunityId: string, hours?: 4 | 24 | 72) =>
       request<Opportunity>(`/opportunities/${opportunityId}/snooze`, { method: "POST", body: JSON.stringify({ hours }) }),
+    analytics: (businessId: string) => request<OpportunityTypeAnalytics[]>(`/businesses/${businessId}/opportunities/analytics`),
+    messagePerformance: (businessId: string) => request<MessagePerformance[]>(`/businesses/${businessId}/opportunities/message-performance`),
+    trends: (businessId: string, days?: number) => request<OpportunityTrendPoint[]>(`/businesses/${businessId}/opportunities/trends${days ? `?days=${days}` : ""}`),
+    bestSendHour: (customerId: string) => request<BestSendHour | null>(`/customers/${customerId}/best-send-hour`),
+  },
+  automationRules: {
+    list: (businessId: string) => request<AutomationRule[]>(`/businesses/${businessId}/automation-rules`),
+    update: (businessId: string, type: OpportunityType, data: Partial<Pick<AutomationRule, "enabled" | "autoSend" | "businessHoursStart" | "businessHoursEnd" | "frequencyCapPerCustomerPerDay" | "minConfidenceForAutoSend" | "personalizedTiming">>) =>
+      request<AutomationRule>(`/businesses/${businessId}/automation-rules/${type}`, { method: "PATCH", body: JSON.stringify(data) }),
+  },
+  productRelations: {
+    list: (productId: string) => request<ProductRelation[]>(`/products/${productId}/relations`),
+    create: (businessId: string, data: { productId: string; relatedProductId: string; type: "CROSS_SELL" | "UPSELL" }) =>
+      request<ProductRelation>(`/businesses/${businessId}/product-relations`, { method: "POST", body: JSON.stringify(data) }),
+    remove: (id: string) => request<{ id: string }>(`/product-relations/${id}`, { method: "DELETE" }),
+  },
+  promotions: {
+    list: (businessId: string) => request<Promotion[]>(`/businesses/${businessId}/promotions`),
+    create: (businessId: string, data: { title: string; message: string; discountDescription?: string; targetSegment: PromotionTargetSegment; categoryId?: string }) =>
+      request<Promotion>(`/businesses/${businessId}/promotions`, { method: "POST", body: JSON.stringify(data) }),
+    broadcast: (id: string) => request<{ targeted: number; created: number }>(`/promotions/${id}/broadcast`, { method: "POST" }),
+    remove: (id: string) => request<Promotion>(`/promotions/${id}`, { method: "DELETE" }),
   },
 };
