@@ -1,0 +1,75 @@
+// Railway Infrastructure as Code — https://docs.railway.com/infrastructure-as-code
+// This is NOT applied automatically. From the repo root, with the Railway CLI installed and
+// authenticated (`railway login`, `railway link`), run:
+//   railway config plan     # preview what this would create/change
+//   railway config apply    # apply after reviewing the plan
+//
+// Uses Railway's native builder (Railpack), not the apps/*/Dockerfile files — those stay
+// useful for CI validation and other hosts, but Railway's own docs recommend plain
+// `pnpm --filter <pkg> build/start` commands for a shared pnpm-workspace monorepo like this
+// one, rather than fighting their Root-Directory-scoped Dockerfile build context.
+import { defineRailway, github, group, postgres, preserve, project, redis, service } from "railway/iac";
+
+const REPO = "Prajwal0598/AI-Project-V1";
+
+export default defineRailway(() => {
+  const db = postgres("postgres");
+  const cache = redis("redis");
+
+  const api = service("api", {
+    source: github(REPO, { branch: "main" }),
+    build: "pnpm db:generate && pnpm --filter @ai-customer-agent/api build",
+    start: "pnpm --filter @ai-customer-agent/api start",
+    // applies pending migrations before the new deploy goes live — never `migrate dev` in production
+    preDeploy: "pnpm --filter @ai-customer-agent/database exec prisma migrate deploy",
+    healthcheck: "/api/health",
+    env: {
+      DATABASE_URL: db.env.DATABASE_URL,
+      REDIS_URL: cache.env.REDIS_URL,
+      PORT: "4000",
+      // secrets — never written here; set once in the Railway dashboard (Variables tab) and left alone on every future apply
+      JWT_SECRET: preserve(),
+      JWT_EXPIRES_IN: preserve(),
+      OPENAI_API_KEY: preserve(),
+      CREDENTIALS_ENCRYPTION_KEY: preserve(),
+      WHATSAPP_APP_SECRET: preserve(),
+      INSTAGRAM_APP_SECRET: preserve(),
+      EMAIL_WEBHOOK_SECRET: preserve(),
+      WHATSAPP_VERIFY_TOKEN: preserve(),
+      INSTAGRAM_VERIFY_TOKEN: preserve(),
+      // set these to the real deployed domains after the first `apply` (avoids a circular
+      // reference between api<->web at plan time) — see NEXT_PUBLIC_API_URL below on `web`
+      WEB_ORIGIN: preserve(),
+      API_PUBLIC_URL: preserve(),
+    },
+  });
+
+  const worker = service("worker", {
+    source: github(REPO, { branch: "main" }),
+    build: "pnpm db:generate && pnpm --filter @ai-customer-agent/worker build",
+    start: "pnpm --filter @ai-customer-agent/worker start",
+    env: {
+      DATABASE_URL: db.env.DATABASE_URL,
+      REDIS_URL: cache.env.REDIS_URL,
+      OPENAI_API_KEY: preserve(),
+      CREDENTIALS_ENCRYPTION_KEY: preserve(),
+    },
+  });
+
+  const web = service("web", {
+    source: github(REPO, { branch: "main" }),
+    build: "pnpm --filter @ai-customer-agent/web build",
+    start: "pnpm --filter @ai-customer-agent/web start",
+    env: {
+      // Next.js inlines NEXT_PUBLIC_* at BUILD time — set to the api service's real public URL
+      // after its first deploy (Railway's own dashboard shows the generated domain)
+      NEXT_PUBLIC_API_URL: preserve(),
+    },
+  });
+
+  const backend = group("Backend", [db, cache, api, worker]);
+
+  return project("relay", {
+    resources: [backend, web],
+  });
+});
