@@ -483,7 +483,7 @@ export default function ProductsPage() {
           : <div style={{ width: 96, height: 96, borderRadius: 8, border: "1px dashed var(--border)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 11 }}>No image</div>}
         <label style={{ fontSize: 12, color: "var(--muted)" }}>
           Product image (JPEG/PNG/WEBP/GIF, max 3MB)
-          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={uploadingImage}
+          <input type="file" accept="image/jpeg,image/png" disabled={uploadingImage}
             onChange={e => { const f = e.target.files?.[0]; if (f) uploadImage(f); }} style={{ display: "block", marginTop: 6 }} />
           {uploadingImage && <span>Uploading…</span>}
         </label>

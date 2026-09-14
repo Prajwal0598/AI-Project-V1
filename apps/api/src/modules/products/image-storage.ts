@@ -6,16 +6,17 @@ import { BadRequestException } from "@nestjs/common";
 
 export const PRODUCT_IMAGE_ROOT = resolve(process.cwd(), "uploads", "products");
 
+// WhatsApp's Cloud API image-message type only supports JPEG/PNG (WEBP is reserved for stickers, GIF isn't
+// supported at all for images) — Meta accepts the send call either way but silently fails to deliver an
+// unsupported format, so we only accept the two formats WhatsApp actually renders
 const ALLOWED_IMAGE_EXT: Record<string, string> = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
 };
 
 // filenames are always server-generated random hex (never the client's original name) — this alone
 // rules out path traversal, and the regex below is enforced again on the read side as defense-in-depth
-const SAFE_FILENAME = /^[a-f0-9]{32}\.(jpg|png|webp|gif)$/;
+const SAFE_FILENAME = /^[a-f0-9]{32}\.(jpg|png)$/;
 
 export const productImageUploadOptions = {
   storage: diskStorage({
@@ -31,7 +32,7 @@ export const productImageUploadOptions = {
   limits: { fileSize: 3 * 1024 * 1024 }, // 3MB
   fileFilter: (_req: unknown, file: Express.Multer.File, cb: (error: Error | null, accept: boolean) => void) => {
     if (ALLOWED_IMAGE_EXT[file.mimetype]) cb(null, true);
-    else cb(new BadRequestException("Only JPEG, PNG, WEBP, or GIF images are supported."), false);
+    else cb(new BadRequestException("Only JPEG or PNG images are supported (required for WhatsApp delivery)."), false);
   },
 };
 
