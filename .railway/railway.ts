@@ -8,13 +8,17 @@
 // useful for CI validation and other hosts, but Railway's own docs recommend plain
 // `pnpm --filter <pkg> build/start` commands for a shared pnpm-workspace monorepo like this
 // one, rather than fighting their Root-Directory-scoped Dockerfile build context.
-import { defineRailway, github, group, postgres, preserve, project, redis, service } from "railway/iac";
+import { defineRailway, github, group, postgres, preserve, project, redis, service, volume } from "railway/iac";
 
 const REPO = "Prajwal0598/AI-Project-V1";
 
 export default defineRailway(() => {
   const db = postgres("postgres");
   const cache = redis("redis");
+
+  // product images are saved to local disk (apps/api/src/modules/products/image-storage.ts) with no
+  // cloud storage backend yet — without this, every redeploy wipes every merchant's uploaded photos
+  const productUploads = volume("api-uploads", { sizeMB: 500, region: "sfo" });
 
   const api = service("api", {
     source: github(REPO, { branch: "main" }),
@@ -23,6 +27,9 @@ export default defineRailway(() => {
     // applies pending migrations before the new deploy goes live — never `migrate dev` in production
     preDeploy: "pnpm --filter @ai-customer-agent/database exec prisma migrate deploy",
     healthcheck: "/api/health",
+    volumeMounts: {
+      "/app/apps/api/uploads": productUploads,
+    },
     env: {
       DATABASE_URL: db.env.DATABASE_URL,
       REDIS_URL: cache.env.REDIS_URL,
@@ -67,7 +74,7 @@ export default defineRailway(() => {
     },
   });
 
-  const backend = group("Backend", [db, cache, api, worker]);
+  const backend = group("Backend", [db, cache, api, worker, productUploads]);
 
   return project("relay", {
     resources: [backend, web],
