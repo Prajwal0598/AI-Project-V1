@@ -138,6 +138,7 @@ export interface BusinessStats {
   conversations: number;
   openConversations: number;
   orders: number;
+  ordersNeedingAction: number;
   revenue: string | number;
   revenueThisWeek: string | number;
   revenueLastWeek: string | number;

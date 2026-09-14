@@ -39,12 +39,14 @@ export class BusinessService {
     const startOfLastWeek = new Date(startOfThisWeek);
     startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
 
-    const [leads, customers, conversations, openConversations, orders, revenueAgg, revenueThisWeekAgg, revenueLastWeekAgg, recentPaidOrders] = await Promise.all([
+    const [leads, customers, conversations, openConversations, orders, ordersNeedingAction, revenueAgg, revenueThisWeekAgg, revenueLastWeekAgg, recentPaidOrders] = await Promise.all([
       this.prisma.customer.count({ where: { businessId, type: "LEAD" } }),
       this.prisma.customer.count({ where: { businessId, type: "CUSTOMER" } }),
       this.prisma.conversation.count({ where: { businessId } }),
       this.prisma.conversation.count({ where: { businessId, status: "OPEN" } }),
       this.prisma.order.count({ where: { businessId } }),
+      // orders that need the merchant to actually do something right now: approve, or start fulfillment
+      this.prisma.order.count({ where: { businessId, OR: [{ status: "AWAITING_APPROVAL" }, { status: "PAID", fulfillmentStatus: "NOT_STARTED" }] } }),
       this.prisma.order.aggregate({
         where: { businessId, status: { in: [OrderStatus.PAID, OrderStatus.FULFILLED] } },
         _sum: { total: true },
@@ -77,7 +79,7 @@ export class BusinessService {
     }
 
     return {
-      leads, customers, conversations, openConversations, orders,
+      leads, customers, conversations, openConversations, orders, ordersNeedingAction,
       revenue: revenueAgg._sum.total ?? 0,
       revenueThisWeek: revenueThisWeekAgg._sum.total ?? 0,
       revenueLastWeek: revenueLastWeekAgg._sum.total ?? 0,
