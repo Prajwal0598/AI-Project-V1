@@ -28,6 +28,15 @@ function parseSearchQuery(text: string): SearchFilters {
   return { maxPrice, minPrice, keywords };
 }
 
+// thousands-grouped price string (WhatsApp text/captions render *bold*/_italic_ markdown, but list row titles/descriptions do not)
+// accepts Prisma's Decimal (product/variant prices) as well as plain number/string
+function fmtMoney(amount: number | string | { toString(): string }, currency: string): string {
+  const n = Number(amount.toString());
+  return `${currency} ${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+
+const OUT_OF_STOCK_SUFFIX = " · Out of stock";
+
 function formatVariantLabel(attributes: unknown): string | null {
   if (!attributes || typeof attributes !== "object") return null;
   const values = Object.values(attributes as Record<string, string>).filter(Boolean);
@@ -53,7 +62,7 @@ export class ShoppingFlowService {
 
   async sendMainMenu(conversationId: string, businessId: string) {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
-    await this.conversations.sendButtons(conversationId, businessId, `Hi! Welcome to ${business?.name ?? "our store"} 👋\nWhat would you like to do?`, [
+    await this.conversations.sendButtons(conversationId, businessId, `Hi there! 👋\nWelcome to *${business?.name ?? "our store"}*.\nWhat would you like to do today?`, [
       { id: "menu_shop", title: "🛍️ Shop" },
       { id: "menu_cart", title: "🛒 View Cart" },
       { id: "menu_orders", title: "📦 My Orders" },
@@ -73,7 +82,9 @@ export class ShoppingFlowService {
     if (actionId.startsWith("variant_")) return this.askQuantity(conversationId, businessId, actionId.slice(8));
     if (actionId === "cart_checkout") return this.beginCheckout(conversationId, businessId, conversation.customerId);
     if (actionId === "cart_clear") return this.clearCart(conversationId, businessId, conversation.customerId);
-    if (actionId === "nav_continue") return this.showShop(conversationId, businessId, conversation.activeCategoryId ?? undefined);
+    // "Keep Shopping" always returns to the top-level category list/full catalog, not the last-viewed
+    // category — otherwise a customer who drilled into one category stays pinned there indefinitely
+    if (actionId === "nav_continue") return this.showShop(conversationId, businessId);
     if (actionId === "nav_viewcart") return this.showCart(conversationId, businessId, conversation.customerId);
     if (actionId === "pay_upi") return this.setPaymentMethod(conversationId, businessId, "UPI");
     if (actionId === "pay_cod") return this.setPaymentMethod(conversationId, businessId, "COD");
@@ -127,16 +138,16 @@ export class ShoppingFlowService {
     matches = matches.slice(0, MAX_LIST_ROWS);
 
     if (!matches.length) {
-      await this.conversations.sendButtons(conversationId, businessId, "No products matched that search.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      await this.conversations.sendButtons(conversationId, businessId, "😕 No products matched that search.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
       // reset to IDLE so a dead-end search doesn't strand the customer outside the greeting/menu path
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE" } });
       return;
     }
 
-    await this.conversations.sendList(conversationId, businessId, `Found ${matches.length} matching product${matches.length === 1 ? "" : "s"}:`, "View", [
+    await this.conversations.sendList(conversationId, businessId, `🔍 Found ${matches.length} matching product${matches.length === 1 ? "" : "s"}:`, "View", [
       { rows: matches.map((p) => {
         const v = p.variants[0];
-        return { id: `prod_${p.id}`, title: p.name, description: `${v.currency} ${v.price}${v.inventory === 0 ? " (out of stock)" : ""}` };
+        return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` };
       }) },
     ]);
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null } });
@@ -147,7 +158,7 @@ export class ShoppingFlowService {
     const categories = await this.prisma.category.findMany({ where: { businessId, active: true, parentId: null }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], take: MAX_LIST_ROWS });
     if (!categories.length) return this.showProducts(conversationId, businessId, null);
 
-    await this.conversations.sendList(conversationId, businessId, "Choose a category to browse:", "Browse", [
+    await this.conversations.sendList(conversationId, businessId, "🗂️ Choose a category to browse:", "Browse", [
       { rows: categories.map((c) => ({ id: `cat_${c.id}`, title: c.name })) },
     ]);
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_CATEGORIES" } });
@@ -161,17 +172,17 @@ export class ShoppingFlowService {
     });
     const available = products.filter((p) => p.variants[0]);
     if (!available.length) {
-      await this.conversations.sendButtons(conversationId, businessId, "No products are available here right now.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      await this.conversations.sendButtons(conversationId, businessId, "😕 No products are available here right now.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
       // reset to IDLE so this dead-end doesn't strand the customer outside the greeting/menu path
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE" } });
       return;
     }
 
-    await this.conversations.sendList(conversationId, businessId, "Here are our products — tap one to see details:", "View products", [
+    await this.conversations.sendList(conversationId, businessId, "🛍️ Here's what we have — tap one to view details:", "View products", [
       { rows: available.map((p) => {
         const v = p.variants[0];
-        const stock = v.inventory === 0 ? " (out of stock)" : "";
-        return { id: `prod_${p.id}`, title: p.name, description: `${v.currency} ${v.price}${stock}` };
+        const stock = v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : "";
+        return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${stock}` };
       }) },
     ]);
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId } });
@@ -190,7 +201,7 @@ export class ShoppingFlowService {
     await this.signals.record(businessId, customerId, "PRODUCT_VIEWED", { productId });
 
     const first = product.variants[0];
-    const caption = `${product.name}${product.description ? `\n${product.description}` : ""}\n${first.currency} ${first.price}`;
+    const caption = `*${product.name}*${product.description ? `\n_${product.description}_` : ""}\n💰 ${fmtMoney(first.price, first.currency)}`;
     if (product.imageUrl) {
       await this.conversations.sendImage(conversationId, businessId, toPublicImageUrl(product.imageUrl), caption);
     } else {
@@ -198,7 +209,7 @@ export class ShoppingFlowService {
     }
 
     if (product.variants.length === 1) {
-      await this.conversations.sendMessage(conversationId, businessId, first.inventory === 0 ? "This item is currently out of stock." : "How many would you like? Reply with a number.");
+      await this.conversations.sendMessage(conversationId, businessId, first.inventory === 0 ? "😔 This item is currently out of stock." : "🔢 How many would you like? Reply with a number.");
       await this.prisma.conversation.update({
         where: { id: conversationId },
         data: { shoppingState: first.inventory === 0 ? "VIEWING_PRODUCT" : "AWAITING_QUANTITY", activeProductId: productId, pendingVariantId: first.inventory === 0 ? null : first.id },
@@ -210,7 +221,7 @@ export class ShoppingFlowService {
       { rows: product.variants.map((v) => ({
         id: `variant_${v.id}`,
         title: formatVariantLabel(v.attributes) ?? v.sku ?? "Option",
-        description: `${v.currency} ${v.price}${v.inventory === 0 ? " (out of stock)" : ""}`,
+        description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}`,
       })) },
     ]);
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "VIEWING_PRODUCT", activeProductId: productId } });
@@ -223,11 +234,11 @@ export class ShoppingFlowService {
       return;
     }
     if (variant.inventory === 0) {
-      await this.conversations.sendMessage(conversationId, businessId, "That option is currently out of stock.");
+      await this.conversations.sendMessage(conversationId, businessId, "😔 That option is currently out of stock.");
       return;
     }
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "AWAITING_QUANTITY", pendingVariantId: variantId } });
-    await this.conversations.sendMessage(conversationId, businessId, "How many would you like? Reply with a number.");
+    await this.conversations.sendMessage(conversationId, businessId, "🔢 How many would you like? Reply with a number.");
   }
 
   private async receiveQuantity(conversationId: string, businessId: string, conversation: { pendingVariantId: string | null; customerId: string }, text: string) {
@@ -247,7 +258,7 @@ export class ShoppingFlowService {
     try {
       const updatedCart = await this.cart.addItem(activeCart.id, businessId, variant.id, quantity);
       const { subtotal, currency } = this.cart.totals(updatedCart);
-      await this.conversations.sendButtons(conversationId, businessId, `Added ${quantity} × ${variant.product.name} 🛒\nCart total: ${currency} ${subtotal}`, [
+      await this.conversations.sendButtons(conversationId, businessId, `✅ Added *${quantity} × ${variant.product.name}*\n🛒 Cart total: *${fmtMoney(subtotal, currency)}*`, [
         { id: "nav_continue", title: "Keep Shopping" },
         { id: "nav_viewcart", title: "View Cart" },
         { id: "cart_checkout", title: "Checkout" },
@@ -262,15 +273,15 @@ export class ShoppingFlowService {
   private async showCart(conversationId: string, businessId: string, customerId: string) {
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
     if (!activeCart.items.length) {
-      await this.conversations.sendButtons(conversationId, businessId, "Your cart is empty.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      await this.conversations.sendButtons(conversationId, businessId, "🛒 Your cart is empty.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
       return;
     }
     const { subtotal, currency } = this.cart.totals(activeCart);
     const lines = activeCart.items.map((item, i) => {
       const label = formatVariantLabel(item.variant.attributes);
-      return `${i + 1}. ${item.variant.product.name}${label ? ` (${label})` : ""} × ${item.quantity} — ${item.variant.currency} ${Number(item.variant.price) * item.quantity}`;
+      return `${i + 1}. *${item.variant.product.name}*${label ? ` (${label})` : ""}\n   Qty: ${item.quantity} — ${fmtMoney(Number(item.variant.price) * item.quantity, item.variant.currency)}`;
     });
-    await this.conversations.sendMessage(conversationId, businessId, `🛒 Your cart:\n\n${lines.join("\n")}\n\nTotal: ${currency} ${subtotal}`);
+    await this.conversations.sendMessage(conversationId, businessId, `🛒 *Your Cart*\n\n${lines.join("\n\n")}\n\n*Total: ${fmtMoney(subtotal, currency)}*`);
     await this.conversations.sendButtons(conversationId, businessId, "What next?", [
       { id: "cart_checkout", title: "Checkout" },
       { id: "nav_continue", title: "Keep Shopping" },
@@ -282,24 +293,24 @@ export class ShoppingFlowService {
   private async clearCart(conversationId: string, businessId: string, customerId: string) {
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
     await this.cart.clear(activeCart.id, businessId);
-    await this.conversations.sendButtons(conversationId, businessId, "Your cart has been cleared.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+    await this.conversations.sendButtons(conversationId, businessId, "🗑️ Your cart has been cleared.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
   }
 
   private async beginCheckout(conversationId: string, businessId: string, customerId: string) {
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
     if (!activeCart.items.length) return this.showCart(conversationId, businessId, customerId);
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "COLLECTING_ADDRESS" } });
-    await this.conversations.sendMessage(conversationId, businessId, "Great! What's your shipping address?");
+    await this.conversations.sendMessage(conversationId, businessId, "📍 Great! What's your shipping address?");
   }
 
   private async receiveAddress(conversationId: string, businessId: string, text: string) {
     const address = text.trim();
     if (address.length < 8) {
-      await this.conversations.sendMessage(conversationId, businessId, "Please share your full shipping address.");
+      await this.conversations.sendMessage(conversationId, businessId, "Please share your complete shipping address so we can deliver your order 📦");
       return;
     }
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { pendingAddress: address, shoppingState: "COLLECTING_PAYMENT" } });
-    await this.conversations.sendButtons(conversationId, businessId, "How would you like to pay?", [
+    await this.conversations.sendButtons(conversationId, businessId, "💳 How would you like to pay?", [
       { id: "pay_upi", title: "UPI" },
       { id: "pay_cod", title: "Cash on Delivery" },
     ]);
@@ -309,10 +320,10 @@ export class ShoppingFlowService {
     const conversation = await this.prisma.conversation.update({ where: { id: conversationId }, data: { pendingPaymentMethod: method, shoppingState: "ORDER_CONFIRMATION" } });
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, conversation.customerId);
     const { subtotal, currency } = this.cart.totals(activeCart);
-    const lines = activeCart.items.map((item) => `${item.quantity} × ${item.variant.product.name} — ${item.variant.currency} ${Number(item.variant.price) * item.quantity}`);
+    const lines = activeCart.items.map((item) => `${item.quantity} × *${item.variant.product.name}* — ${fmtMoney(Number(item.variant.price) * item.quantity, item.variant.currency)}`);
     await this.conversations.sendMessage(conversationId, businessId,
-      `Order summary:\n\n${lines.join("\n")}\n\nTotal: ${currency} ${subtotal}\nShipping to: ${conversation.pendingAddress}\nPayment: ${method === "UPI" ? "UPI" : "Cash on Delivery"}`);
-    await this.conversations.sendButtons(conversationId, businessId, "Shall I place this order?", [
+      `📋 *Order Summary*\n\n${lines.join("\n")}\n\n*Total: ${fmtMoney(subtotal, currency)}*\n📍 Shipping to: ${conversation.pendingAddress}\n💳 Payment: ${method === "UPI" ? "UPI" : "Cash on Delivery"}`);
+    await this.conversations.sendButtons(conversationId, businessId, "✅ Shall I go ahead and place this order?", [
       { id: "order_confirm", title: "Confirm Order" },
       { id: "order_cancel", title: "Cancel" },
     ]);
@@ -343,29 +354,29 @@ export class ShoppingFlowService {
     });
 
     if (order.status === "AWAITING_APPROVAL") {
-      await this.conversations.sendMessage(conversationId, businessId, `Thanks! Your order total is ${order.currency} ${order.total}, which needs a quick review from our team before we can proceed — we'll confirm shortly.`);
+      await this.conversations.sendMessage(conversationId, businessId, `Thanks! 🙏 Your order total is *${fmtMoney(order.total, order.currency)}*, which needs a quick review from our team before we can proceed — we'll confirm shortly.`);
       return;
     }
     if (conversation.pendingPaymentMethod === "UPI") {
-      await this.conversations.sendMessage(conversationId, businessId, "Thanks! Please complete your UPI payment using the link below — your order will be confirmed once payment is received.");
+      await this.conversations.sendMessage(conversationId, businessId, "Thanks! 💳 Please complete your UPI payment using the link below — your order will be confirmed once payment is received.");
       await this.conversations.sendMessage(conversationId, businessId, `https://pay.relay-dummy.app/checkout/${order.id}`);
     } else {
-      await this.conversations.sendMessage(conversationId, businessId, `🎉 Your order has been placed and will be delivered soon — payment collected on delivery. Order ref #${order.id.slice(-8).toUpperCase()}.`);
+      await this.conversations.sendMessage(conversationId, businessId, `🎉 Your order has been placed and will be delivered soon — payment collected on delivery.\nOrder ref: *#${order.id.slice(-8).toUpperCase()}*`);
     }
   }
 
   private async cancelCheckout(conversationId: string, businessId: string) {
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "CART_REVIEW", pendingAddress: null, pendingPaymentMethod: null } });
-    await this.conversations.sendMessage(conversationId, businessId, "No problem — your cart is still saved.");
+    await this.conversations.sendMessage(conversationId, businessId, "👍 No problem — your cart is still saved. Tap *Checkout* anytime to continue.");
   }
 
   private async showOrders(conversationId: string, businessId: string, customerId: string) {
     const recentOrders = await this.orders.getRecentForCustomer(customerId, businessId, 5);
     if (!recentOrders.length) {
-      await this.conversations.sendMessage(conversationId, businessId, "You haven't placed any orders yet.");
+      await this.conversations.sendMessage(conversationId, businessId, "📦 You haven't placed any orders yet.");
       return;
     }
-    const lines = recentOrders.map((o) => `#${o.id.slice(-8).toUpperCase()} — ${o.currency} ${o.total} — ${o.status.replace(/_/g, " ")}`);
-    await this.conversations.sendMessage(conversationId, businessId, `📦 Your recent orders:\n\n${lines.join("\n")}`);
+    const lines = recentOrders.map((o) => `*#${o.id.slice(-8).toUpperCase()}* — ${fmtMoney(o.total, o.currency)} — ${o.status.replace(/_/g, " ")}`);
+    await this.conversations.sendMessage(conversationId, businessId, `📦 *Your Recent Orders*\n\n${lines.join("\n\n")}`);
   }
 }
