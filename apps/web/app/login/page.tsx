@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, getToken, setToken } from "../../lib/api";
+import { api, getToken, setToken, setRefreshToken } from "../../lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,10 +21,11 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
     try {
-      const { accessToken } = mode === "login"
+      const { accessToken, refreshToken } = mode === "login"
         ? await api.auth.login(email.trim(), password)
         : await api.auth.register(email.trim(), password, name.trim(), businessName.trim());
       setToken(accessToken);
+      setRefreshToken(refreshToken);
       router.replace("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");

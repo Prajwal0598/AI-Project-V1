@@ -4,6 +4,7 @@ import type { User } from "@prisma/client";
 import { AuthService } from "./auth.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
+import { RefreshTokenDto } from "./dto/refresh-token.dto";
 import { Public, IS_PUBLIC_KEY } from "./public.decorator";
 import { GetUser } from "../../common/get-user.decorator";
 
@@ -31,5 +32,18 @@ export class AuthController {
   @HttpCode(200)
   login(@Body() input: LoginDto) {
     return this.auth.login(input);
+  }
+
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("refresh")
+  @HttpCode(200)
+  refresh(@Body() input: RefreshTokenDto) {
+    return this.auth.refresh(input.refreshToken);
+  }
+
+  @Post("logout")
+  @HttpCode(200)
+  logout(@Body() input: RefreshTokenDto) {
+    return this.auth.logout(input.refreshToken);
   }
 }

@@ -1,5 +1,6 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
 const TOKEN_KEY = "relay_token";
+const REFRESH_TOKEN_KEY = "relay_refresh_token";
 
 // product images are stored as a relative path (e.g. "/api/uploads/products/x.jpg") so this dashboard can
 // always reach them via the local API origin, independent of whatever public URL WhatsApp needs to fetch them from
@@ -22,6 +23,44 @@ export function setToken(token: string): void {
 
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+export function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+
+export function setRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token);
+}
+
+// dedupes concurrent 401s into a single in-flight refresh call instead of each racing its own
+let refreshInFlight: Promise<boolean> | null = null;
+
+// exchanges the stored refresh token for a new access token; returns false (and clears both tokens) if that fails too
+async function tryRefreshToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const refreshToken = getRefreshToken();
+      if (!refreshToken) return false;
+      try {
+        const res = await fetch(`${API_URL}/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken }),
+        });
+        if (!res.ok) return false;
+        const body = await res.json() as { accessToken: string; refreshToken: string };
+        setToken(body.accessToken);
+        setRefreshToken(body.refreshToken);
+        return true;
+      } catch {
+        return false;
+      }
+    })().finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
 }
 
 // Decode businessId from JWT payload without verifying signature (client-side use only)
@@ -364,7 +403,7 @@ export interface ImportRow {
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const token = getToken();
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -375,6 +414,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (res.status === 401) {
+    if (!retried && (await tryRefreshToken())) return request<T>(path, init, true);
     clearToken();
     window.location.href = "/login";
     throw new Error("Unauthorized");
@@ -387,7 +427,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 // like `request`, but for multipart file uploads — the browser sets its own Content-Type/boundary for FormData
-async function upload<T>(path: string, formData: FormData): Promise<T> {
+async function upload<T>(path: string, formData: FormData, retried = false): Promise<T> {
   const token = getToken();
   const res = await fetch(`${API_URL}${path}`, {
     method: "POST",
@@ -395,6 +435,7 @@ async function upload<T>(path: string, formData: FormData): Promise<T> {
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   });
   if (res.status === 401) {
+    if (!retried && (await tryRefreshToken())) return upload<T>(path, formData, true);
     clearToken();
     window.location.href = "/login";
     throw new Error("Unauthorized");
@@ -411,9 +452,11 @@ async function upload<T>(path: string, formData: FormData): Promise<T> {
 export const api = {
   auth: {
     login: (email: string, password: string) =>
-      request<{ accessToken: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+      request<{ accessToken: string; refreshToken: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     register: (email: string, password: string, name: string, businessName: string) =>
-      request<{ accessToken: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password, name, businessName }) }),
+      request<{ accessToken: string; refreshToken: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password, name, businessName }) }),
+    logout: (refreshToken: string) =>
+      request<{ ok: boolean }>("/auth/logout", { method: "POST", body: JSON.stringify({ refreshToken }) }),
     me: () => request<Me>("/auth/me"),
   },
   businesses: {
