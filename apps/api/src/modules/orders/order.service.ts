@@ -8,11 +8,31 @@ import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 import { InventoryService } from "../inventory/inventory.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { ProductRelationService } from "../product-relations/product-relation.service";
+import { ConversationService } from "../conversations/conversation.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
 // an order can still have its items/address changed by the customer up until it's paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
+
+// customer-facing copy for a merchant manually setting an order to one of these lifecycle statuses —
+// mirrors the wording the simulated/automatic order-progress worker job already sends for consistency
+const ORDER_STATUS_MESSAGES: Partial<Record<OrderStatus, string>> = {
+  PAID: "🎉 Payment received! Your order has been confirmed and will be shipped soon.",
+  FULFILLED: "✅ Your order has been delivered. Thanks for shopping with us!",
+  CANCELLED: "❌ Your order has been cancelled. If you have any questions, just reply here and we'll help you out.",
+  REFUNDED: "💸 Your order has been refunded. The amount should reflect in your account shortly.",
+};
+
+// customer-facing copy for each shipment-tracking stage a merchant manually advances
+const FULFILLMENT_STATUS_MESSAGES: Partial<Record<FulfillmentStatus, string>> = {
+  PACKED: "📦 Your order has been packed and is ready for pickup by our courier.",
+  SHIPPED: "🚚 Your order has shipped!",
+  OUT_FOR_DELIVERY: "🛵 Your order is out for delivery today.",
+  DELIVERED: "✅ Your order has been delivered. Thanks for shopping with us!",
+  FAILED: "We were unable to deliver your order.",
+  RETURNED: "Your order has been returned to us.",
+};
 
 @Injectable()
 export class OrderService {
@@ -22,7 +42,18 @@ export class OrderService {
     private readonly inventory: InventoryService,
     private readonly opportunities: OpportunityService,
     private readonly productRelations: ProductRelationService,
+    private readonly conversations: ConversationService,
   ) {}
+
+  /** Best-effort customer notification for an order lifecycle change — never blocks/fails the actual update. */
+  private async notifyOrderUpdate(conversationId: string | null, businessId: string, content: string | undefined): Promise<void> {
+    if (!conversationId || !content) return;
+    try {
+      await this.conversations.sendMessage(conversationId, businessId, content);
+    } catch (err) {
+      console.error(`[orders] failed to notify conversation ${conversationId} of order update`, err);
+    }
+  }
 
   async findAll(businessId: string) {
     return this.prisma.order.findMany({
@@ -109,6 +140,7 @@ export class OrderService {
     });
     await this.queues.scheduleOrderProgress(order.id, businessId);
     await this.queues.scheduleOrderExpiry(order.id, businessId, OrderStatus.PENDING_PAYMENT);
+    await this.notifyOrderUpdate(order.conversationId, businessId, "✅ Good news — your order has been approved and is now being processed!");
     return updated;
   }
 
@@ -130,6 +162,7 @@ export class OrderService {
     await this.prisma.activityEvent.create({
       data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Fulfillment updated — ${status.replace(/_/g, " ").toLowerCase()}` },
     });
+    await this.notifyOrderUpdate(order.conversationId, businessId, FULFILLMENT_STATUS_MESSAGES[status]);
     return updated;
   }
 
@@ -199,6 +232,7 @@ export class OrderService {
       await this.prisma.conversation.update({ where: { id: order.conversationId }, data: { outcome: "SALE" } });
     }
     for (const productId of restocked) await this.inventory.notifyBackInStock(businessId, productId);
+    await this.notifyOrderUpdate(order.conversationId, businessId, ORDER_STATUS_MESSAGES[input.status]);
 
     return updated;
   }
