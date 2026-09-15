@@ -123,6 +123,15 @@ export default function InboxPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "Could not update the outcome label."); }
   }
 
+  async function resetTestData() {
+    if (!selected) return;
+    if (!window.confirm(`Delete all orders, clear the cart, and reset the shopping flow for ${customerName(selected.customer)}? This cannot be undone.`)) return;
+    try {
+      const result = await api.orders.resetTestData(selected.customer.id);
+      setError(`✓ Reset complete — ${result.ordersDeleted} order${result.ordersDeleted === 1 ? "" : "s"} deleted, cart cleared, shopping flow reset.`);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not reset test data."); }
+  }
+
   const visibleMessages = (selected?.messages ?? []).filter(
     m => ((m.metadata as { state?: string } | null)?.state ?? "").toLowerCase() !== "draft"
   );
@@ -162,6 +171,7 @@ export default function InboxPage() {
                 <option value="ABANDONED">Abandoned</option>
               </select>
               <button className="filter-button">Customer profile</button>
+              <button className="filter-button" title="Delete this customer's orders/cart and reset the shopping flow — for testing" onClick={resetTestData}>Reset test data</button>
             </header>
             {selected.escalated && (
               <div style={{ background: "#fff8e8", border: "1px solid #f3dfa8", color: "#8a6a1f", fontSize: 12, padding: "8px 14px", margin: "0 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>

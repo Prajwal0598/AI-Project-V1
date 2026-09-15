@@ -557,6 +557,8 @@ export const api = {
       request<Order>(`/orders/${orderId}/approve`, { method: "PATCH" }),
     updateFulfillment: (orderId: string, fulfillmentStatus: Order["fulfillmentStatus"]) =>
       request<Order>(`/orders/${orderId}/fulfillment`, { method: "PATCH", body: JSON.stringify({ fulfillmentStatus }) }),
+    resetTestData: (customerId: string) =>
+      request<{ ordersDeleted: number }>(`/customers/${customerId}/reset-test-data`, { method: "POST" }),
   },
   opportunities: {
     list: (businessId: string, status?: OpportunityStatus) =>

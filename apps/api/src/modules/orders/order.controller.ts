@@ -45,5 +45,12 @@ export class OrderController {
   updateFulfillment(@Param("orderId") orderId: string, @GetUser() user: User, @Body() input: UpdateFulfillmentStatusDto) {
     return this.orders.updateFulfillmentStatus(orderId, user.businessId, input.fulfillmentStatus);
   }
+
+  @Post("customers/:customerId/reset-test-data")
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.OWNER, UserRole.ADMIN)
+  resetTestData(@Param("customerId") customerId: string, @GetUser() user: User) {
+    return this.orders.resetTestData(customerId, user.businessId);
+  }
 }
 

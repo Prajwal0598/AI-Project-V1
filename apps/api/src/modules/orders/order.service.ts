@@ -237,6 +237,35 @@ export class OrderService {
     return updated;
   }
 
+  /** Test/demo utility: wipes a customer's orders (releasing any reserved stock back to inventory), clears
+   * their cart, and resets their conversation(s) shopping state to fresh — lets a merchant re-test the
+   * shopping flow with a known test customer without stale order/cart/state left over from a prior run.
+   * Deliberately silent (no customer notification) since this is a merchant-side reset, not a real order event. */
+  async resetTestData(customerId: string, businessId: string) {
+    const customer = await this.prisma.customer.findFirst({ where: { id: customerId, businessId } });
+    if (!customer) throw new NotFoundException("Customer not found.");
+
+    const orders = await this.prisma.order.findMany({ where: { customerId, businessId }, include: { items: true } });
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const order of orders) {
+        if (!TERMINAL_STATUSES.has(order.status)) await this.releaseStock(tx, order.items);
+      }
+      await tx.order.deleteMany({ where: { customerId, businessId } });
+      await tx.cart.deleteMany({ where: { customerId, businessId } });
+      await tx.conversation.updateMany({
+        where: { customerId, businessId },
+        data: {
+          shoppingState: "IDLE", pendingAddress: null, pendingPaymentMethod: null,
+          activeCategoryId: null, activeProductId: null, pendingVariantId: null,
+          activeOrderId: null, lastOrderKey: null,
+        },
+      });
+    });
+
+    return { ordersDeleted: orders.length };
+  }
+
   /** After a purchase, suggests any merchant-configured cross-sell/upsell companions for the products just bought. */
   private async suggestCrossSellUpsell(businessId: string, customerId: string, items: { productId: string | null; name: string }[], customer: { firstName: string | null; lastName: string | null } | null, businessName: string) {
     const purchasedProductIds = new Set(items.map((i) => i.productId).filter((id): id is string => !!id));
