@@ -12,7 +12,7 @@ import type { RazorpayService } from "../payments/razorpay.service";
 describe("OrderService", () => {
   let prisma: any;
   let queues: { scheduleOrderProgress: jest.Mock; scheduleOrderExpiry: jest.Mock; scheduleFulfillmentKickoff: jest.Mock };
-  let inventory: { notifyBackInStock: jest.Mock };
+  let inventory: { notifyBackInStock: jest.Mock; recordAdjustment: jest.Mock };
   let opportunities: { attachOrderOutcome: jest.Mock };
   let productRelations: Record<string, jest.Mock>;
   let conversations: { sendMessage: jest.Mock };
@@ -28,10 +28,11 @@ describe("OrderService", () => {
       conversation: { count: jest.fn().mockResolvedValue(0), update: jest.fn(), updateMany: jest.fn() },
       message: { findFirst: jest.fn().mockResolvedValue(null) },
       leadScore: { upsert: jest.fn() },
+      variant: { findFirst: jest.fn(), updateMany: jest.fn() },
       $transaction: jest.fn(async (cb: (tx: any) => unknown) => cb(prisma)),
     };
     queues = { scheduleOrderProgress: jest.fn(), scheduleOrderExpiry: jest.fn(), scheduleFulfillmentKickoff: jest.fn() };
-    inventory = { notifyBackInStock: jest.fn() };
+    inventory = { notifyBackInStock: jest.fn(), recordAdjustment: jest.fn().mockResolvedValue({ restocked: false }) };
     opportunities = { attachOrderOutcome: jest.fn() };
     productRelations = { getRelationsFor: jest.fn() };
     conversations = { sendMessage: jest.fn() };
@@ -161,6 +162,76 @@ describe("OrderService", () => {
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Payment received"));
       expect(queues.scheduleFulfillmentKickoff).toHaveBeenCalledWith("o1", "biz1");
       expect("updated" in result).toBe(true);
+    });
+  });
+
+  describe("reserveStock (exercised indirectly via create()) — race-condition guard", () => {
+    const customer = { id: "cust1", firstName: "Test", lastName: null, phone: "+911234567890" };
+    const business = { id: "biz1", name: "Test Biz", autonomyMaxOrderValue: null };
+
+    beforeEach(() => {
+      prisma.customer.findFirst.mockResolvedValue(customer);
+      prisma.customer.findUnique.mockResolvedValue(customer);
+      prisma.business.findUnique.mockResolvedValue(business);
+      razorpay.createPaymentLink.mockResolvedValue(null);
+      prisma.order.create = jest.fn().mockImplementation(({ data }: any) => ({
+        id: "order1", ...data, items: [], razorpayPaymentLinkId: null,
+      }));
+    });
+
+    it("decrements stock via a conditional update, so a real order actually reserves inventory", async () => {
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", businessId: "biz1", inventory: 10, productId: "p1", lowStockThreshold: 2 });
+      prisma.variant.updateMany.mockResolvedValue({ count: 1 }); // one row matched -> stock was sufficient
+
+      await orders.create("biz1", {
+        customerId: "cust1", subtotal: 799, currency: "INR",
+        items: [{ variantId: "v1", productId: "p1", name: "Shirt", quantity: 2, unitPrice: 799 }],
+      } as any);
+
+      expect(prisma.variant.updateMany).toHaveBeenCalledWith({
+        where: { id: "v1", inventory: { gte: 2 } },
+        data: { inventory: { decrement: 2 } },
+      });
+      expect(inventory.recordAdjustment).toHaveBeenCalled();
+    });
+
+    it("rejects the whole order if a concurrent order already consumed the remaining stock (the conditional update matches 0 rows)", async () => {
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", businessId: "biz1", inventory: 1, productId: "p1", lowStockThreshold: 2 });
+      prisma.variant.updateMany.mockResolvedValue({ count: 0 }); // lost the race — someone else already took the last unit
+
+      await expect(orders.create("biz1", {
+        customerId: "cust1", subtotal: 799, currency: "INR",
+        items: [{ variantId: "v1", productId: "p1", name: "Shirt", quantity: 1, unitPrice: 799 }],
+      } as any)).rejects.toThrow(/Not enough stock for "Shirt"/);
+    });
+
+    it("rejects with 'Product not found' if the item's variant doesn't exist for this business", async () => {
+      prisma.variant.findFirst.mockResolvedValue(null);
+      await expect(orders.create("biz1", {
+        customerId: "cust1", subtotal: 799, currency: "INR",
+        items: [{ variantId: "missing-variant", productId: "p1", name: "Shirt", quantity: 1, unitPrice: 799 }],
+      } as any)).rejects.toThrow('Product not found: Shirt');
+    });
+
+    it("skips stock decrement entirely for untracked inventory (inventory: null)", async () => {
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", businessId: "biz1", inventory: null, productId: "p1" });
+
+      await orders.create("biz1", {
+        customerId: "cust1", subtotal: 799, currency: "INR",
+        items: [{ variantId: "v1", productId: "p1", name: "Shirt", quantity: 100, unitPrice: 799 }],
+      } as any);
+
+      expect(prisma.variant.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("skips stock checking entirely for a free-text item with no variantId", async () => {
+      await orders.create("biz1", {
+        customerId: "cust1", subtotal: 799, currency: "INR",
+        items: [{ name: "Custom item", quantity: 1, unitPrice: 799 }],
+      } as any);
+
+      expect(prisma.variant.findFirst).not.toHaveBeenCalled();
+      expect(prisma.variant.updateMany).not.toHaveBeenCalled();
     });
   });
 });
