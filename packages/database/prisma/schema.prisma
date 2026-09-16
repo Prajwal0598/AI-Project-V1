@@ -214,6 +214,11 @@ model Business {
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?
   postmarkServerTokenEncrypted   String?
+  // Razorpay: keyId is not sensitive (safe to store plain, needed to resolve which secret to decrypt), but the
+  // key secret and webhook secret are encrypted the same way as the channel tokens above
+  razorpayKeyId                    String?
+  razorpayKeySecretEncrypted        String?
+  razorpayWebhookSecretEncrypted     String?
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
   users         User[]
@@ -535,6 +540,11 @@ model Order {
   currency    String      @default("INR")
   shippingAddress Json?
   paymentMethod   String?
+  // real Razorpay Payment Link backing a UPI order (null if Razorpay isn't configured for this business, or
+  // for COD orders) — the webhook uses razorpayPaymentLinkId to find the order to mark paid
+  razorpayPaymentLinkId  String? @unique
+  razorpayPaymentLinkUrl String?
+  razorpayPaymentId      String? // captured Razorpay payment id, set once the webhook confirms payment
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)

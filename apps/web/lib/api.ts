@@ -128,6 +128,10 @@ export interface Business {
   whatsappAccessTokenConfigured: boolean;
   instagramAccessTokenConfigured: boolean;
   postmarkServerTokenConfigured: boolean;
+  razorpayKeyId: string | null;
+  razorpayKeySecretConfigured: boolean;
+  razorpayWebhookSecretConfigured: boolean;
+  razorpayWebhookUrl: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -463,7 +467,7 @@ export const api = {
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; defaultRepeatPurchaseDays?: number; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string }) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; defaultRepeatPurchaseDays?: number; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string; razorpayKeyId?: string; razorpayKeySecret?: string; razorpayWebhookSecret?: string }) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),

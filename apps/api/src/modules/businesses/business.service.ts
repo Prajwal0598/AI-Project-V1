@@ -11,12 +11,17 @@ export class BusinessService {
 
   // never return encrypted credential ciphertext to the client — only whether one is configured
   private sanitize(business: Business) {
-    const { whatsappAccessTokenEncrypted, instagramAccessTokenEncrypted, postmarkServerTokenEncrypted, ...rest } = business;
+    const { whatsappAccessTokenEncrypted, instagramAccessTokenEncrypted, postmarkServerTokenEncrypted, razorpayKeySecretEncrypted, razorpayWebhookSecretEncrypted, ...rest } = business;
     return {
       ...rest,
       whatsappAccessTokenConfigured: !!whatsappAccessTokenEncrypted,
       instagramAccessTokenConfigured: !!instagramAccessTokenEncrypted,
       postmarkServerTokenConfigured: !!postmarkServerTokenEncrypted,
+      razorpayKeySecretConfigured: !!razorpayKeySecretEncrypted,
+      razorpayWebhookSecretConfigured: !!razorpayWebhookSecretEncrypted,
+      // paste this into the Razorpay Dashboard's webhook URL field — businessId is embedded since each
+      // business has its own Razorpay account/webhook secret (unlike the shared-app-secret WhatsApp/Instagram webhooks)
+      razorpayWebhookUrl: `${process.env.API_PUBLIC_URL ?? ""}/api/webhooks/razorpay/${business.id}`,
     };
   }
 
@@ -124,6 +129,9 @@ export class BusinessService {
         ...(input.whatsappAccessToken !== undefined && { whatsappAccessTokenEncrypted: input.whatsappAccessToken.trim() ? encryptSecret(input.whatsappAccessToken.trim()) : null }),
         ...(input.instagramAccessToken !== undefined && { instagramAccessTokenEncrypted: input.instagramAccessToken.trim() ? encryptSecret(input.instagramAccessToken.trim()) : null }),
         ...(input.postmarkServerToken !== undefined && { postmarkServerTokenEncrypted: input.postmarkServerToken.trim() ? encryptSecret(input.postmarkServerToken.trim()) : null }),
+        ...(input.razorpayKeyId !== undefined && { razorpayKeyId: input.razorpayKeyId?.trim() || null }),
+        ...(input.razorpayKeySecret !== undefined && { razorpayKeySecretEncrypted: input.razorpayKeySecret.trim() ? encryptSecret(input.razorpayKeySecret.trim()) : null }),
+        ...(input.razorpayWebhookSecret !== undefined && { razorpayWebhookSecretEncrypted: input.razorpayWebhookSecret.trim() ? encryptSecret(input.razorpayWebhookSecret.trim()) : null }),
       },
     });
     return this.sanitize(updated);

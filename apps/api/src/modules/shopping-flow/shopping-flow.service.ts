@@ -363,7 +363,7 @@ export class ShoppingFlowService {
     }
     if (conversation.pendingPaymentMethod === "UPI") {
       await this.conversations.sendMessage(conversationId, businessId, "Thanks! 💳 Please complete your UPI payment using the link below — your order will be confirmed once payment is received.");
-      await this.conversations.sendMessage(conversationId, businessId, `https://pay.relay-dummy.app/checkout/${order.id}`);
+      await this.conversations.sendMessage(conversationId, businessId, order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}`);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, `🎉 Your order has been placed and will be delivered soon — payment collected on delivery.\nOrder ref: *#${order.id.slice(-8).toUpperCase()}*`);
     }

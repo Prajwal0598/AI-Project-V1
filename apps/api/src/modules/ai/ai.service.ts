@@ -390,9 +390,8 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         items: matched.map((i) => `${i.quantity}x ${i.name}`),
         status: order.status,
         isAmendment,
-        // dummy payment link — simulates a payment gateway checkout page until a real one (e.g. Razorpay) is integrated;
-        // withheld while the order is awaiting merchant approval
-        ...(normalizedPayment === "UPI" && order.status !== "AWAITING_APPROVAL" ? { paymentLink: `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
+        // real Razorpay link if this business has it configured, otherwise the simulated dummy checkout page
+        ...(normalizedPayment === "UPI" && order.status !== "AWAITING_APPROVAL" ? { paymentLink: order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
         ...(unmatched.length ? { unmatched } : {}),
       };
     } catch (error) {

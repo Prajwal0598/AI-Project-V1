@@ -27,6 +27,9 @@ export default function SettingsPage() {
   const [waAccessToken, setWaAccessToken] = useState("");
   const [igAccessToken, setIgAccessToken] = useState("");
   const [postmarkToken, setPostmarkToken] = useState("");
+  const [razorpayKeyId, setRazorpayKeyId] = useState("");
+  const [razorpayKeySecret, setRazorpayKeySecret] = useState("");
+  const [razorpayWebhookSecret, setRazorpayWebhookSecret] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -45,6 +48,7 @@ export default function SettingsPage() {
       setDefaultLowStockThreshold(String(b.defaultLowStockThreshold ?? 5));
       setProactiveSuggestionsEnabled(b.proactiveSuggestionsEnabled);
       setDefaultRepeatPurchaseDays(String(b.defaultRepeatPurchaseDays ?? 30));
+      setRazorpayKeyId(b.razorpayKeyId ?? "");
     }).catch(console.error);
     api.auth.me().then(setMe).catch(console.error);
     loadTeam();
@@ -108,9 +112,12 @@ export default function SettingsPage() {
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
         ...(postmarkToken && { postmarkServerToken: postmarkToken }),
+        ...(razorpayKeyId.trim() !== (biz?.razorpayKeyId ?? "") && { razorpayKeyId: razorpayKeyId.trim() }),
+        ...(razorpayKeySecret && { razorpayKeySecret }),
+        ...(razorpayWebhookSecret && { razorpayWebhookSecret }),
       });
       setBiz(updated);
-      setWaAccessToken(""); setIgAccessToken(""); setPostmarkToken(""); // never keep secrets in the input after saving
+      setWaAccessToken(""); setIgAccessToken(""); setPostmarkToken(""); setRazorpayKeySecret(""); setRazorpayWebhookSecret(""); // never keep secrets in the input after saving
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) { setSaveError(err instanceof Error ? err.message : "Could not save settings."); }
@@ -177,6 +184,31 @@ export default function SettingsPage() {
           <input type="password" value={postmarkToken} onChange={e => setPostmarkToken(e.target.value)} placeholder={biz?.postmarkServerTokenConfigured ? "•••••••• (leave blank to keep)" : "Server token from Postmark"} />
         </div>
         <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Stored encrypted per-business. Falls back to <code>POSTMARK_SERVER_TOKEN</code> in <code>.env</code> if left unset. <code>EMAIL_FROM</code>/<code>EMAIL_WEBHOOK_SECRET</code> remain server-side only.</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>Payments (Razorpay)</h2>
+      <p>Lets customers pay online via UPI with a real Razorpay Payment Link. Without this configured, UPI orders use a simulated payment flow instead.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <div className="login-field">
+          <label>Key ID</label>
+          <input value={razorpayKeyId} onChange={e => setRazorpayKeyId(e.target.value)} placeholder="rzp_live_XXXXXXXXXXXXXX" />
+        </div>
+        <div className="login-field">
+          <label>Key secret {biz?.razorpayKeySecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
+          <input type="password" value={razorpayKeySecret} onChange={e => setRazorpayKeySecret(e.target.value)} placeholder={biz?.razorpayKeySecretConfigured ? "•••••••• (leave blank to keep)" : "From Razorpay Dashboard → API Keys"} />
+        </div>
+        <div className="login-field">
+          <label>Webhook secret {biz?.razorpayWebhookSecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
+          <input type="password" value={razorpayWebhookSecret} onChange={e => setRazorpayWebhookSecret(e.target.value)} placeholder={biz?.razorpayWebhookSecretConfigured ? "•••••••• (leave blank to keep)" : "Set this same value when creating the webhook below"} />
+        </div>
+        {biz && <div className="login-field">
+          <label>Webhook URL — paste this into Razorpay Dashboard → Settings → Webhooks</label>
+          <input readOnly value={biz.razorpayWebhookUrl} onFocus={e => e.target.select()} />
+        </div>}
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Key secret and webhook secret are stored encrypted per-business. Falls back to <code>RAZORPAY_KEY_ID</code>/<code>RAZORPAY_KEY_SECRET</code>/<code>RAZORPAY_WEBHOOK_SECRET</code> in <code>.env</code> if left unset. Subscribe the webhook to the <code>payment_link.paid</code> event.</p>
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </section>

@@ -9,6 +9,7 @@ import { InventoryService } from "../inventory/inventory.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { ProductRelationService } from "../product-relations/product-relation.service";
 import { ConversationService } from "../conversations/conversation.service";
+import { RazorpayService } from "../payments/razorpay.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
@@ -43,6 +44,7 @@ export class OrderService {
     private readonly opportunities: OpportunityService,
     private readonly productRelations: ProductRelationService,
     private readonly conversations: ConversationService,
+    private readonly razorpay: RazorpayService,
   ) {}
 
   /** Best-effort customer notification for an order lifecycle change — never blocks/fails the actual update. */
@@ -53,6 +55,17 @@ export class OrderService {
     } catch (err) {
       console.error(`[orders] failed to notify conversation ${conversationId} of order update`, err);
     }
+  }
+
+  /** Creates (or refreshes, e.g. after an amendment changes the total) a real Razorpay Payment Link for a UPI
+   * order — returns null (never throws) if the business hasn't configured Razorpay, so callers can fall back
+   * to the existing simulated payment flow. */
+  private async createRazorpayLinkForOrder(businessId: string, customerId: string, order: { id: string; total: Prisma.Decimal; currency: string }): Promise<{ id: string; shortUrl: string } | null> {
+    const business = await this.prisma.business.findUnique({ where: { id: businessId } });
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!business || !customer) return null;
+    const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "Customer";
+    return this.razorpay.createPaymentLink(business, order, { name: customerName, phone: customer.phone });
   }
 
   async findAll(businessId: string) {
@@ -117,14 +130,56 @@ export class OrderService {
     await this.opportunities.attachOrderOutcome(businessId, input.customerId, order);
     await this.suggestCrossSellUpsell(businessId, input.customerId, order.items, customer, business?.name ?? "our store");
 
-    // approval-pending orders don't start the payment/fulfillment simulation until a human approves them
-    if (input.paymentMethod && order.status === OrderStatus.PENDING_PAYMENT) await this.queues.scheduleOrderProgress(order.id, businessId);
-    // safety net: auto-cancel and release stock if the order is abandoned in either waiting state
-    if (order.status === OrderStatus.PENDING_PAYMENT || order.status === OrderStatus.AWAITING_APPROVAL) {
-      await this.queues.scheduleOrderExpiry(order.id, businessId, order.status);
+    // for a UPI order, try to back it with a REAL, payable Razorpay Payment Link — falls back to null (and the
+    // existing simulated payment flow below) if this business hasn't configured Razorpay yet
+    let orderWithLink = order;
+    if (input.paymentMethod === "UPI" && order.status === OrderStatus.PENDING_PAYMENT) {
+      const link = await this.createRazorpayLinkForOrder(businessId, input.customerId, order);
+      if (link) {
+        orderWithLink = await this.prisma.order.update({
+          where: { id: order.id },
+          data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl },
+          include: { items: true },
+        });
+      }
     }
 
-    return order;
+    // approval-pending orders don't start the payment/fulfillment simulation until a human approves them.
+    // A UPI order backed by a real Razorpay payment link waits for the webhook instead of the fake PAID timer.
+    if (input.paymentMethod && orderWithLink.status === OrderStatus.PENDING_PAYMENT && !orderWithLink.razorpayPaymentLinkId) {
+      await this.queues.scheduleOrderProgress(orderWithLink.id, businessId);
+    }
+    // safety net: auto-cancel and release stock if the order is abandoned in either waiting state — applies even
+    // to a real Razorpay payment link, so an unpaid order doesn't hold reserved stock forever
+    if (orderWithLink.status === OrderStatus.PENDING_PAYMENT || orderWithLink.status === OrderStatus.AWAITING_APPROVAL) {
+      await this.queues.scheduleOrderExpiry(orderWithLink.id, businessId, orderWithLink.status);
+    }
+
+    return orderWithLink;
+  }
+
+  /** Called by the Razorpay webhook once a payment link is genuinely paid — marks the order PAID, records the
+   * real payment id, notifies the customer, and kicks off the (still-simulated) shipment-tracking pipeline.
+   * Idempotent: a second webhook delivery for an already-PAID order is a harmless no-op. */
+  async markPaidViaRazorpay(orderId: string, businessId: string, razorpayPaymentId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
+    if (!order) return { skipped: "order not found" as const };
+    if (order.status !== OrderStatus.PENDING_PAYMENT) return { skipped: `order is already ${order.status.toLowerCase()}` as const };
+
+    const updated = await this.prisma.order.update({ where: { id: orderId }, data: { status: OrderStatus.PAID, razorpayPaymentId } });
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Payment received via Razorpay — ${updated.currency} ${updated.total}` },
+    });
+    if (order.conversationId) {
+      await this.prisma.conversation.update({ where: { id: order.conversationId }, data: { outcome: "SALE" } });
+      try {
+        await this.conversations.sendMessage(order.conversationId, businessId, "🎉 Payment received! Your order has been confirmed and will be shipped soon.");
+      } catch (err) {
+        console.error(`[orders] failed to notify conversation ${order.conversationId} of Razorpay payment`, err);
+      }
+    }
+    await this.queues.scheduleFulfillmentKickoff(orderId, businessId);
+    return { updated };
   }
 
   /** Approves an order that exceeded the merchant's autonomy threshold, letting payment/fulfillment proceed. */
@@ -138,10 +193,23 @@ export class OrderService {
     await this.prisma.activityEvent.create({
       data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Order approved by merchant — ${updated.currency} ${updated.total}` },
     });
-    await this.queues.scheduleOrderProgress(order.id, businessId);
+
+    let orderWithLink = updated;
+    if (order.paymentMethod === "UPI") {
+      const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, updated);
+      if (link) {
+        orderWithLink = await this.prisma.order.update({ where: { id: orderId }, data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl } });
+      }
+    }
+    if (!orderWithLink.razorpayPaymentLinkId) await this.queues.scheduleOrderProgress(order.id, businessId);
     await this.queues.scheduleOrderExpiry(order.id, businessId, OrderStatus.PENDING_PAYMENT);
-    await this.notifyOrderUpdate(order.conversationId, businessId, "✅ Good news — your order has been approved and is now being processed!");
-    return updated;
+    await this.notifyOrderUpdate(
+      order.conversationId, businessId,
+      orderWithLink.razorpayPaymentLinkUrl
+        ? `✅ Good news — your order has been approved! Please complete your UPI payment here: ${orderWithLink.razorpayPaymentLinkUrl}`
+        : "✅ Good news — your order has been approved and is now being processed!",
+    );
+    return orderWithLink;
   }
 
   /** Manually advances (or corrects) an order's shipment tracking — only once the order is actually paid. */
@@ -205,7 +273,20 @@ export class OrderService {
     await recalculateLeadScore(this.prisma, order.customerId, businessId);
     for (const productId of updated.restocked) await this.inventory.notifyBackInStock(businessId, productId);
 
-    return updated.order;
+    // the total just changed — any existing Razorpay payment link was for the OLD amount, so refresh it
+    let orderWithLink = updated.order;
+    if (orderWithLink.paymentMethod === "UPI" && orderWithLink.status === OrderStatus.PENDING_PAYMENT) {
+      const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, orderWithLink);
+      if (link) {
+        orderWithLink = await this.prisma.order.update({
+          where: { id: orderId },
+          data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl },
+          include: { items: true },
+        });
+      }
+    }
+
+    return orderWithLink;
   }
 
   async updateStatus(orderId: string, businessId: string, input: UpdateOrderStatusDto) {

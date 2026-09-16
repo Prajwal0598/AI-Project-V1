@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 
 interface FollowUpJobData { conversationId: string; businessId: string; customerId: string }
 interface OrderProgressJobData { orderId: string; businessId: string; nextStatus: "PAID" | "FULFILLED" }
+interface FulfillmentProgressJobData { orderId: string; businessId: string; nextStage: "PACKED" | "SHIPPED" | "OUT_FOR_DELIVERY" | "DELIVERED" }
 interface OrderExpiryJobData { orderId: string; businessId: string; expectedStatus: "AWAITING_APPROVAL" | "PENDING_PAYMENT" }
 interface AbandonedCartJobData { cartId: string; businessId: string; customerId: string }
 
@@ -12,7 +13,7 @@ export class QueueService implements OnModuleDestroy {
   private readonly logger = new Logger(QueueService.name);
   private connection: IORedis;
   private followUpQueue: Queue<FollowUpJobData>;
-  private orderProgressQueue: Queue<OrderProgressJobData>;
+  private orderProgressQueue: Queue<OrderProgressJobData | FulfillmentProgressJobData>;
   private orderExpiryQueue: Queue<OrderExpiryJobData>;
   private abandonedCartQueue: Queue<AbandonedCartJobData>;
 
@@ -45,6 +46,19 @@ export class QueueService implements OnModuleDestroy {
       backoff: { type: "exponential", delay: 10_000 },
     });
     this.logger.log(`Order ${orderId} auto-progress scheduled — PAID (simulated) in ${Math.round(delay / 60_000)}min`);
+  }
+
+  /** Starts the (still-simulated, no real courier yet) shipment-tracking pipeline directly at its first stage —
+   * used once a REAL Razorpay payment has been confirmed via webhook, so we don't also run the fake "PAID"
+   * timer on top of a payment that already genuinely happened. */
+  async scheduleFulfillmentKickoff(orderId: string, businessId: string) {
+    const totalDelay = parseInt(process.env.ORDER_AUTO_FULFILLED_DELAY_MS ?? "86400000", 10);
+    await this.orderProgressQueue.add("advance", { orderId, businessId, nextStage: "PACKED" }, {
+      delay: Math.round(totalDelay / 4),
+      attempts: 3,
+      backoff: { type: "exponential", delay: 10_000 },
+    });
+    this.logger.log(`Order ${orderId} fulfillment pipeline kicked off after real payment confirmation`);
   }
 
   /** Schedules an order to auto-cancel (and release reserved stock) if it's still in expectedStatus once the timeout elapses. */

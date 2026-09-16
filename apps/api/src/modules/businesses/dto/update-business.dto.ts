@@ -68,4 +68,17 @@ export class UpdateBusinessDto {
   @IsOptional()
   @IsString()
   postmarkServerToken?: string;
+
+  // Razorpay keyId is not sensitive on its own (needed to know which secret to decrypt) — stored plain
+  @IsOptional()
+  @IsString()
+  razorpayKeyId?: string;
+
+  @IsOptional()
+  @IsString()
+  razorpayKeySecret?: string;
+
+  @IsOptional()
+  @IsString()
+  razorpayWebhookSecret?: string;
 }
