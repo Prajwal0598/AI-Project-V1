@@ -14,7 +14,7 @@ const SEARCH_STOPWORDS = new Set(["show", "me", "i", "want", "need", "looking", 
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
 /** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
-function parseSearchQuery(text: string): SearchFilters {
+export function parseSearchQuery(text: string): SearchFilters {
   let remaining = text.toLowerCase();
   let maxPrice: number | undefined;
   let minPrice: number | undefined;
@@ -30,14 +30,14 @@ function parseSearchQuery(text: string): SearchFilters {
 
 // thousands-grouped price string (WhatsApp text/captions render *bold*/_italic_ markdown, but list row titles/descriptions do not)
 // accepts Prisma's Decimal (product/variant prices) as well as plain number/string
-function fmtMoney(amount: number | string | { toString(): string }, currency: string): string {
+export function fmtMoney(amount: number | string | { toString(): string }, currency: string): string {
   const n = Number(amount.toString());
   return `${currency} ${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
 
 const OUT_OF_STOCK_SUFFIX = " · Out of stock";
 
-function formatVariantLabel(attributes: unknown): string | null {
+export function formatVariantLabel(attributes: unknown): string | null {
   if (!attributes || typeof attributes !== "object") return null;
   const values = Object.values(attributes as Record<string, string>).filter(Boolean);
   return values.length ? values.join(", ") : null;

@@ -52,13 +52,13 @@ const REPLY_SCHEMA = {
 };
 
 // safety net for when the model copies a link pattern it saw earlier in the conversation history despite instructions not to
-function stripHallucinatedLinks(reply: string): string {
+export function stripHallucinatedLinks(reply: string): string {
   return reply.replace(/[^.!?\n]*https?:\/\/\S+[^.!?\n]*[.!?]?/gi, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // fingerprints an order's items+address+payment so a repeat/duplicate AI trigger (retried webhook, re-run,
 // or an unrelated follow-up question that still reads as "confirmed" from the transcript) can't place it twice
-function buildOrderKey(items: { productName: string; quantity: number }[], shippingAddress: string, paymentMethod: string): string {
+export function buildOrderKey(items: { productName: string; quantity: number }[], shippingAddress: string, paymentMethod: string): string {
   const itemsKey = [...items]
     .map((i) => `${i.productName.trim().toLowerCase()}x${i.quantity}`)
     .sort()

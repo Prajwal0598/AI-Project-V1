@@ -6,7 +6,9 @@
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -38,11 +40,21 @@
     "@nestjs/testing": "^11.0.1",
     "@types/bcrypt": "^6.0.0",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/multer": "^2.2.0",
     "@types/node": "^22.20.1",
     "@types/passport-jwt": "^4.0.1",
+    "jest": "^30.5.1",
     "prisma": "^6.19.3",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "jest": {
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+    "testEnvironment": "node"
   }
 }
