@@ -75,6 +75,13 @@ describe("WhatsAppWebhookService — routing", () => {
     expect(ai.generateAndSendReply).not.toHaveBeenCalled();
   });
 
+  it("bypasses the shopping flow for an ai_pay_* tap (AI's own payment buttons) and falls through to the AI", async () => {
+    mockConversation({ shoppingState: "IDLE" });
+    await (service as any).processMessage(baseMsg({ interactiveId: "ai_pay_upi", text: "📱 UPI" }));
+    expect(shoppingFlow.handleInteractive).not.toHaveBeenCalled();
+    expect(ai.generateAndSendReply).toHaveBeenCalledWith("conv1", "biz1");
+  });
+
   it("routes a plain greeting to the main menu regardless of current shopping state (regression: stuck-state bug)", async () => {
     mockConversation({ shoppingState: "BROWSING_PRODUCTS" }); // a non-IDLE, "stuck" state
     await (service as any).processMessage(baseMsg({ text: "hi" }));

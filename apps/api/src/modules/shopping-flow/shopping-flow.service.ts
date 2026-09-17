@@ -88,6 +88,7 @@ export class ShoppingFlowService {
     if (actionId === "nav_viewcart") return this.showCart(conversationId, businessId, conversation.customerId);
     if (actionId === "pay_upi") return this.setPaymentMethod(conversationId, businessId, "UPI");
     if (actionId === "pay_cod") return this.setPaymentMethod(conversationId, businessId, "COD");
+    if (actionId === "pay_card") return this.setPaymentMethod(conversationId, businessId, "CARD");
     if (actionId === "order_confirm") return this.confirmOrder(conversationId, businessId, conversation);
     if (actionId === "order_cancel") return this.cancelCheckout(conversationId, businessId);
   }
@@ -315,18 +316,20 @@ export class ShoppingFlowService {
     }
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { pendingAddress: address, shoppingState: "COLLECTING_PAYMENT" } });
     await this.conversations.sendButtons(conversationId, businessId, "💳 How would you like to pay?", [
-      { id: "pay_upi", title: "UPI" },
-      { id: "pay_cod", title: "Cash on Delivery" },
+      { id: "pay_card", title: "💳 Card" },
+      { id: "pay_upi", title: "📱 UPI" },
+      { id: "pay_cod", title: "💵 COD" },
     ]);
   }
 
-  private async setPaymentMethod(conversationId: string, businessId: string, method: "UPI" | "COD") {
+  private async setPaymentMethod(conversationId: string, businessId: string, method: "UPI" | "COD" | "CARD") {
     const conversation = await this.prisma.conversation.update({ where: { id: conversationId }, data: { pendingPaymentMethod: method, shoppingState: "ORDER_CONFIRMATION" } });
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, conversation.customerId);
     const { subtotal, currency } = this.cart.totals(activeCart);
     const lines = activeCart.items.map((item) => `${item.quantity} × *${item.variant.product.name}* — ${fmtMoney(Number(item.variant.price) * item.quantity, item.variant.currency)}`);
+    const paymentLabel = method === "COD" ? "Cash on Delivery" : method === "CARD" ? "Card" : "UPI";
     await this.conversations.sendMessage(conversationId, businessId,
-      `📋 *Order Summary*\n\n${lines.join("\n")}\n\n*Total: ${fmtMoney(subtotal, currency)}*\n📍 Shipping to: ${conversation.pendingAddress}\n💳 Payment: ${method === "UPI" ? "UPI" : "Cash on Delivery"}`);
+      `📋 *Order Summary*\n\n${lines.join("\n")}\n\n*Total: ${fmtMoney(subtotal, currency)}*\n📍 Shipping to: ${conversation.pendingAddress}\n💳 Payment: ${paymentLabel}`);
     await this.conversations.sendButtons(conversationId, businessId, "✅ Shall I go ahead and place this order?", [
       { id: "order_confirm", title: "Confirm Order" },
       { id: "order_cancel", title: "Cancel" },
@@ -345,7 +348,7 @@ export class ShoppingFlowService {
     try {
       order = await this.cart.checkout(activeCart.id, businessId, {
         shippingAddress: conversation.pendingAddress,
-        paymentMethod: conversation.pendingPaymentMethod as "UPI" | "COD",
+        paymentMethod: conversation.pendingPaymentMethod as "UPI" | "COD" | "CARD",
       });
     } catch (error) {
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "We couldn't place that order — please try again.");
@@ -361,8 +364,8 @@ export class ShoppingFlowService {
       await this.conversations.sendMessage(conversationId, businessId, `Thanks! 🙏 Your order total is *${fmtMoney(order.total, order.currency)}*, which needs a quick review from our team before we can proceed — we'll confirm shortly.`);
       return;
     }
-    if (conversation.pendingPaymentMethod === "UPI") {
-      await this.conversations.sendMessage(conversationId, businessId, "Thanks! 💳 Please complete your UPI payment using the link below — your order will be confirmed once payment is received.");
+    if (conversation.pendingPaymentMethod === "UPI" || conversation.pendingPaymentMethod === "CARD") {
+      await this.conversations.sendMessage(conversationId, businessId, "Thanks! 💳 Please complete your payment using the link below — your order will be confirmed once payment is received.");
       await this.conversations.sendMessage(conversationId, businessId, order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}`);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, `🎉 Your order has been placed and will be delivered soon — payment collected on delivery.\nOrder ref: *#${order.id.slice(-8).toUpperCase()}*`);

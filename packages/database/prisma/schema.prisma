@@ -336,7 +336,7 @@ model Conversation {
   activeProductId  String?         // product currently being viewed (VIEWING_PRODUCT / AWAITING_QUANTITY)
   pendingVariantId String?         // variant chosen while awaiting a quantity reply
   pendingAddress   String?         // shipping address collected mid-checkout, before payment method is chosen
-  pendingPaymentMethod String?     // "UPI" | "COD" chosen mid-checkout, before final order confirmation
+  pendingPaymentMethod String?     // "UPI" | "COD" | "CARD" chosen mid-checkout, before final order confirmation
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)

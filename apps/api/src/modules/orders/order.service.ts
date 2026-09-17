@@ -15,6 +15,8 @@ import { RazorpayService } from "../payments/razorpay.service";
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
 // an order can still have its items/address changed by the customer up until it's paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
+// payment methods that go through a real Razorpay Payment Link (as opposed to COD, which has no online payment step)
+const ONLINE_PAYMENT_METHODS = new Set(["UPI", "CARD"]);
 
 // customer-facing copy for a merchant manually setting an order to one of these lifecycle statuses —
 // mirrors the wording the simulated/automatic order-progress worker job already sends for consistency
@@ -133,7 +135,7 @@ export class OrderService {
     // for a UPI order, try to back it with a REAL, payable Razorpay Payment Link — falls back to null (and the
     // existing simulated payment flow below) if this business hasn't configured Razorpay yet
     let orderWithLink = order;
-    if (input.paymentMethod === "UPI" && order.status === OrderStatus.PENDING_PAYMENT) {
+    if (input.paymentMethod && ONLINE_PAYMENT_METHODS.has(input.paymentMethod) && order.status === OrderStatus.PENDING_PAYMENT) {
       const link = await this.createRazorpayLinkForOrder(businessId, input.customerId, order);
       if (link) {
         orderWithLink = await this.prisma.order.update({
@@ -195,7 +197,7 @@ export class OrderService {
     });
 
     let orderWithLink = updated;
-    if (order.paymentMethod === "UPI") {
+    if (order.paymentMethod && ONLINE_PAYMENT_METHODS.has(order.paymentMethod)) {
       const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, updated);
       if (link) {
         orderWithLink = await this.prisma.order.update({ where: { id: orderId }, data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl } });
@@ -275,7 +277,7 @@ export class OrderService {
 
     // the total just changed — any existing Razorpay payment link was for the OLD amount, so refresh it
     let orderWithLink = updated.order;
-    if (orderWithLink.paymentMethod === "UPI" && orderWithLink.status === OrderStatus.PENDING_PAYMENT) {
+    if (orderWithLink.paymentMethod && ONLINE_PAYMENT_METHODS.has(orderWithLink.paymentMethod) && orderWithLink.status === OrderStatus.PENDING_PAYMENT) {
       const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, orderWithLink);
       if (link) {
         orderWithLink = await this.prisma.order.update({

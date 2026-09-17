@@ -193,6 +193,21 @@ describe("ShoppingFlowService — state machine", () => {
         data: { shoppingState: "VIEWING_PRODUCT", activeProductId: "p1", pendingVariantId: null },
       });
     });
+
+    it("pay_card sets pendingPaymentMethod to CARD and moves to ORDER_CONFIRMATION", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.conversation.update.mockResolvedValue({ customerId: "cust1", pendingAddress: "123 Main St" });
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] });
+      cart.totals.mockReturnValue({ subtotal: 799, currency: "INR" });
+
+      await flow.handleInteractive("conv1", "biz1", "pay_card");
+
+      expect(prisma.conversation.update).toHaveBeenCalledWith({
+        where: { id: "conv1" },
+        data: { pendingPaymentMethod: "CARD", shoppingState: "ORDER_CONFIRMATION" },
+      });
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("💳 Payment: Card"));
+    });
   });
 
   describe("handleFreeText dispatch", () => {
@@ -216,6 +231,12 @@ describe("ShoppingFlowService — state machine", () => {
         where: { id: "conv1" },
         data: { pendingAddress: "123 Main Street, Springfield", shoppingState: "COLLECTING_PAYMENT" },
       });
+      // customer picks a payment method by tapping a button, never by typing it — offers exactly 3 (WhatsApp's max)
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.any(String), [
+        { id: "pay_card", title: "💳 Card" },
+        { id: "pay_upi", title: "📱 UPI" },
+        { id: "pay_cod", title: "💵 COD" },
+      ]);
     });
 
     it("COLLECTING_ADDRESS re-prompts (doesn't advance) for a too-short address", async () => {

@@ -92,7 +92,7 @@ export class CartService {
   /** Converts a cart into a real Order (reusing OrderService's stock reservation), marks the cart CHECKED_OUT.
    * If the conversation already has an amendable order (e.g. started via the free-text AI flow), merges into
    * that order instead of creating a second overlapping one. */
-  async checkout(cartId: string, businessId: string, input: { shippingAddress: string; paymentMethod: "UPI" | "COD" }) {
+  async checkout(cartId: string, businessId: string, input: { shippingAddress: string; paymentMethod: "UPI" | "COD" | "CARD" }) {
     const cart = await this.get(cartId, businessId);
     if (cart.status !== CartStatus.ACTIVE) throw new BadRequestException("This cart has already been checked out.");
     if (!cart.items.length) throw new BadRequestException("Your cart is empty.");

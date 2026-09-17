@@ -106,8 +106,11 @@ export class WhatsAppWebhookService {
 
     await recalculateLeadScore(this.prisma, customer.id, business.id);
 
-    // interactive button/list taps are always routed to the deterministic shopping flow, never the AI
-    if (msg.interactiveId) {
+    // interactive button/list taps are routed to the deterministic shopping flow — EXCEPT the AI's own
+    // "ai_pay_*" payment-method buttons (sent from generateAndSendReply), which fall through to the AI
+    // instead, since the tapped choice ("Card"/"UPI"/"COD") is already stored as the inbound message text above
+    // and the AI conversation is driven entirely by re-reading the transcript, not by button-specific routing
+    if (msg.interactiveId && !msg.interactiveId.startsWith("ai_pay_")) {
       try {
         await this.shoppingFlow.handleInteractive(conversation.id, business.id, msg.interactiveId);
       } catch (err) {
@@ -119,7 +122,7 @@ export class WhatsAppWebhookService {
     // a plain greeting (or explicit "menu"/"shop") always (re)opens the deterministic menu, regardless of
     // shopping state — lets a customer restart the flow at any point instead of getting stuck if an earlier
     // state was left mid-flow (e.g. a dead-end with no matching products) with no other way back to the menu
-    if (GREETING_RE.test(msg.text)) {
+    if (!msg.interactiveId && GREETING_RE.test(msg.text)) {
       try {
         await this.shoppingFlow.sendMainMenu(conversation.id, business.id);
       } catch (err) {

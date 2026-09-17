@@ -36,7 +36,7 @@ const REPLY_SCHEMA = {
       }
     },
     shippingAddress: { type: ["string", "null"], description: "The customer's shipping address, carried forward once they have given it. Null until then." },
-    paymentMethod: { type: ["string", "null"], description: "Either \"UPI\" or \"COD\" once the customer has chosen, carried forward. Null until then." },
+    paymentMethod: { type: ["string", "null"], description: "Either \"Card\", \"UPI\", or \"COD\" once the customer has chosen, carried forward. Null until then." },
     orderConfirmed: { type: "boolean", description: "True only when the customer has given final explicit confirmation (e.g. \"yes\", \"confirm\", \"place the order\") after already being shown the full order summary (items, address, payment method, total)." },
     cancelOrder: { type: "boolean", description: "True only when the customer explicitly asks to cancel their existing order (e.g. \"cancel my order\", \"I don't want it anymore\"). Never true in the same turn as orderConfirmed." },
     needsHumanReview: { type: "boolean", description: "True when the request is ambiguous, conflicts with earlier information, involves a complaint/legal threat/suspicious payment claim, or anything else you are not confident handling autonomously. Never true in the same turn as orderConfirmed or cancelOrder." },
@@ -143,11 +143,11 @@ export class AiService {
 1. GREETING: if the customer just said hi/hey or the conversation is just starting, greet them warmly in one short sentence, then list every product name from the catalogue below in "showProductImages" so each is sent to the customer as its own card right after your reply. Do not list product names or prices in your own reply text.
 2. ITEMS: once you know which products and quantities they want (from anywhere in the conversation), carry those forward in "items" every turn from now on.
 3. ADDRESS: if items are known but no shipping address has been given yet, ask for their shipping address. Do not ask again once given — carry it forward in "shippingAddress".
-4. PAYMENT METHOD: if items and address are known but no payment method chosen, ask "Would you like to pay via UPI or Pay on Delivery (COD)?". Carry the chosen method forward in "paymentMethod" exactly as "UPI" or "COD".
+4. PAYMENT METHOD: if items and address are known but no payment method chosen, ask which payment method they'd like — the customer is shown Card/UPI/COD as tap-to-choose buttons automatically right after your reply, so keep your own reply brief (e.g. "How would you like to pay?") and never list the three options yourself in text. Carry the chosen method forward in "paymentMethod" exactly as "Card", "UPI", or "COD" once they pick one (by tapping a button, or typing it).
 5. SUMMARY: once items, address, and payment method are all known and you have NOT yet shown a summary (check the conversation history — if your own most recent message already contains an order summary, do not repeat this step), present a clear summary: items with quantities, computed total using catalogue prices, shipping address, and payment method. Ask them to confirm ("Shall I go ahead and place this order?"). Do not set orderConfirmed true yet at this step.
 6. CONFIRMATION: only after a summary has already been shown to the customer AND they now clearly confirm (e.g. "yes", "confirm", "place it"), set orderConfirmed to true, keeping items/shippingAddress/paymentMethod as already established.
    - If payment method is COD: tell them their order is placed and will be delivered, payment collected on delivery.
-   - If payment method is UPI: a payment link is sent automatically in a separate follow-up message right after yours. Tell them to complete the payment using that link and that their order will be confirmed once payment is received — do NOT say the order is already placed. Never write a URL, link, or the phrase "payment link" in your own reply, even if earlier messages in the conversation contain one.
+   - If payment method is Card or UPI: a payment link is sent automatically in a separate follow-up message right after yours. Tell them to complete the payment using that link and that their order will be confirmed once payment is received — do NOT say the order is already placed. Never write a URL, link, or the phrase "payment link" in your own reply, even if earlier messages in the conversation contain one.
 7. ORDER STATUS: if the customer asks about an existing order (status, tracking, "where is my order"), answer using the "Recent orders" data below — never invent a status. Do not set orderConfirmed for a status question.
 8. AMENDING AN ORDER: if the customer wants to add/change items and the "Recent orders" data shows a recent order that is still PENDING PAYMENT, treat this as updating that same order — repeat the SUMMARY/CONFIRMATION steps with the full combined item list (old + new items).
 9. CANCELLATION: if the customer clearly asks to cancel their order, set cancelOrder to true and leave orderConfirmed false. Only do this if the "Recent orders" data shows an order that is still PENDING PAYMENT (not already shipped/cancelled) — otherwise tell them it can no longer be cancelled.
@@ -170,6 +170,9 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     let orderCreated: { id: string; total: string; currency: string } | null = null;
     let paymentLink: string | null = null;
     let imagesToSend: string[] = [];
+    // true only for the exact turn where the AI is about to ask the customer to pick a payment method (items +
+    // address known, nothing chosen yet) — sent as tap-to-choose buttons instead of asking the customer to type
+    let awaitingPaymentMethodChoice = false;
 
     const content = await (async () => {
       try {
@@ -201,6 +204,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         }
 
         if (!parsed.orderConfirmed || !parsed.items?.length || !parsed.shippingAddress || !parsed.paymentMethod) {
+          if (parsed.items?.length && parsed.shippingAddress && !parsed.paymentMethod) awaitingPaymentMethodChoice = true;
           return stripHallucinatedLinks(parsed.reply);
         }
 
@@ -238,7 +242,13 @@ ${transcript || "No previous messages. Greet the customer and share the product 
       }
     })();
 
-    const message = await this.conversations.sendMessage(conversationId, conversation.businessId, content);
+    const message = await (awaitingPaymentMethodChoice
+      ? this.conversations.sendButtons(conversationId, conversation.businessId, content, [
+          { id: "ai_pay_card", title: "💳 Card" },
+          { id: "ai_pay_upi", title: "📱 UPI" },
+          { id: "ai_pay_cod", title: "💵 COD" },
+        ])
+      : this.conversations.sendMessage(conversationId, conversation.businessId, content));
 
     // sent as a separate follow-up message after the order summary/confirmation, not bundled into it
     if (paymentLink) {
@@ -344,7 +354,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
     }
 
     // "UPI" or "COD" — anything else from the model falls back to COD (pay on delivery) as the safer default
-    const normalizedPayment = /upi/i.test(paymentMethod) ? "UPI" : "COD";
+    const normalizedPayment = /card/i.test(paymentMethod) ? "CARD" : /upi/i.test(paymentMethod) ? "UPI" : "COD";
     const orderItems: OrderItemInputDto[] = matched.map((i) => ({ productId: i.productId, variantId: i.variantId, name: i.name, quantity: i.quantity, unitPrice: i.price }));
 
     // fold in anything the customer already added via the button-driven shopping flow in this same conversation,
@@ -391,7 +401,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         status: order.status,
         isAmendment,
         // real Razorpay link if this business has it configured, otherwise the simulated dummy checkout page
-        ...(normalizedPayment === "UPI" && order.status !== "AWAITING_APPROVAL" ? { paymentLink: order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
+        ...((normalizedPayment === "UPI" || normalizedPayment === "CARD") && order.status !== "AWAITING_APPROVAL" ? { paymentLink: order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
         ...(unmatched.length ? { unmatched } : {}),
       };
     } catch (error) {
