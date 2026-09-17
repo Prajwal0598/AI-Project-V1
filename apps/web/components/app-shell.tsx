@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { api, getBusinessId, getToken } from "../lib/api";
+import { api, getBusinessId, getToken, getRefreshToken, clearToken } from "../lib/api";
 
 const items = [
   ["Overview", "/", "O"],
@@ -37,12 +37,19 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
     return () => clearInterval(interval);
   }, []);
 
+  async function logout() {
+    const refreshToken = getRefreshToken();
+    try { if (refreshToken) await api.auth.logout(refreshToken); } catch { /* best-effort — clear the local session regardless */ }
+    clearToken();
+    router.replace("/login");
+  }
+
   return <main className="app-shell">
     <aside className="app-sidebar">
       <Link className="app-brand" href="/"><span>r</span>relay</Link>
       <p className="app-section-label">Workspace</p>
       <nav>{items.map(([label, href, mark]) => <Link key={href} href={href} className={`app-nav-link ${pathname === href ? "selected" : ""}`}><b>{mark}</b>{label}{label === "Inbox" && !!openConversations && <i>{openConversations}</i>}{label === "Orders" && !!ordersNeedingAction && <i>{ordersNeedingAction}</i>}</Link>)}</nav>
-      <div className="app-sidebar-footer"><div className="app-upgrade"><strong>AI sales agent</strong><small>Auto-reply is active</small></div><Link href="/settings" className="app-account"><span>PS</span><div><strong>Prajwal Studio</strong><small>Growth plan</small></div></Link></div>
+      <div className="app-sidebar-footer"><div className="app-upgrade"><strong>AI sales agent</strong><small>Auto-reply is active</small></div><Link href="/settings" className="app-account"><span>PS</span><div><strong>Prajwal Studio</strong><small>Growth plan</small></div></Link><button className="app-logout" onClick={logout}>Log out</button></div>
     </aside>
     <section className="app-main"><header className="app-topbar"><span>Workspace / Prajwal Studio</span><div><span className="app-live-dot" /> API connected <button aria-label="Help">?</button></div></header><div className="screen-page"><div className="screen-heading"><div><p>Relay command center</p><h1>{title}</h1><span>{subtitle}</span></div>{action}</div>{children}</div></section>
   </main>;
