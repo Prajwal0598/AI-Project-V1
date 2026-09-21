@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { toPublicImageUrl } from "../products/image-storage";
 import { OpportunityPriority, OpportunityStatus, OpportunityType, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
@@ -323,14 +324,28 @@ export class OpportunityService {
   }
 
   async send(opportunityId: string, businessId: string, editedMessage?: string) {
-    const opportunity = await this.prisma.opportunity.findFirst({ where: { id: opportunityId, businessId }, include: { suggestion: true } });
+    const opportunity = await this.prisma.opportunity.findFirst({
+      where: { id: opportunityId, businessId },
+      include: { suggestion: true, relatedProduct: { include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } },
+    });
     if (!opportunity) throw new NotFoundException("Opportunity not found.");
     if (!opportunity.suggestion) throw new BadRequestException("This opportunity has no suggestion to send.");
     if (opportunity.status === "SENT" || opportunity.status === "CONVERTED") throw new BadRequestException("This suggestion has already been sent.");
 
     const conversationId = await this.resolveConversationId(businessId, opportunity.customerId, opportunity.relatedCartId);
     const finalMessage = editedMessage?.trim() || opportunity.suggestion.editedMessage || opportunity.suggestion.message;
-    await this.conversations.sendMessage(conversationId, businessId, finalMessage);
+
+    // BACK_IN_STOCK gets the product photo + tap-to-choose buttons instead of plain text, so the customer can
+    // add it to cart right from the notification rather than having to type anything
+    const restockedVariant = opportunity.type === "BACK_IN_STOCK" ? opportunity.relatedProduct?.variants[0] : undefined;
+    if (restockedVariant) {
+      await this.conversations.sendButtons(conversationId, businessId, finalMessage, [
+        { id: `variant_${restockedVariant.id}`, title: "🛒 Add to Cart" },
+        { id: "bis_dismiss", title: "Maybe Later" },
+      ], opportunity.relatedProduct?.imageUrl ? toPublicImageUrl(opportunity.relatedProduct.imageUrl) : undefined);
+    } else {
+      await this.conversations.sendMessage(conversationId, businessId, finalMessage);
+    }
 
     await this.prisma.$transaction(async (tx) => {
       await tx.suggestion.update({ where: { opportunityId }, data: { editedMessage: editedMessage?.trim() || opportunity.suggestion!.editedMessage } });

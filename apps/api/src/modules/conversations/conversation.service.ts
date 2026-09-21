@@ -275,8 +275,9 @@ export class ConversationService {
     return data.message_id ?? null;
   }
 
-  /** Sends a WhatsApp reply-buttons message (max 3 buttons, 20 chars each) — used for the shopping-flow menu/nav. */
-  async sendButtons(conversationId: string, businessId: string, body: string, buttons: { id: string; title: string }[]) {
+  /** Sends a WhatsApp reply-buttons message (max 3 buttons, 20 chars each) — used for the shopping-flow menu/nav.
+   * An optional imageUrl attaches it as the message's header (e.g. a product photo above the buttons). */
+  async sendButtons(conversationId: string, businessId: string, body: string, buttons: { id: string; title: string }[], imageUrl?: string) {
     const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, include: { identity: true, business: true } });
     if (!conversation) throw new NotFoundException("Conversation not found.");
     if (!conversation.identity?.identifier) throw new BadRequestException("No channel identity linked to this conversation.");
@@ -284,6 +285,7 @@ export class ConversationService {
 
     const providerMessageId = await this.sendWhatsAppInteractive(conversation.business, conversation.identity.identifier, {
       type: "button",
+      ...(imageUrl ? { header: { type: "image", image: { link: imageUrl } } } : {}),
       body: { text: body },
       action: { buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title.slice(0, 20) } })) },
     });

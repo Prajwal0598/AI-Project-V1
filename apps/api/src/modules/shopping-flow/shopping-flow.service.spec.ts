@@ -167,6 +167,13 @@ describe("ShoppingFlowService — state machine", () => {
       expect(prisma.product.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ categoryId: "some-old-category" }) }));
     });
 
+    it("bis_dismiss ('Maybe Later' on a back-in-stock notification) just acknowledges, with no state change", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      await flow.handleInteractive("conv1", "biz1", "bis_dismiss");
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("No worries"));
+      expect(prisma.conversation.update).not.toHaveBeenCalled();
+    });
+
     it("prod_<id> shows product detail and records a PRODUCT_VIEWED signal", async () => {
       prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
       prisma.product.findFirst.mockResolvedValue({
