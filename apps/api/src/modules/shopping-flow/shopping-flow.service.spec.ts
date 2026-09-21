@@ -231,6 +231,23 @@ describe("ShoppingFlowService — state machine", () => {
       expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "CART_REVIEW", pendingVariantId: null } });
     });
 
+    it("adding a cross-sell/upsell suggestion's variant merges into the existing active cart rather than replacing it (regression)", async () => {
+      // the conversation's cart already has an unrelated item from earlier — tapping "Add to Cart" on a
+      // suggestion must land alongside it, not wipe it out, since getOrCreateActive reuses the same cart
+      prisma.variant.findFirst.mockResolvedValue({ id: "v2", price: 499, currency: "INR", product: { name: "Socks" } });
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [{ variantId: "v1", quantity: 1 }] });
+      cart.addItem.mockResolvedValue({ items: [{ variantId: "v1", quantity: 1 }, { variantId: "v2", quantity: 1 }] });
+      cart.totals.mockReturnValue({ subtotal: 1298, currency: "INR" });
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "AWAITING_QUANTITY", pendingVariantId: "v2", customerId: "cust1" }, "1");
+
+      expect(handled).toBe(true);
+      expect(cart.getOrCreateActive).toHaveBeenCalledWith("conv1", "biz1", "cust1");
+      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v2", 1);
+      // total reflects both items, confirming the earlier item wasn't dropped
+      expect(conversations.sendButtons).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.stringContaining("1,298"), expect.any(Array));
+    });
+
     it("COLLECTING_ADDRESS routes to address handling and advances to COLLECTING_PAYMENT", async () => {
       const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "COLLECTING_ADDRESS", pendingVariantId: null, customerId: "cust1" }, "123 Main Street, Springfield");
       expect(handled).toBe(true);
