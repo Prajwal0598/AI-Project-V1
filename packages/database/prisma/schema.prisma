@@ -249,6 +249,9 @@ model User {
   name         String?
   passwordHash String?
   role         UserRole @default(OWNER)
+  // grants access to the cross-business /platform admin endpoints (order/revenue totals, merchant list) —
+  // unrelated to the per-business UserRole; almost never true, set manually for internal platform-operator accounts
+  isPlatformAdmin Boolean @default(false)
   failedLoginAttempts Int      @default(0)
   lockedUntil         DateTime? // account is locked (login rejected) while this is set and in the future
   createdAt    DateTime @default(now())

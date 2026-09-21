@@ -17,7 +17,7 @@ export class AuthController {
   @SetMetadata(IS_PUBLIC_KEY, false)
   @Get("me")
   me(@GetUser() user: User) {
-    return { id: user.id, email: user.email, name: user.name, role: user.role, businessId: user.businessId };
+    return { id: user.id, email: user.email, name: user.name, role: user.role, businessId: user.businessId, isPlatformAdmin: user.isPlatformAdmin };
   }
 
   // stricter limit than the API default to slow down credential-stuffing / brute force attempts

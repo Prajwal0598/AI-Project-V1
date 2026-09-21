@@ -177,6 +177,25 @@ export interface Me {
   name: string | null;
   role: "OWNER" | "ADMIN" | "MEMBER";
   businessId: string;
+  isPlatformAdmin: boolean;
+}
+
+export interface PlatformOverview {
+  merchants: number;
+  orders: number;
+  revenue: number;
+  customers: number;
+}
+
+export interface PlatformBusiness {
+  id: string;
+  name: string;
+  industry: string | null;
+  createdAt: string;
+  whatsappConnected: boolean;
+  instagramConnected: boolean;
+  orders: number;
+  revenue: number;
 }
 
 export interface AiActionLog {
@@ -463,6 +482,10 @@ export const api = {
     logout: (refreshToken: string) =>
       request<{ ok: boolean }>("/auth/logout", { method: "POST", body: JSON.stringify({ refreshToken }) }),
     me: () => request<Me>("/auth/me"),
+  },
+  platformAdmin: {
+    overview: () => request<PlatformOverview>("/platform/overview"),
+    businesses: () => request<PlatformBusiness[]>("/platform/businesses"),
   },
   businesses: {
     list: () => request<Business[]>("/businesses"),

@@ -4,6 +4,7 @@ import { UserRole } from "@prisma/client";
 import { GetUser } from "../../common/get-user.decorator";
 import { Roles } from "../../common/roles.decorator";
 import { RolesGuard } from "../../common/roles.guard";
+import { PlatformAdminGuard } from "../../common/platform-admin.guard";
 import { BusinessService } from "./business.service";
 import { CreateBusinessDto } from "./dto/create-business.dto";
 import { UpdateBusinessDto } from "./dto/update-business.dto";
@@ -12,12 +13,16 @@ import { UpdateBusinessDto } from "./dto/update-business.dto";
 export class BusinessController {
   constructor(private readonly businesses: BusinessService) {}
 
+  // lists every business on the platform — not merchant data, so this is platform-admin only, never a regular merchant route
   @Get()
+  @UseGuards(PlatformAdminGuard)
   findAll() {
     return this.businesses.findAll();
   }
 
+  // internal/platform-admin provisioning only — merchant self-signup goes through POST /auth/register instead
   @Post()
+  @UseGuards(PlatformAdminGuard)
   create(@Body() input: CreateBusinessDto) {
     return this.businesses.create(input);
   }
