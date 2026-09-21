@@ -8,12 +8,10 @@ import type { BusinessStats, ActivityEvent, OpportunitySummary } from "../lib/ap
 
 export default function Home() {
   const [period, setPeriod] = useState<"This week" | "Last week">("This week");
-  const [apiState, setApiState] = useState<"checking" | "online" | "offline">("checking");
   const [stats, setStats] = useState<BusinessStats | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [opportunitySummary, setOpportunitySummary] = useState<OpportunitySummary | null>(null);
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
   const router = useRouter();
 
   useEffect(() => {
@@ -32,19 +30,6 @@ export default function Home() {
     if (!bizId) return;
     api.businesses.activity(bizId, showAllActivity ? 100 : 20).then(setActivity).catch(console.error);
   }, [showAllActivity]);
-
-  useEffect(() => {
-    async function connect() {
-      try {
-        const health = await fetch(`${apiUrl}/health`);
-        if (!health.ok) throw new Error("API unavailable");
-        setApiState("online");
-      } catch {
-        setApiState("offline");
-      }
-    }
-    void connect();
-  }, [apiUrl]);
 
   function fmtRevenue(v: string | number) {
     const n = Number(v ?? 0);
@@ -82,8 +67,6 @@ export default function Home() {
 
   return (
     <AppShell title="Overview" subtitle="Here's how your AI sales team is performing." action={<button className="primary-button" onClick={() => router.push("/settings")}><span>＋</span> Create automation</button>}>
-      <p className={`api-status ${apiState}`}><i /> {apiState === "checking" ? "Connecting to your API…" : apiState === "online" ? "API connected" : "API offline — start the backend to enable live data"}</p>
-
       <div className="metric-grid">
         <article className="metric-card"><div className="metric-header"><span className="metric-icon peach">✦</span><button onClick={() => router.push("/leads")}>View</button></div><p>New leads</p><h2>{stats?.leads ?? "—"}</h2></article>
         <article className="metric-card"><div className="metric-header"><span className="metric-icon purple">◌</span><button onClick={() => router.push("/inbox")}>View</button></div><p>Conversations</p><h2>{stats?.conversations ?? "—"}</h2></article>
