@@ -26,19 +26,19 @@ describe("OpportunityService.send", () => {
     );
   });
 
-  it("BACK_IN_STOCK with an active variant sends the product photo + Add to Cart/Maybe Later buttons instead of plain text", async () => {
+  it.each(["BACK_IN_STOCK", "CROSS_SELL", "UPSELL"] as const)("%s with an active variant sends the product photo + Add to Cart/Maybe Later buttons instead of plain text", async (type) => {
     prisma.opportunity.findFirst.mockResolvedValue({
-      id: "opp1", customerId: "cust1", relatedCartId: null, status: "NEW", type: "BACK_IN_STOCK",
-      suggestion: { message: "It's back!", editedMessage: null },
+      id: "opp1", customerId: "cust1", relatedCartId: null, status: "NEW", type,
+      suggestion: { message: "Check this out!", editedMessage: null },
       relatedProduct: { id: "p1", imageUrl: "/uploads/products/shoe.jpg", variants: [{ id: "v1" }] },
     });
     prisma.opportunity.findUnique.mockResolvedValue({ id: "opp1" });
 
     await service.send("opp1", "biz1");
 
-    expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", "It's back!", [
+    expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", "Check this out!", [
       { id: "variant_v1", title: "🛒 Add to Cart" },
-      { id: "bis_dismiss", title: "Maybe Later" },
+      { id: "suggestion_dismiss", title: "Maybe Later" },
     ], expect.stringContaining("/uploads/products/shoe.jpg"));
     expect(conversations.sendMessage).not.toHaveBeenCalled();
   });

@@ -335,13 +335,14 @@ export class OpportunityService {
     const conversationId = await this.resolveConversationId(businessId, opportunity.customerId, opportunity.relatedCartId);
     const finalMessage = editedMessage?.trim() || opportunity.suggestion.editedMessage || opportunity.suggestion.message;
 
-    // BACK_IN_STOCK gets the product photo + tap-to-choose buttons instead of plain text, so the customer can
-    // add it to cart right from the notification rather than having to type anything
-    const restockedVariant = opportunity.type === "BACK_IN_STOCK" ? opportunity.relatedProduct?.variants[0] : undefined;
-    if (restockedVariant) {
+    // BACK_IN_STOCK/CROSS_SELL/UPSELL get the product photo + tap-to-choose buttons instead of plain text, so
+    // the customer can add the specific product to cart right from the notification without typing anything
+    const PRODUCT_CARD_TYPES: OpportunityType[] = ["BACK_IN_STOCK", "CROSS_SELL", "UPSELL"];
+    const suggestedVariant = PRODUCT_CARD_TYPES.includes(opportunity.type) ? opportunity.relatedProduct?.variants[0] : undefined;
+    if (suggestedVariant) {
       await this.conversations.sendButtons(conversationId, businessId, finalMessage, [
-        { id: `variant_${restockedVariant.id}`, title: "🛒 Add to Cart" },
-        { id: "bis_dismiss", title: "Maybe Later" },
+        { id: `variant_${suggestedVariant.id}`, title: "🛒 Add to Cart" },
+        { id: "suggestion_dismiss", title: "Maybe Later" },
       ], opportunity.relatedProduct?.imageUrl ? toPublicImageUrl(opportunity.relatedProduct.imageUrl) : undefined);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, finalMessage);

@@ -91,8 +91,8 @@ export class ShoppingFlowService {
     if (actionId === "pay_card") return this.setPaymentMethod(conversationId, businessId, "CARD");
     if (actionId === "order_confirm") return this.confirmOrder(conversationId, businessId, conversation);
     if (actionId === "order_cancel") return this.cancelCheckout(conversationId, businessId);
-    // "Maybe Later" on a back-in-stock notification — just a polite acknowledgement, no state change
-    if (actionId === "bis_dismiss") return this.conversations.sendMessage(conversationId, businessId, "No worries! We'll keep it in mind — let us know whenever you're ready 🙂");
+    // "Maybe Later" on a proactive product suggestion (back-in-stock/cross-sell/upsell) — just a polite acknowledgement, no state change
+    if (actionId === "suggestion_dismiss") return this.conversations.sendMessage(conversationId, businessId, "No worries! We'll keep it in mind — let us know whenever you're ready 🙂");
   }
 
   /** Called for plain-text replies; returns true if this state consumed the text (caller should not also run the AI). */
