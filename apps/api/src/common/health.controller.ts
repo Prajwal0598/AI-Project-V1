@@ -1,4 +1,4 @@
-import { Controller, ForbiddenException, Get, Headers, Post, Query, Res } from "@nestjs/common";
+import { Controller, Get, Res } from "@nestjs/common";
 import type { Response } from "express";
 import IORedis from "ioredis";
 import { Public } from "../modules/auth/public.decorator";
@@ -20,16 +20,6 @@ export class HealthController {
       timestamp: new Date().toISOString(),
       dependencies: { database, redis },
     };
-  }
-
-  // TEMPORARY — one-time bootstrap for the first isPlatformAdmin account, since there's no UI/CLI path to the
-  // DB right now. Remove this endpoint once it's been used. Guarded by BOOTSTRAP_ADMIN_SECRET, never by a JWT.
-  @Post("bootstrap-platform-admin")
-  async bootstrapPlatformAdmin(@Query("email") email: string, @Headers("x-bootstrap-secret") secret: string) {
-    const expected = process.env.BOOTSTRAP_ADMIN_SECRET;
-    if (!expected || secret !== expected) throw new ForbiddenException();
-    const user = await this.prisma.user.update({ where: { email }, data: { isPlatformAdmin: true } });
-    return { id: user.id, email: user.email, isPlatformAdmin: user.isPlatformAdmin };
   }
 
   private async checkDatabase(): Promise<boolean> {
