@@ -326,7 +326,11 @@ export class OpportunityService {
   async send(opportunityId: string, businessId: string, editedMessage?: string) {
     const opportunity = await this.prisma.opportunity.findFirst({
       where: { id: opportunityId, businessId },
-      include: { suggestion: true, relatedProduct: { include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } } },
+      include: {
+        suggestion: true,
+        relatedProduct: { include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } } },
+        relatedPromotion: { select: { imageUrl: true } },
+      },
     });
     if (!opportunity) throw new NotFoundException("Opportunity not found.");
     if (!opportunity.suggestion) throw new BadRequestException("This opportunity has no suggestion to send.");
@@ -335,15 +339,18 @@ export class OpportunityService {
     const conversationId = await this.resolveConversationId(businessId, opportunity.customerId, opportunity.relatedCartId);
     const finalMessage = editedMessage?.trim() || opportunity.suggestion.editedMessage || opportunity.suggestion.message;
 
-    // BACK_IN_STOCK/CROSS_SELL/UPSELL get the product photo + tap-to-choose buttons instead of plain text, so
-    // the customer can add the specific product to cart right from the notification without typing anything
-    const PRODUCT_CARD_TYPES: OpportunityType[] = ["BACK_IN_STOCK", "CROSS_SELL", "UPSELL"];
+    // types tied to one specific, addable product/variant get the photo + tap-to-choose buttons instead of plain
+    // text, so the customer can add it to cart right from the notification without typing anything
+    const PRODUCT_CARD_TYPES: OpportunityType[] = ["BACK_IN_STOCK", "CROSS_SELL", "UPSELL", "PRODUCT_ENQUIRY", "HIGH_PURCHASE_INTENT", "REPEAT_PURCHASE", "NEW_PRODUCT_MATCH"];
     const suggestedVariant = PRODUCT_CARD_TYPES.includes(opportunity.type) ? opportunity.relatedProduct?.variants[0] : undefined;
     if (suggestedVariant) {
       await this.conversations.sendButtons(conversationId, businessId, finalMessage, [
         { id: `variant_${suggestedVariant.id}`, title: "🛒 Add to Cart" },
         { id: "suggestion_dismiss", title: "Maybe Later" },
       ], opportunity.relatedProduct?.imageUrl ? toPublicImageUrl(opportunity.relatedProduct.imageUrl) : undefined);
+    } else if (opportunity.type === "PROMOTION" && opportunity.relatedPromotion?.imageUrl) {
+      // a promotion isn't tied to one addable variant, so it's an image + caption rather than a product card
+      await this.conversations.sendImage(conversationId, businessId, toPublicImageUrl(opportunity.relatedPromotion.imageUrl), finalMessage);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, finalMessage);
     }

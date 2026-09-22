@@ -3,6 +3,7 @@ import { PromotionTargetSegment } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { CreatePromotionDto } from "./dto/create-promotion.dto";
+import { deletePromotionImageFile } from "./promotion-image-storage";
 
 const SEGMENT_LABEL: Record<PromotionTargetSegment, string> = {
   ALL_CUSTOMERS: "all customers",
@@ -31,10 +32,20 @@ export class PromotionService {
         title: input.title.trim(),
         message: input.message.trim(),
         discountDescription: input.discountDescription?.trim() || null,
+        imageUrl: input.imageUrl?.trim() || null,
         targetSegment: input.targetSegment,
         categoryId: input.targetSegment === PromotionTargetSegment.CATEGORY_BUYERS ? input.categoryId : null,
       },
     });
+  }
+
+  /** Attaches/replaces a promotion's image (custom upload) — deletes the previous uploaded file, if any. Only before it's been broadcast. */
+  async setImage(id: string, businessId: string, imageUrl: string) {
+    const promotion = await this.prisma.promotion.findFirst({ where: { id, businessId } });
+    if (!promotion) throw new NotFoundException("Promotion not found.");
+    if (promotion.broadcastedAt) throw new NotFoundException("Already-broadcast promotions can't be edited.");
+    deletePromotionImageFile(promotion.imageUrl);
+    return this.prisma.promotion.update({ where: { id }, data: { imageUrl } });
   }
 
   async remove(id: string, businessId: string) {

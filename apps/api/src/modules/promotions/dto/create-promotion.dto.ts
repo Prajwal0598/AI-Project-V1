@@ -14,6 +14,11 @@ export class CreatePromotionDto {
   @IsString()
   discountDescription?: string;
 
+  // either a copied product photo's existing imageUrl, or set later via POST /promotions/:id/image (custom upload)
+  @IsOptional()
+  @IsString()
+  imageUrl?: string;
+
   @IsEnum(PromotionTargetSegment)
   targetSegment!: PromotionTargetSegment;
 

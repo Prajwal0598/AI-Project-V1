@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { AppShell } from "../../components/app-shell";
-import { api, getBusinessId } from "../../lib/api";
-import type { Category, Promotion, PromotionTargetSegment } from "../../lib/api";
+import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
+import type { Category, Product, Promotion, PromotionTargetSegment } from "../../lib/api";
 
 const SEGMENT_LABEL: Record<PromotionTargetSegment, string> = {
   ALL_CUSTOMERS: "All customers",
@@ -13,6 +13,7 @@ const SEGMENT_LABEL: Record<PromotionTargetSegment, string> = {
 export default function PromotionsPage() {
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -23,6 +24,9 @@ export default function PromotionsPage() {
   const [targetSegment, setTargetSegment] = useState<PromotionTargetSegment>("ALL_CUSTOMERS");
   const [categoryId, setCategoryId] = useState("");
   const [creating, setCreating] = useState(false);
+  // image: either a custom uploaded file, or an existing product's photo copied by id — never both
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageProductId, setImageProductId] = useState("");
 
   function load() {
     const bizId = getBusinessId();
@@ -30,6 +34,7 @@ export default function PromotionsPage() {
     setLoading(true);
     api.promotions.list(bizId).then(setPromotions).catch(console.error).finally(() => setLoading(false));
     api.categories.list(bizId).then(setCategories).catch(console.error);
+    api.products.list(bizId).then(setProducts).catch(console.error);
   }
 
   useEffect(load, []);
@@ -41,12 +46,15 @@ export default function PromotionsPage() {
     setCreating(true);
     setError("");
     try {
-      await api.promotions.create(bizId, {
+      const catalogueImageUrl = imageProductId ? products.find(p => p.id === imageProductId)?.imageUrl ?? undefined : undefined;
+      const created = await api.promotions.create(bizId, {
         title: title.trim(), message: message.trim(),
         discountDescription: discountDescription.trim() || undefined,
+        imageUrl: catalogueImageUrl,
         targetSegment, categoryId: targetSegment === "CATEGORY_BUYERS" ? categoryId : undefined,
       });
-      setTitle(""); setMessage(""); setDiscountDescription(""); setTargetSegment("ALL_CUSTOMERS"); setCategoryId("");
+      if (imageFile) await api.promotions.uploadImage(created.id, imageFile);
+      setTitle(""); setMessage(""); setDiscountDescription(""); setTargetSegment("ALL_CUSTOMERS"); setCategoryId(""); setImageFile(null); setImageProductId("");
       load();
     } catch (err) { setError(err instanceof Error ? err.message : "Could not create this promotion."); }
     finally { setCreating(false); }
@@ -93,6 +101,21 @@ export default function PromotionsPage() {
             {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </label>}
+        <label style={{ fontSize: 12 }}>Image — upload a banner
+          <input type="file" accept="image/jpeg,image/png" onChange={e => { const f = e.target.files?.[0] ?? null; setImageFile(f); if (f) setImageProductId(""); }} style={{ display: "block", marginTop: 4 }} />
+        </label>
+        <label style={{ fontSize: 12 }}>…or choose from your product catalogue
+          <select value={imageProductId} onChange={e => { setImageProductId(e.target.value); if (e.target.value) setImageFile(null); }} style={{ width: "100%", marginTop: 4 }}>
+            <option value="">No product photo</option>
+            {products.filter(p => p.imageUrl).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </label>
+        {(imageFile || imageProductId) && <div style={{ gridColumn: "1 / -1" }}>
+          <img
+            src={imageFile ? URL.createObjectURL(imageFile) : (resolveImageUrl(products.find(p => p.id === imageProductId)?.imageUrl ?? null) ?? undefined)}
+            alt="" style={{ width: 90, height: 90, borderRadius: 8, objectFit: "cover", marginTop: 4 }}
+          />
+        </div>}
       </div>
       <button className="primary-button" style={{ marginTop: 12 }} disabled={creating || !title.trim() || !message.trim()} onClick={createPromotion}>{creating ? "Creating…" : "Save as draft"}</button>
     </div>
@@ -104,6 +127,7 @@ export default function PromotionsPage() {
       {promotions.map(p => (
         <div className="data-card" key={p.id} style={{ padding: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+            {p.imageUrl && <img src={resolveImageUrl(p.imageUrl) ?? undefined} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />}
             <div>
               <span className="source-chip" style={{ fontSize: 10 }}>{SEGMENT_LABEL[p.targetSegment]}</span>
               <h3 style={{ margin: "8px 0 2px" }}>{p.title}{p.discountDescription && <small style={{ color: "var(--muted)", fontWeight: 400 }}> · {p.discountDescription}</small>}</h3>

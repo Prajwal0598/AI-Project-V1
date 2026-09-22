@@ -388,6 +388,7 @@ export interface Promotion {
   title: string;
   message: string;
   discountDescription: string | null;
+  imageUrl: string | null;
   targetSegment: PromotionTargetSegment;
   categoryId: string | null;
   broadcastedAt: string | null;
@@ -616,8 +617,13 @@ export const api = {
   },
   promotions: {
     list: (businessId: string) => request<Promotion[]>(`/businesses/${businessId}/promotions`),
-    create: (businessId: string, data: { title: string; message: string; discountDescription?: string; targetSegment: PromotionTargetSegment; categoryId?: string }) =>
+    create: (businessId: string, data: { title: string; message: string; discountDescription?: string; imageUrl?: string; targetSegment: PromotionTargetSegment; categoryId?: string }) =>
       request<Promotion>(`/businesses/${businessId}/promotions`, { method: "POST", body: JSON.stringify(data) }),
+    uploadImage: (id: string, file: File) => {
+      const formData = new FormData();
+      formData.append("image", file);
+      return upload<Promotion>(`/promotions/${id}/image`, formData);
+    },
     broadcast: (id: string) => request<{ targeted: number; created: number }>(`/promotions/${id}/broadcast`, { method: "POST" }),
     remove: (id: string) => request<Promotion>(`/promotions/${id}`, { method: "DELETE" }),
   },

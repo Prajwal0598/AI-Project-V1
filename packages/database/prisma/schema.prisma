@@ -770,6 +770,7 @@ model Promotion {
   title              String
   message            String                 // sent verbatim as the Suggestion message for every targeted customer
   discountDescription String?               // display-only label, e.g. "20% off" — no real coupon/code enforcement (matches the rest of this project's simulated-payment philosophy)
+  imageUrl           String?                // banner image (uploaded) or a copied product photo — sent as an image+caption instead of plain text when set
   targetSegment      PromotionTargetSegment
   categoryId         String?                // required when targetSegment = CATEGORY_BUYERS
   broadcastedAt      DateTime?
