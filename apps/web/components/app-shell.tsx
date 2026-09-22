@@ -23,6 +23,7 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
   const [openConversations, setOpenConversations] = useState<number | null>(null);
   const [ordersNeedingAction, setOrdersNeedingAction] = useState<number | null>(null);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => { if (!getToken()) router.replace("/login"); }, [router]);
 
   useEffect(() => {
@@ -58,7 +59,13 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
       </nav>
       <div className="app-sidebar-footer"><div className="app-upgrade"><strong>AI sales agent</strong><small>Auto-reply is active</small></div><Link href="/settings" className="app-account"><span>PS</span><div><strong>Prajwal Studio</strong><small>Growth plan</small></div></Link><button className="app-logout" onClick={logout}>Log out</button></div>
     </aside>
-    <section className="app-main"><header className="app-topbar"><span>Workspace / Prajwal Studio</span><div><button aria-label="Help">?</button></div></header><div className="screen-page"><div className="screen-heading"><div><p>Relay command center</p><h1>{title}</h1><span>{subtitle}</span></div>{action}</div>{children}</div></section>
+    <section className="app-main"><header className="app-topbar"><span>Workspace / Prajwal Studio</span><div style={{ position: "relative" }}>
+      <button aria-label="Help" onClick={() => setHelpOpen(o => !o)}>?</button>
+      {helpOpen && <div style={{ position: "absolute", top: 30, right: 0, background: "#fff", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.1)", padding: "12px 16px", zIndex: 20, minWidth: 240, fontSize: 12 }}>
+        <p style={{ margin: "0 0 6px" }}><strong>Contact Email:</strong> prajwalms0598@gmail.com</p>
+        <p style={{ margin: 0 }}><strong>Contact Number:</strong> 7406608539</p>
+      </div>}
+    </div></header><div className="screen-page"><div className="screen-heading"><div><p>Relay command center</p><h1>{title}</h1><span>{subtitle}</span></div>{action}</div>{children}</div></section>
   </main>;
 }
 
