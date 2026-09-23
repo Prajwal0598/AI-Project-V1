@@ -75,6 +75,46 @@ describe("AssistedBuyingService", () => {
     });
   });
 
+  describe("handle — comparison", () => {
+    const jeans = { id: "p2", name: "Slim Jeans", description: "Stretch denim", variants: [{ price: 1299, currency: "INR", inventory: 4 }] };
+
+    beforeEach(() => {
+      prisma.conversation.findFirst.mockResolvedValue({
+        assistedBuyingContext: { recommendations: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }, { productId: "p2", variantId: "v3", name: "Slim Jeans" }], query: "shirt" },
+      });
+    });
+
+    it("compares two referenced-by-ordinal recommendations with a templated fallback (no OpenAI configured in tests)", async () => {
+      prisma.product.findMany.mockResolvedValue([shirt, jeans]);
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "which is better, the first or second one?");
+
+      expect(handled).toBe(true);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Navy Linen Shirt"));
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Slim Jeans"));
+      expect(cart.addItem).not.toHaveBeenCalled(); // comparison intent takes priority over ordinal-as-cart-reference
+    });
+
+    it("compares by product name when no ordinal is used", async () => {
+      prisma.product.findMany.mockResolvedValue([shirt, jeans]);
+      const handled = await service.handle("conv1", "biz1", "cust1", "compare the Navy Linen Shirt and the Slim Jeans");
+      expect(handled).toBe(true);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Navy Linen Shirt"));
+    });
+
+    it("does not treat a single ordinal reference as a comparison request", async () => {
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
+      cart.addItem.mockResolvedValue({ items: [] });
+      cart.totals.mockReturnValue({ subtotal: 1799, currency: "INR" });
+      prisma.product.findFirst.mockResolvedValue({ id: "p1", name: "Navy Linen Shirt", variants: shirt.variants });
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "add the first one");
+
+      expect(handled).toBe(true);
+      expect(cart.addItem).toHaveBeenCalled(); // falls through to reference resolution, not comparison
+    });
+  });
+
   describe("handle — reference resolution", () => {
     beforeEach(() => {
       prisma.conversation.findFirst.mockResolvedValue({

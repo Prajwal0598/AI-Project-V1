@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import OpenAI from "openai";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
@@ -10,6 +11,9 @@ import { parseSearchQuery, fmtMoney } from "../shopping-flow/shopping-flow.servi
 const ORDINAL_WORDS: Record<string, number> = {
   first: 0, "1st": 0, second: 1, "2nd": 1, third: 2, "3rd": 2, fourth: 3, "4th": 3, fifth: 4, "5th": 4,
 };
+
+// phrases that signal "compare these" rather than "add the first one" — checked before reference resolution
+const COMPARISON_RE = /\b(compare|which is better|which one is better|vs\.?|versus|difference between|better one)\b/;
 
 interface RecommendedItem { productId: string; variantId: string; name: string }
 interface AssistedBuyingContext { recommendations: RecommendedItem[]; query: string }
@@ -25,17 +29,28 @@ interface AssistedBuyingContext { recommendations: RecommendedItem[]; query: str
 @Injectable()
 export class AssistedBuyingService {
   private readonly logger = new Logger(AssistedBuyingService.name);
+  // client is initialised lazily so the API starts without OPENAI_API_KEY configured — comparison falls back
+  // to a plain templated summary when it's unavailable, since it's an enhancement, not the core capability
+  private client: OpenAI | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly conversations: ConversationService,
     private readonly cart: CartService,
-  ) {}
+  ) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (apiKey) this.client = new OpenAI({ apiKey });
+  }
 
   /** Returns true if this turn was fully handled (a reply was already sent); false to fall through to the normal AI flow. */
   async handle(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
     const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, select: { assistedBuyingContext: true } });
     const context = conversation?.assistedBuyingContext as unknown as AssistedBuyingContext | null;
+
+    // comparison ("which is better, the first or second?") is checked before treating ordinals as an add-to-cart reference
+    if ((context?.recommendations?.length ?? 0) >= 2 && (await this.tryCompare(conversationId, businessId, text, context!))) {
+      return true;
+    }
 
     // an existing recommendation set takes priority — "add the first one" only makes sense right after showing options
     if (context?.recommendations?.length && (await this.tryResolveReference(conversationId, businessId, customerId, text, context))) {
@@ -87,6 +102,55 @@ export class AssistedBuyingService {
 
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { assistedBuyingContext: { recommendations, query: text } as unknown as Prisma.InputJsonValue } });
     return true;
+  }
+
+  private async tryCompare(conversationId: string, businessId: string, text: string, context: AssistedBuyingContext): Promise<boolean> {
+    const lower = text.toLowerCase();
+    if (!COMPARISON_RE.test(lower)) return false;
+
+    // resolve which of the shown recommendations are being compared — by ordinal, by name, or generically ("compare these")
+    const indices = new Set<number>();
+    for (const [word, idx] of Object.entries(ORDINAL_WORDS)) {
+      if (idx < context.recommendations.length && new RegExp(`\\b${word}\\b`).test(lower)) indices.add(idx);
+    }
+    context.recommendations.forEach((r, i) => { if (lower.includes(r.name.toLowerCase())) indices.add(i); });
+    if (indices.size < 2 && /\b(these|them|both|all)\b/.test(lower)) {
+      for (let i = 0; i < Math.min(3, context.recommendations.length); i++) indices.add(i);
+    }
+    if (indices.size < 2) return false; // not enough specific references to compare — let the caller try something else
+
+    const picked = [...indices].slice(0, 3).map((i) => context.recommendations[i]);
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: picked.map((p) => p.productId) }, businessId },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" } } },
+    });
+    if (products.length < 2) return false;
+
+    const reply = await this.composeComparison(text, products);
+    await this.conversations.sendMessage(conversationId, businessId, reply);
+    return true;
+  }
+
+  /** Grounded comparison from only the given products' authoritative fields — falls back to a plain templated
+   * summary when OpenAI isn't configured or the call fails, since comparison is an enhancement, not core. */
+  private async composeComparison(question: string, products: { name: string; description: string | null; variants: { price: unknown; currency: string; inventory: number | null }[] }[]): Promise<string> {
+    const lines = products.map((p) => `*${p.name}* — ${fmtMoney(p.variants[0].price as never, p.variants[0].currency)}${p.variants[0].inventory === 0 ? " (out of stock)" : ""}`);
+    const fallback = `Here's what I have:\n${lines.join("\n")}\n\nLet me know what matters most to you — price or availability — and I can help you decide.`;
+    if (!this.client) return fallback;
+
+    try {
+      const facts = products.map((p) => `- ${p.name}: ${fmtMoney(p.variants[0].price as never, p.variants[0].currency)}, ${p.variants[0].inventory === 0 ? "out of stock" : "in stock"}${p.description ? `, ${p.description}` : ""}`).join("\n");
+      const response = await this.client.responses.create({
+        model: process.env.OPENAI_MODEL ?? "gpt-4o",
+        instructions: `Compare only the exact products/attributes given below for the customer's question — never invent specs, ratings, discounts, or claims not present in the facts. Keep the reply under 70 words and end with a conditional recommendation based on their likely priority (e.g. "If price matters most, ..."), not an unsupported claim that one is simply "better".\n\nProducts:\n${facts}`,
+        input: question,
+        store: false,
+      });
+      return response.output_text?.trim() || fallback;
+    } catch (err) {
+      this.logger.warn(`Comparison LLM call failed, using templated fallback: ${err instanceof Error ? err.message : String(err)}`);
+      return fallback;
+    }
   }
 
   private async tryResolveReference(conversationId: string, businessId: string, customerId: string, text: string, context: AssistedBuyingContext): Promise<boolean> {
