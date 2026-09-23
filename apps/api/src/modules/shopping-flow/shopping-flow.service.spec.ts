@@ -300,5 +300,20 @@ describe("ShoppingFlowService — state machine", () => {
       const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: state, pendingVariantId: null, customerId: "cust1" }, "anything");
       expect(handled).toBe(false);
     });
+
+    it("'do you have a black bag' never matches a black shirt (regression) — 'bag' is a hard category filter, not an OR'd keyword", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }, { id: "cat-shirts", name: "Shirts" }]);
+      prisma.product.findMany.mockResolvedValue([]); // the mocked DB call itself only ever returns bags once categoryId is a hard filter
+
+      await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "do you have a black bag");
+
+      const where = prisma.product.findMany.mock.calls[0][0].where;
+      expect(where.categoryId).toBe("cat-bags");
+      expect(where.AND).toEqual([{ OR: [
+        { name: { contains: "black", mode: "insensitive" } },
+        { description: { contains: "black", mode: "insensitive" } },
+        { brand: { contains: "black", mode: "insensitive" } },
+      ] }]);
+    });
   });
 });

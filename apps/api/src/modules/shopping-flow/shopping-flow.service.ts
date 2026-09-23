@@ -28,6 +28,45 @@ export function parseSearchQuery(text: string): SearchFilters {
   return { maxPrice, minPrice, keywords };
 }
 
+// crude singular/plural normalization ("bags" <-> "bag") so a keyword can match a category name reliably
+// without needing a real stemming library for this deterministic V1
+function normalizeSearchWord(word: string): string {
+  return word.toLowerCase().replace(/s$/, "");
+}
+
+/**
+ * If a keyword names one of the business's own categories, it should be treated as a HARD categoryId filter and
+ * dropped from the free-text keyword list — this is what prevents "black bag" from matching a "Black Premium
+ * Shirt": without it, every keyword gets OR'd across every field, so a product matching just one unrelated
+ * word ("black") could still be returned even though it doesn't belong to the requested category ("bag").
+ */
+export async function resolveCategoryFilter(
+  prisma: PrismaService,
+  businessId: string,
+  keywords: string[],
+): Promise<{ categoryId?: string; remainingKeywords: string[] }> {
+  if (!keywords.length) return { remainingKeywords: keywords };
+  const categories = await prisma.category.findMany({ where: { businessId, active: true }, select: { id: true, name: true } });
+  for (const category of categories) {
+    const categoryWords = category.name.split(/\s+/).map(normalizeSearchWord);
+    const hit = keywords.find((kw) => categoryWords.includes(normalizeSearchWord(kw)));
+    if (hit) return { categoryId: category.id, remainingKeywords: keywords.filter((kw) => kw !== hit) };
+  }
+  return { remainingKeywords: keywords };
+}
+
+/** One AND-clause per keyword (each independently required, OR'd across name/description/brand/category-name). */
+export function keywordAndClauses(keywords: string[], includeCategoryName: boolean) {
+  return keywords.map((kw) => ({
+    OR: [
+      { name: { contains: kw, mode: "insensitive" as const } },
+      { description: { contains: kw, mode: "insensitive" as const } },
+      { brand: { contains: kw, mode: "insensitive" as const } },
+      ...(includeCategoryName ? [{ category: { name: { contains: kw, mode: "insensitive" as const } } }] : []),
+    ],
+  }));
+}
+
 // thousands-grouped price string (WhatsApp text/captions render *bold*/_italic_ markdown, but list row titles/descriptions do not)
 // accepts Prisma's Decimal (product/variant prices) as well as plain number/string
 export function fmtMoney(amount: number | string | { toString(): string }, currency: string): string {
@@ -122,14 +161,14 @@ export class ShoppingFlowService {
 
   private async search(conversationId: string, businessId: string, text: string) {
     const filters = parseSearchQuery(text);
+    const { categoryId, remainingKeywords } = await resolveCategoryFilter(this.prisma, businessId, filters.keywords);
     const products = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
-        ...(filters.keywords.length ? { OR: filters.keywords.flatMap((k) => [
-          { name: { contains: k, mode: "insensitive" as const } },
-          { description: { contains: k, mode: "insensitive" as const } },
-          { category: { name: { contains: k, mode: "insensitive" as const } } },
-        ]) } : {}),
+        ...(categoryId ? { categoryId } : {}),
+        // every remaining keyword must independently match somewhere (AND across keywords) — a product
+        // matching only "black" when "bag" was also required must not be returned
+        ...(remainingKeywords.length ? { AND: keywordAndClauses(remainingKeywords, !categoryId) } : {}),
       },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
       take: 30,

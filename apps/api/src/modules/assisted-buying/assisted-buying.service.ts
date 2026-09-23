@@ -5,7 +5,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
 import { toPublicImageUrl } from "../products/image-storage";
-import { parseSearchQuery, fmtMoney } from "../shopping-flow/shopping-flow.service";
+import { parseSearchQuery, fmtMoney, resolveCategoryFilter, keywordAndClauses } from "../shopping-flow/shopping-flow.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
 
 // ordinal words a customer might use to refer back to a just-shown recommendation ("add the first one")
@@ -15,12 +15,6 @@ const ORDINAL_WORDS: Record<string, number> = {
 
 // phrases that signal "compare these" rather than "add the first one" — checked before reference resolution
 const COMPARISON_RE = /\b(compare|which is better|which one is better|vs\.?|versus|difference between|better one)\b/;
-
-// crude singular/plural normalization ("bags" <-> "bag") so a keyword can match a category name reliably
-// without needing a real stemming library for this deterministic V1
-function normalizeWord(word: string): string {
-  return word.toLowerCase().replace(/s$/, "");
-}
 
 interface RecommendedItem { productId: string; variantId: string; name: string }
 interface AssistedBuyingContext { recommendations: RecommendedItem[]; query: string }
@@ -227,24 +221,9 @@ export class AssistedBuyingService {
       ? { price: { ...(filters.minPrice != null ? { gte: filters.minPrice } : {}), ...(filters.maxPrice != null ? { lte: filters.maxPrice } : {}) } }
       : {};
 
-    // if a keyword names one of this business's own categories, treat it as a HARD filter and drop it from the
-    // generic keyword list — this is what actually fixes "black bag" matching a black shirt: the shirt is
-    // rejected by category before "black" ever gets a chance to match it via free-text search (previously,
-    // every keyword was OR'd across every field, so a product could match on just one unrelated word)
-    let matchedCategoryId: string | undefined;
-    let remainingKeywords = filters.keywords;
-    if (filters.keywords.length) {
-      const categories = await this.prisma.category.findMany({ where: { businessId, active: true }, select: { id: true, name: true } });
-      for (const category of categories) {
-        const categoryWords = category.name.split(/\s+/).map(normalizeWord);
-        const hit = filters.keywords.find((kw) => categoryWords.includes(normalizeWord(kw)));
-        if (hit) {
-          matchedCategoryId = category.id;
-          remainingKeywords = filters.keywords.filter((kw) => kw !== hit);
-          break; // first match wins — keeping this simple rather than trying to satisfy multiple categories at once
-        }
-      }
-    }
+    // shared with ShoppingFlowService.search() — treats a category-naming keyword as a HARD filter instead of
+    // just another OR'd keyword, which is what actually fixes "black bag" matching a black shirt
+    const { categoryId: matchedCategoryId, remainingKeywords } = await resolveCategoryFilter(this.prisma, businessId, filters.keywords);
 
     const products = await this.prisma.product.findMany({
       where: {
@@ -257,14 +236,7 @@ export class AssistedBuyingService {
           ...(excludedCategoryIds.length ? [{ OR: [{ categoryId: null }, { categoryId: { notIn: excludedCategoryIds } }] }] : []),
           // every remaining keyword must independently match somewhere (AND across keywords) — a product
           // matching only "black" when "bag" was also required must not be returned
-          ...remainingKeywords.map((kw) => ({
-            OR: [
-              { name: { contains: kw, mode: "insensitive" as const } },
-              { description: { contains: kw, mode: "insensitive" as const } },
-              { brand: { contains: kw, mode: "insensitive" as const } },
-              ...(matchedCategoryId ? [] : [{ category: { name: { contains: kw, mode: "insensitive" as const } } }]),
-            ],
-          })),
+          ...keywordAndClauses(remainingKeywords, !matchedCategoryId),
         ],
       },
       take: limit,
