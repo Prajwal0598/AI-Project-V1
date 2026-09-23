@@ -88,6 +88,7 @@ export default function ProductsPage() {
   const [newCategoryName, setNewCategoryName] = useState("");
   const [renamingCategoryId, setRenamingCategoryId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
 
   // inventory alerts + threshold
   const [defaultThreshold, setDefaultThreshold] = useState(5);
@@ -382,10 +383,24 @@ export default function ProductsPage() {
 
   async function removeCategory(c: Category) {
     if (!confirm(`Delete category "${c.name}"?`)) return;
+    if (deletingCategoryId) return; // ignore a second click while a delete request is already in flight
+    setDeletingCategoryId(c.id);
     try {
       await api.categories.remove(c.id);
       setCategories(prev => prev.filter(x => x.id !== c.id));
-    } catch (err) { setError(err instanceof Error ? err.message : "Could not delete category."); }
+      setError("");
+    } catch (err) {
+      // a "not found" here means the category is already gone server-side (e.g. a double-click sent two
+      // delete requests, or it was already removed by "Merge duplicates") — drop the stale row locally too
+      // instead of leaving it stuck in the list until a manual page refresh
+      if (err instanceof Error && /not found/i.test(err.message)) {
+        setCategories(prev => prev.filter(x => x.id !== c.id));
+      } else {
+        setError(err instanceof Error ? err.message : "Could not delete category.");
+      }
+    } finally {
+      setDeletingCategoryId(null);
+    }
   }
 
   async function mergeDuplicateCategories() {
@@ -467,7 +482,7 @@ export default function ProductsPage() {
               <td style={{ padding: 6, textAlign: "right" }}>
                 {renamingCategoryId === c.id
                   ? <><button onClick={saveRename} style={{ marginRight: 6 }}>Save</button><button onClick={() => setRenamingCategoryId(null)}>Cancel</button></>
-                  : <><button onClick={() => startRename(c)} style={{ marginRight: 6 }}>Rename</button><button onClick={() => removeCategory(c)}>Delete</button></>}
+                  : <><button onClick={() => startRename(c)} style={{ marginRight: 6 }} disabled={deletingCategoryId === c.id}>Rename</button><button onClick={() => removeCategory(c)} disabled={deletingCategoryId === c.id}>{deletingCategoryId === c.id ? "Deleting…" : "Delete"}</button></>}
               </td>
             </tr>
           ))}
