@@ -535,9 +535,9 @@ export const api = {
   products: {
     list: (businessId: string) =>
       request<Product[]>(`/businesses/${businessId}/products`),
-    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number; sku?: string; category?: string; brand?: string; status?: ProductStatus }) =>
+    create: (businessId: string, data: { name: string; price: number; currency?: string; inventory?: number; sku?: string; category?: string; categoryId?: string; brand?: string; status?: ProductStatus }) =>
       request<Product>(`/businesses/${businessId}/products`, { method: "POST", body: JSON.stringify(data) }),
-    update: (productId: string, data: Partial<{ name: string; description: string; category: string; brand: string; status: ProductStatus }>) =>
+    update: (productId: string, data: Partial<{ name: string; description: string; category: string; categoryId: string; brand: string; status: ProductStatus }>) =>
       request<Product>(`/products/${productId}`, { method: "PATCH", body: JSON.stringify(data) }),
     updateVariant: (variantId: string, data: Partial<{ sku: string; price: number; currency: string; inventory: number; active: boolean; lowStockThreshold: number | null }>) =>
       request<Variant>(`/variants/${variantId}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -548,7 +548,7 @@ export const api = {
     },
     remove: (productId: string) =>
       request<{ id: string }>(`/products/${productId}`, { method: "DELETE" }),
-    bulk: (businessId: string, data: { productIds: string[]; action: "publish" | "hide" | "draft" | "delete" | "setCategory"; category?: string }) =>
+    bulk: (businessId: string, data: { productIds: string[]; action: "publish" | "hide" | "draft" | "delete" | "setCategory"; category?: string; categoryId?: string }) =>
       request<{ affected: number }>(`/businesses/${businessId}/products/bulk`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   categories: {
@@ -560,6 +560,8 @@ export const api = {
       request<Category>(`/categories/${categoryId}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (categoryId: string) =>
       request<void>(`/categories/${categoryId}`, { method: "DELETE" }),
+    mergeDuplicates: (businessId: string) =>
+      request<{ duplicatesMerged: number }>(`/businesses/${businessId}/categories/merge-duplicates`, { method: "POST" }),
   },
   inventory: {
     alerts: (businessId: string) => request<InventoryAlert[]>(`/businesses/${businessId}/inventory/alerts`),

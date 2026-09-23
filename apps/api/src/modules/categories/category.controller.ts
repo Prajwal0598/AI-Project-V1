@@ -21,6 +21,12 @@ export class CategoryController {
     return this.categories.create(businessId, input);
   }
 
+  @Post("businesses/:businessId/categories/merge-duplicates")
+  mergeDuplicates(@Param("businessId") businessId: string, @GetUser() user: User) {
+    if (user.businessId !== businessId) throw new ForbiddenException();
+    return this.categories.mergeDuplicates(businessId);
+  }
+
   @Patch("categories/:categoryId")
   update(@Param("categoryId") categoryId: string, @GetUser() user: User, @Body() input: UpdateCategoryDto) {
     return this.categories.update(categoryId, user.businessId, input);

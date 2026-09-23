@@ -16,4 +16,9 @@ export class BulkUpdateProductsDto {
   @IsOptional()
   @IsString()
   category?: string;
+
+  /** preferred over `category` (name) when the caller already knows the id — avoids ambiguity when two categories share a name */
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
 }

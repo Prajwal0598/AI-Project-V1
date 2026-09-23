@@ -160,8 +160,7 @@ export default function ProductsPage() {
     if (action === "setCategory" && !bulkCategoryId) { setError("Choose a category first."); return; }
     setBulkBusy(true);
     try {
-      const category = action === "setCategory" ? categories.find(c => c.id === bulkCategoryId)?.name : undefined;
-      await api.products.bulk(bizId, { productIds: [...selected], action, category });
+      await api.products.bulk(bizId, { productIds: [...selected], action, categoryId: action === "setCategory" ? bulkCategoryId : undefined });
       setSelected(new Set());
       loadProducts();
       loadCategories();
@@ -174,8 +173,7 @@ export default function ProductsPage() {
     if (!name || !price || !bizId) return;
     setSaving(true);
     try {
-      const categoryName = categories.find(c => c.id === newCategoryId)?.name;
-      const product = await api.products.create(bizId, { name: name.trim(), price: parseFloat(price), sku: sku.trim() || undefined, category: categoryName });
+      const product = await api.products.create(bizId, { name: name.trim(), price: parseFloat(price), sku: sku.trim() || undefined, categoryId: newCategoryId || undefined });
       setProducts(prev => [product, ...prev]);
       setName(""); setPrice(""); setSku(""); setNewCategoryId(""); setShow(false);
     } catch (err) { setError(err instanceof Error ? err.message : "Could not save product."); }
@@ -316,11 +314,10 @@ export default function ProductsPage() {
     if (!editingProduct) return;
     setSavingEdit(true);
     try {
-      const categoryName = categories.find(c => c.id === editCategoryId)?.name ?? "";
       const updatedProduct = await api.products.update(editingProduct.id, {
         name: editName.trim(),
         description: editDescription.trim(),
-        category: categoryName,
+        categoryId: editCategoryId,
         brand: editBrand.trim(),
         status: editStatus,
       });
@@ -391,6 +388,21 @@ export default function ProductsPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "Could not delete category."); }
   }
 
+  async function mergeDuplicateCategories() {
+    const bizId = getBusinessId();
+    if (!bizId) return;
+    try {
+      const result = await api.categories.mergeDuplicates(bizId);
+      if (result.duplicatesMerged > 0) {
+        loadCategories();
+        loadProducts();
+      }
+      alert(result.duplicatesMerged > 0
+        ? `Merged ${result.duplicatesMerged} duplicate categor${result.duplicatesMerged === 1 ? "y" : "ies"} — their products were moved onto the kept category.`
+        : "No duplicate categories found.");
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not merge duplicate categories."); }
+  }
+
   return <AppShell title="Products" subtitle="Give your AI agent accurate products, pricing, and availability." action={
     <div style={{ display: "flex", gap: 8 }}>
       <button onClick={() => setShowAlerts(true)}>⚠️ Inventory alerts{alerts.length ? ` (${alerts.length})` : ""}</button>
@@ -439,6 +451,7 @@ export default function ProductsPage() {
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <input placeholder="New category name" value={newCategoryName} onChange={e => setNewCategoryName(e.target.value)} style={{ flex: 1 }} />
         <button className="primary-button" onClick={addCategory} disabled={!newCategoryName.trim()}>Add category</button>
+        <button onClick={mergeDuplicateCategories} title="Fixes products missing from a category's WhatsApp browse list because of a same-named duplicate category">Merge duplicates</button>
       </div>
       {categories.length === 0 && <p style={{ color: "var(--muted)", fontSize: 12 }}>No categories yet.</p>}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>

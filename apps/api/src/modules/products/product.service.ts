@@ -30,10 +30,28 @@ export class ProductService {
     return this.prisma.product.findMany({ where: { businessId }, orderBy: { createdAt: "desc" }, include: DEFAULT_INCLUDE });
   }
 
+  /**
+   * Resolves the category to attach. Prefers an explicit `categoryId` (unambiguous — what the Products page
+   * sends now) over a `category` name lookup (kept for CSV import / AI-suggested categories, which only have a
+   * name to work with). Name-based resolution is ambiguous whenever two categories happen to share a name, which
+   * silently misattributed products to the wrong (identically-named) category before this existed.
+   * Returns `undefined` to mean "leave unchanged" (only relevant for update()); `null` means "clear the category".
+   */
+  private async resolveCategoryId(businessId: string, input: { categoryId?: string; category?: string }): Promise<string | null | undefined> {
+    if (input.categoryId !== undefined) {
+      if (!input.categoryId) return null;
+      const owned = await this.prisma.category.findFirst({ where: { id: input.categoryId, businessId } });
+      if (!owned) throw new NotFoundException("Category not found.");
+      return owned.id;
+    }
+    if (input.category !== undefined) return this.categories.resolveIdByName(businessId, input.category);
+    return undefined;
+  }
+
   async create(businessId: string, input: CreateProductDto) {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
     if (!business) throw new NotFoundException("Business not found.");
-    const categoryId = await this.categories.resolveIdByName(businessId, input.category);
+    const categoryId = (await this.resolveCategoryId(businessId, input)) ?? null;
     const product = await this.prisma.product.create({
       data: {
         businessId,
@@ -82,7 +100,9 @@ export class ProductService {
     const product = await this.prisma.product.findFirst({ where: { id: productId, businessId }, include: DEFAULT_INCLUDE });
     if (!product) throw new NotFoundException("Product not found.");
     const defaultVariant = product.variants[0];
-    const categoryId = input.category !== undefined ? await this.categories.resolveIdByName(businessId, input.category) : undefined;
+    const categoryId = input.categoryId !== undefined || input.category !== undefined
+      ? await this.resolveCategoryId(businessId, input)
+      : undefined;
 
     const updated = await this.prisma.product.update({
       where: { id: productId },
@@ -151,8 +171,8 @@ export class ProductService {
         await this.prisma.product.updateMany({ where: { id: { in: ids } }, data: { status: ProductStatus.DRAFT } });
         break;
       case "setCategory": {
-        if (!input.category?.trim()) throw new BadRequestException("category is required for the setCategory action.");
-        const categoryId = await this.categories.resolveIdByName(businessId, input.category);
+        if (!input.categoryId?.trim() && !input.category?.trim()) throw new BadRequestException("categoryId (or category) is required for the setCategory action.");
+        const categoryId = await this.resolveCategoryId(businessId, input);
         await this.prisma.product.updateMany({ where: { id: { in: ids } }, data: { categoryId } });
         break;
       }
