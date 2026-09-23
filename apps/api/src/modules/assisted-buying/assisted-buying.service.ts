@@ -6,6 +6,7 @@ import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
 import { toPublicImageUrl } from "../products/image-storage";
 import { parseSearchQuery, fmtMoney } from "../shopping-flow/shopping-flow.service";
+import { logAiAction } from "../../common/ai-action-log.helper";
 
 // ordinal words a customer might use to refer back to a just-shown recommendation ("add the first one")
 const ORDINAL_WORDS: Record<string, number> = {
@@ -48,7 +49,7 @@ export class AssistedBuyingService {
     const context = conversation?.assistedBuyingContext as unknown as AssistedBuyingContext | null;
 
     // comparison ("which is better, the first or second?") is checked before treating ordinals as an add-to-cart reference
-    if ((context?.recommendations?.length ?? 0) >= 2 && (await this.tryCompare(conversationId, businessId, text, context!))) {
+    if ((context?.recommendations?.length ?? 0) >= 2 && (await this.tryCompare(conversationId, businessId, customerId, text, context!))) {
       return true;
     }
 
@@ -57,10 +58,10 @@ export class AssistedBuyingService {
       return true;
     }
 
-    return this.tryRecommend(conversationId, businessId, text);
+    return this.tryRecommend(conversationId, businessId, customerId, text);
   }
 
-  private async tryRecommend(conversationId: string, businessId: string, text: string): Promise<boolean> {
+  private async tryRecommend(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
     const filters = parseSearchQuery(text);
     if (!filters.keywords.length && filters.minPrice == null && filters.maxPrice == null) return false; // doesn't look like a shopping query
 
@@ -79,7 +80,10 @@ export class AssistedBuyingService {
       candidates = await this.findCandidates(businessId, { keywords: [], minPrice: filters.minPrice, maxPrice: filters.maxPrice }, 20);
       isExactMatch = false;
     }
-    if (!candidates.length) return false; // nothing fits even loosely — let the normal AI reply handle it conversationally
+    if (!candidates.length) {
+      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_NO_MATCH", result: "no_match", reason: text });
+      return false; // nothing fits even loosely — let the normal AI reply handle it conversationally
+    }
 
     // rerank against the ORIGINAL request (not the relaxed retrieval filters) so results stay ordered by
     // closeness to what the customer actually asked for, even when the match itself isn't exact
@@ -101,10 +105,16 @@ export class AssistedBuyingService {
     }
 
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { assistedBuyingContext: { recommendations, query: text } as unknown as Prisma.InputJsonValue } });
+    await logAiAction(this.prisma, {
+      businessId, customerId, conversationId,
+      action: "ASSISTED_BUYING_RECOMMENDATIONS_SHOWN",
+      result: isExactMatch ? "shown" : "shown_relaxed",
+      reason: `"${text}" -> ${recommendations.map((r) => r.name).join(", ")}`,
+    });
     return true;
   }
 
-  private async tryCompare(conversationId: string, businessId: string, text: string, context: AssistedBuyingContext): Promise<boolean> {
+  private async tryCompare(conversationId: string, businessId: string, customerId: string, text: string, context: AssistedBuyingContext): Promise<boolean> {
     const lower = text.toLowerCase();
     if (!COMPARISON_RE.test(lower)) return false;
 
@@ -128,6 +138,7 @@ export class AssistedBuyingService {
 
     const reply = await this.composeComparison(text, products);
     await this.conversations.sendMessage(conversationId, businessId, reply);
+    await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_COMPARISON_SHOWN", result: "shown", reason: products.map((p) => p.name).join(" vs ") });
     return true;
   }
 
@@ -181,6 +192,7 @@ export class AssistedBuyingService {
 
     if (variant.inventory === 0) {
       await this.conversations.sendMessage(conversationId, businessId, `😔 Sorry, *${product.name}* is currently out of stock in that option.`);
+      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_OUT_OF_STOCK", result: "out_of_stock", reason: product.name });
       return true;
     }
 
@@ -191,8 +203,7 @@ export class AssistedBuyingService {
       await this.conversations.sendButtons(conversationId, businessId, `✅ Added *${product.name}* to your cart.\n🛒 Cart total: ${fmtMoney(subtotal, currency)}`, [
         { id: "nav_viewcart", title: "View Cart" },
         { id: "cart_checkout", title: "Checkout" },
-      ]);
-    } catch (error) {
+      ]);      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart", reason: `${product.name} (variant ${variant.id})` });    } catch (error) {
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not add that to your cart.");
     }
     return true;

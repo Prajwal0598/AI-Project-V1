@@ -20,6 +20,7 @@ describe("AssistedBuyingService", () => {
       conversation: { findFirst: jest.fn().mockResolvedValue({ assistedBuyingContext: null }), update: jest.fn() },
       business: { findUnique: jest.fn().mockResolvedValue({ assistedBuyingMaxRecommendations: 5 }) },
       product: { findMany: jest.fn(), findFirst: jest.fn() },
+      aiActionLog: { create: jest.fn() },
     };
     conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
     cart = { getOrCreateActive: jest.fn(), addItem: jest.fn(), totals: jest.fn() };
@@ -43,6 +44,7 @@ describe("AssistedBuyingService", () => {
       expect(handled).toBe(false);
       expect(conversations.sendMessage).not.toHaveBeenCalled();
       expect(prisma.product.findMany).toHaveBeenCalledTimes(3); // exact, then budget-relaxed, then keyword-relaxed
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_NO_MATCH", result: "no_match" }) }));
     });
 
     it("relaxes the budget and offers the closest alternative when nothing fits the exact price", async () => {
@@ -72,6 +74,7 @@ describe("AssistedBuyingService", () => {
         where: { id: "conv1" },
         data: { assistedBuyingContext: { recommendations: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }], query: "shirt for a wedding under 2000" } },
       });
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_RECOMMENDATIONS_SHOWN", result: "shown" }) }));
     });
   });
 
@@ -93,6 +96,7 @@ describe("AssistedBuyingService", () => {
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Navy Linen Shirt"));
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Slim Jeans"));
       expect(cart.addItem).not.toHaveBeenCalled(); // comparison intent takes priority over ordinal-as-cart-reference
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_COMPARISON_SHOWN", result: "shown" }) }));
     });
 
     it("compares by product name when no ordinal is used", async () => {
@@ -136,6 +140,7 @@ describe("AssistedBuyingService", () => {
         { id: "nav_viewcart", title: "View Cart" },
         { id: "cart_checkout", title: "Checkout" },
       ]);
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart" }) }));
     });
 
     it("falls back to the originally recommended variant when no size/color is mentioned", async () => {
@@ -157,6 +162,7 @@ describe("AssistedBuyingService", () => {
       expect(handled).toBe(true);
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("out of stock"));
       expect(cart.addItem).not.toHaveBeenCalled();
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_OUT_OF_STOCK", result: "out_of_stock" }) }));
     });
 
     it("does not treat unrelated free text as a reference and falls through to recommending instead", async () => {
