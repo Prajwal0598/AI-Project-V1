@@ -37,11 +37,24 @@ describe("AssistedBuyingService", () => {
       expect(prisma.product.findMany).not.toHaveBeenCalled();
     });
 
-    it("returns false when nothing in the catalogue matches", async () => {
+    it("returns false when nothing in the catalogue matches even after relaxing budget and keywords", async () => {
       prisma.product.findMany.mockResolvedValue([]);
       const handled = await service.handle("conv1", "biz1", "cust1", "shirt for a wedding under 2000");
       expect(handled).toBe(false);
       expect(conversations.sendMessage).not.toHaveBeenCalled();
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(3); // exact, then budget-relaxed, then keyword-relaxed
+    });
+
+    it("relaxes the budget and offers the closest alternative when nothing fits the exact price", async () => {
+      prisma.product.findMany
+        .mockResolvedValueOnce([]) // exact: keywords + under 1000
+        .mockResolvedValueOnce([shirt]); // relaxed: keywords only
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "red leather shoes under 1000");
+
+      expect(handled).toBe(true);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't find an exact match"));
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(2);
     });
 
     it("sends recommendation cards and stores the recommendation set when candidates match", async () => {

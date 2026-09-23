@@ -52,14 +52,30 @@ export class AssistedBuyingService {
     const business = await this.prisma.business.findUnique({ where: { id: businessId }, select: { assistedBuyingMaxRecommendations: true } });
     const maxRecommendations = business?.assistedBuyingMaxRecommendations ?? 5;
 
-    const candidates = await this.findCandidates(businessId, filters, 20);
-    if (!candidates.length) return false; // no match — let the normal AI reply handle it conversationally
+    // exact match first; if nothing fits, progressively relax the constraint most likely to be too strict
+    // (budget, then keywords) so the customer gets the closest valid alternatives instead of an empty result
+    let candidates = await this.findCandidates(businessId, filters, 20);
+    let isExactMatch = true;
+    if (!candidates.length && filters.keywords.length && (filters.minPrice != null || filters.maxPrice != null)) {
+      candidates = await this.findCandidates(businessId, { keywords: filters.keywords }, 20);
+      isExactMatch = false;
+    }
+    if (!candidates.length && filters.keywords.length && (filters.minPrice != null || filters.maxPrice != null)) {
+      candidates = await this.findCandidates(businessId, { keywords: [], minPrice: filters.minPrice, maxPrice: filters.maxPrice }, 20);
+      isExactMatch = false;
+    }
+    if (!candidates.length) return false; // nothing fits even loosely — let the normal AI reply handle it conversationally
 
+    // rerank against the ORIGINAL request (not the relaxed retrieval filters) so results stay ordered by
+    // closeness to what the customer actually asked for, even when the match itself isn't exact
     const ranked = this.rerank(candidates, filters).slice(0, maxRecommendations);
 
     const label = filters.keywords.join(" ") || "your search";
     const budgetSuffix = filters.maxPrice != null ? ` under ${fmtMoney(filters.maxPrice, ranked[0].variant.currency)}` : "";
-    await this.conversations.sendMessage(conversationId, businessId, `I found ${ranked.length} option${ranked.length === 1 ? "" : "s"} for "${label}"${budgetSuffix}:`);
+    const intro = isExactMatch
+      ? `I found ${ranked.length} option${ranked.length === 1 ? "" : "s"} for "${label}"${budgetSuffix}:`
+      : `I couldn't find an exact match for "${label}"${budgetSuffix}, but here ${ranked.length === 1 ? "is the closest option" : "are the closest options"} I have:`;
+    await this.conversations.sendMessage(conversationId, businessId, intro);
 
     const recommendations: RecommendedItem[] = [];
     for (const { product, variant } of ranked) {
