@@ -56,6 +56,17 @@ export class UpdateBusinessDto {
   @IsBoolean()
   proactiveSuggestionsEnabled?: boolean;
 
+  // master switch for natural-language product discovery/recommendation in the free-text AI flow — off by default
+  @IsOptional()
+  @IsBoolean()
+  assistedBuyingEnabled?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Type(() => Number)
+  assistedBuyingMaxRecommendations?: number;
+
   // plaintext in transit (HTTPS), encrypted at rest — an empty string clears the stored credential
   @IsOptional()
   @IsString()

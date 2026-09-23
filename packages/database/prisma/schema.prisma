@@ -210,6 +210,9 @@ model Business {
   defaultRepeatPurchaseDays   Int      @default(30) // fallback reorder window used when a customer has only bought a product once (not enough history to average an interval)
   defaultLowEngagementDays    Int      @default(45) // a previously-active customer with no activity for this long is eligible for a LOW_ENGAGEMENT win-back nudge
   highValueLeadScoreThreshold Int      @default(70) // LeadScore.score at/above this marks a customer eligible for HIGH_VALUE_CUSTOMER nudges
+  // natural-language product discovery/recommendation in the free-text AI flow — off by default, same rollout pattern as proactiveSuggestionsEnabled
+  assistedBuyingEnabled Boolean @default(false)
+  assistedBuyingMaxRecommendations Int @default(5)
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?
@@ -340,6 +343,9 @@ model Conversation {
   pendingVariantId String?         // variant chosen while awaiting a quantity reply
   pendingAddress   String?         // shipping address collected mid-checkout, before payment method is chosen
   pendingPaymentMethod String?     // "UPI" | "COD" | "CARD" chosen mid-checkout, before final order confirmation
+  // most recent Assisted Buying recommendation set shown in the free-text AI flow — lets "add the first one"/"the
+  // blue one" resolve against it; shape: { recommendations: [{ productId, variantId, name }] }. Cleared once stale.
+  assistedBuyingContext Json?
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)

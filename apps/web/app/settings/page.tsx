@@ -21,6 +21,8 @@ export default function SettingsPage() {
   const [autonomyMaxOrderValue, setAutonomyMaxOrderValue] = useState("");
   const [defaultLowStockThreshold, setDefaultLowStockThreshold] = useState("");
   const [proactiveSuggestionsEnabled, setProactiveSuggestionsEnabled] = useState(false);
+  const [assistedBuyingEnabled, setAssistedBuyingEnabled] = useState(false);
+  const [assistedBuyingMaxRecommendations, setAssistedBuyingMaxRecommendations] = useState("");
   const [defaultRepeatPurchaseDays, setDefaultRepeatPurchaseDays] = useState("");
   const [rules, setRules] = useState<AutomationRule[]>([]);
   const [rulesError, setRulesError] = useState("");
@@ -47,6 +49,8 @@ export default function SettingsPage() {
       setAutonomyMaxOrderValue(b.autonomyMaxOrderValue ?? "");
       setDefaultLowStockThreshold(String(b.defaultLowStockThreshold ?? 5));
       setProactiveSuggestionsEnabled(b.proactiveSuggestionsEnabled);
+      setAssistedBuyingEnabled(b.assistedBuyingEnabled);
+      setAssistedBuyingMaxRecommendations(String(b.assistedBuyingMaxRecommendations ?? 5));
       setDefaultRepeatPurchaseDays(String(b.defaultRepeatPurchaseDays ?? 30));
       setRazorpayKeyId(b.razorpayKeyId ?? "");
     }).catch(console.error);
@@ -108,6 +112,8 @@ export default function SettingsPage() {
         autonomyMaxOrderValue: autonomyMaxOrderValue.trim() ? Number(autonomyMaxOrderValue) : null,
         defaultLowStockThreshold: defaultLowStockThreshold.trim() ? Number(defaultLowStockThreshold) : undefined,
         proactiveSuggestionsEnabled,
+        assistedBuyingEnabled,
+        assistedBuyingMaxRecommendations: assistedBuyingMaxRecommendations.trim() ? Number(assistedBuyingMaxRecommendations) : undefined,
         defaultRepeatPurchaseDays: defaultRepeatPurchaseDays.trim() ? Number(defaultRepeatPurchaseDays) : undefined,
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
@@ -283,6 +289,23 @@ export default function SettingsPage() {
           <input value={defaultLowStockThreshold} onChange={e => setDefaultLowStockThreshold(e.target.value)} placeholder="e.g. 5" inputMode="numeric" />
         </div>
         <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Applies to any product variant without its own custom threshold (set per-variant on the Products page).</p>
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>Assisted Buying</h2>
+      <p>Lets the AI understand natural shopping requests (&quot;a shirt for a wedding under ₹2,000&quot;) and recommend matching products from your catalogue, instead of only responding to exact product names.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+          <input type="checkbox" checked={assistedBuyingEnabled} onChange={e => setAssistedBuyingEnabled(e.target.checked)} />
+          Enable Assisted Buying
+        </label>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Off by default. Recommendations are grounded only in your published, in-stock catalogue — the AI never invents a product, price, or stock level.</p>
+        <div className="login-field" style={{ marginTop: 10 }}>
+          <label>Max recommendations shown per request</label>
+          <input value={assistedBuyingMaxRecommendations} onChange={e => setAssistedBuyingMaxRecommendations(e.target.value)} placeholder="e.g. 5" inputMode="numeric" />
+        </div>
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </section>

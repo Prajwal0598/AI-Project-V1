@@ -10,6 +10,7 @@ import { toPublicImageUrl } from "../products/image-storage";
 import { CartService } from "../cart/cart.service";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
+import { AssistedBuyingService } from "../assisted-buying/assisted-buying.service";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -85,6 +86,7 @@ export class AiService {
     private readonly cart: CartService,
     private readonly signals: CustomerSignalService,
     private readonly opportunities: OpportunityService,
+    private readonly assistedBuying: AssistedBuyingService,
   ) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey) this.client = new OpenAI({ apiKey });
@@ -112,6 +114,17 @@ export class AiService {
     if (conversation.escalated) {
       await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, action: "REPLY_SKIPPED", result: "skipped", reason: "conversation is escalated to a human" });
       return { message: null, orderCreated: null };
+    }
+
+    // Assisted Buying (opt-in): natural-language product discovery/recommendation, deterministic retrieval —
+    // handled entirely outside the schema-driven turn below when it recognizes a shopping query or a reference
+    // to a just-shown recommendation ("add the first one"); falls through to the normal AI reply otherwise
+    if (conversation.business.assistedBuyingEnabled) {
+      const latestInbound = conversation.messages.find((m) => m.direction === MessageDirection.INBOUND);
+      if (latestInbound) {
+        const handled = await this.assistedBuying.handle(conversationId, businessId, conversation.customerId, latestInbound.content);
+        if (handled) return { message: null, orderCreated: null };
+      }
     }
 
     // exclude never-approved drafts so the model isn't confused by its own unsent past replies

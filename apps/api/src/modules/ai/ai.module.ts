@@ -6,6 +6,7 @@ import { ConversationModule } from "../conversations/conversation.module";
 import { CartModule } from "../cart/cart.module";
 import { CustomerSignalModule } from "../customer-signals/customer-signal.module";
 import { OpportunityModule } from "../opportunities/opportunity.module";
+import { AssistedBuyingModule } from "../assisted-buying/assisted-buying.module";
 
-@Module({ imports: [OrderModule, ConversationModule, CartModule, CustomerSignalModule, OpportunityModule], controllers: [AiController], providers: [AiService], exports: [AiService] })
+@Module({ imports: [OrderModule, ConversationModule, CartModule, CustomerSignalModule, OpportunityModule, AssistedBuyingModule], controllers: [AiController], providers: [AiService], exports: [AiService] })
 export class AiModule {}
