@@ -126,6 +126,8 @@ export interface Business {
   proactiveSuggestionsEnabled: boolean;
   assistedBuyingEnabled: boolean;
   assistedBuyingMaxRecommendations: number;
+  assistedBuyingExcludedCategoryIds: string[];
+  assistedBuyingRankingPreference: "BEST_MATCH" | "VALUE" | "PREMIUM" | "NEWEST";
   defaultRepeatPurchaseDays: number;
   whatsappAccessTokenConfigured: boolean;
   instagramAccessTokenConfigured: boolean;
@@ -493,7 +495,7 @@ export const api = {
   businesses: {
     list: () => request<Business[]>("/businesses"),
     get: (id: string) => request<Business>(`/businesses/${id}`),
-    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; assistedBuyingEnabled?: boolean; assistedBuyingMaxRecommendations?: number; defaultRepeatPurchaseDays?: number; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string; razorpayKeyId?: string; razorpayKeySecret?: string; razorpayWebhookSecret?: string }) =>
+    update: (id: string, data: Partial<Pick<Business, "name" | "industry" | "website" | "timezone" | "whatsappPhoneNumberId" | "instagramPageId" | "supportEmail">> & { autonomyMaxOrderValue?: number | null; defaultLowStockThreshold?: number; proactiveSuggestionsEnabled?: boolean; assistedBuyingEnabled?: boolean; assistedBuyingMaxRecommendations?: number; assistedBuyingExcludedCategoryIds?: string[]; assistedBuyingRankingPreference?: Business["assistedBuyingRankingPreference"]; defaultRepeatPurchaseDays?: number; whatsappAccessToken?: string; instagramAccessToken?: string; postmarkServerToken?: string; razorpayKeyId?: string; razorpayKeySecret?: string; razorpayWebhookSecret?: string }) =>
       request<Business>(`/businesses/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     stats: (id: string) => request<BusinessStats>(`/businesses/${id}/stats`),
     activity: (id: string, limit = 20) => request<ActivityEvent[]>(`/businesses/${id}/activity?limit=${limit}`),

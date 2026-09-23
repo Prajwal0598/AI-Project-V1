@@ -65,19 +65,24 @@ export class AssistedBuyingService {
     const filters = parseSearchQuery(text);
     if (!filters.keywords.length && filters.minPrice == null && filters.maxPrice == null) return false; // doesn't look like a shopping query
 
-    const business = await this.prisma.business.findUnique({ where: { id: businessId }, select: { assistedBuyingMaxRecommendations: true } });
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      select: { assistedBuyingMaxRecommendations: true, assistedBuyingExcludedCategoryIds: true, assistedBuyingRankingPreference: true },
+    });
     const maxRecommendations = business?.assistedBuyingMaxRecommendations ?? 5;
+    const excludedCategoryIds = business?.assistedBuyingExcludedCategoryIds ?? [];
+    const ranking = business?.assistedBuyingRankingPreference ?? "BEST_MATCH";
 
     // exact match first; if nothing fits, progressively relax the constraint most likely to be too strict
     // (budget, then keywords) so the customer gets the closest valid alternatives instead of an empty result
-    let candidates = await this.findCandidates(businessId, filters, 20);
+    let candidates = await this.findCandidates(businessId, filters, 20, excludedCategoryIds);
     let isExactMatch = true;
     if (!candidates.length && filters.keywords.length && (filters.minPrice != null || filters.maxPrice != null)) {
-      candidates = await this.findCandidates(businessId, { keywords: filters.keywords }, 20);
+      candidates = await this.findCandidates(businessId, { keywords: filters.keywords }, 20, excludedCategoryIds);
       isExactMatch = false;
     }
     if (!candidates.length && filters.keywords.length && (filters.minPrice != null || filters.maxPrice != null)) {
-      candidates = await this.findCandidates(businessId, { keywords: [], minPrice: filters.minPrice, maxPrice: filters.maxPrice }, 20);
+      candidates = await this.findCandidates(businessId, { keywords: [], minPrice: filters.minPrice, maxPrice: filters.maxPrice }, 20, excludedCategoryIds);
       isExactMatch = false;
     }
     if (!candidates.length) {
@@ -87,7 +92,7 @@ export class AssistedBuyingService {
 
     // rerank against the ORIGINAL request (not the relaxed retrieval filters) so results stay ordered by
     // closeness to what the customer actually asked for, even when the match itself isn't exact
-    const ranked = this.rerank(candidates, filters).slice(0, maxRecommendations);
+    const ranked = this.rerank(candidates, filters, ranking).slice(0, maxRecommendations);
 
     const label = filters.keywords.join(" ") || "your search";
     const budgetSuffix = filters.maxPrice != null ? ` under ${fmtMoney(filters.maxPrice, ranked[0].variant.currency)}` : "";
@@ -203,13 +208,15 @@ export class AssistedBuyingService {
       await this.conversations.sendButtons(conversationId, businessId, `✅ Added *${product.name}* to your cart.\n🛒 Cart total: ${fmtMoney(subtotal, currency)}`, [
         { id: "nav_viewcart", title: "View Cart" },
         { id: "cart_checkout", title: "Checkout" },
-      ]);      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart", reason: `${product.name} (variant ${variant.id})` });    } catch (error) {
+      ]);
+      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart", reason: `${product.name} (variant ${variant.id})` });
+    } catch (error) {
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not add that to your cart.");
     }
     return true;
   }
 
-  private async findCandidates(businessId: string, filters: { keywords: string[]; minPrice?: number; maxPrice?: number }, limit: number) {
+  private async findCandidates(businessId: string, filters: { keywords: string[]; minPrice?: number; maxPrice?: number }, limit: number, excludedCategoryIds: string[] = []) {
     const priceFilter = filters.minPrice != null || filters.maxPrice != null
       ? { price: { ...(filters.minPrice != null ? { gte: filters.minPrice } : {}), ...(filters.maxPrice != null ? { lte: filters.maxPrice } : {}) } }
       : {};
@@ -218,14 +225,19 @@ export class AssistedBuyingService {
       where: {
         businessId, status: "PUBLISHED",
         variants: { some: { active: true, ...priceFilter } },
-        ...(filters.keywords.length ? {
-          OR: filters.keywords.flatMap((kw) => [
-            { name: { contains: kw, mode: "insensitive" as const } },
-            { description: { contains: kw, mode: "insensitive" as const } },
-            { brand: { contains: kw, mode: "insensitive" as const } },
-            { category: { name: { contains: kw, mode: "insensitive" as const } } },
-          ]),
-        } : {}),
+        // AND (not two OR keys, which would silently collide into a single object property) so the category
+        // exclusion and the keyword match are both enforced together rather than one overwriting the other
+        AND: [
+          ...(excludedCategoryIds.length ? [{ OR: [{ categoryId: null }, { categoryId: { notIn: excludedCategoryIds } }] }] : []),
+          ...(filters.keywords.length ? [{
+            OR: filters.keywords.flatMap((kw) => [
+              { name: { contains: kw, mode: "insensitive" as const } },
+              { description: { contains: kw, mode: "insensitive" as const } },
+              { brand: { contains: kw, mode: "insensitive" as const } },
+              { category: { name: { contains: kw, mode: "insensitive" as const } } },
+            ]),
+          }] : []),
+        ],
       },
       take: limit,
       include: { variants: { where: { active: true, ...priceFilter }, orderBy: { price: "asc" } }, category: true },
@@ -233,7 +245,15 @@ export class AssistedBuyingService {
     return products.filter((p) => p.variants.length > 0);
   }
 
-  private rerank(products: Awaited<ReturnType<AssistedBuyingService["findCandidates"]>>, filters: { keywords: string[]; maxPrice?: number }) {
+  private rerank(
+    products: Awaited<ReturnType<AssistedBuyingService["findCandidates"]>>,
+    filters: { keywords: string[]; maxPrice?: number },
+    ranking: "BEST_MATCH" | "VALUE" | "PREMIUM" | "NEWEST" = "BEST_MATCH",
+  ) {
+    if (ranking === "VALUE") return [...products].sort((a, b) => Number(a.variants[0].price) - Number(b.variants[0].price)).map((product) => ({ product, variant: product.variants[0], score: 0 }));
+    if (ranking === "PREMIUM") return [...products].sort((a, b) => Number(b.variants[0].price) - Number(a.variants[0].price)).map((product) => ({ product, variant: product.variants[0], score: 0 }));
+    if (ranking === "NEWEST") return [...products].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((product) => ({ product, variant: product.variants[0], score: 0 }));
+
     return products
       .map((product) => {
         const variant = product.variants[0]; // cheapest matching variant, already sorted asc by findCandidates

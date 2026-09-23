@@ -176,6 +176,14 @@ enum ShoppingState {
   ORDER_CONFIRMATION
 }
 
+// how Assisted Buying orders candidates within a single recommendation set, merchant-configurable
+enum AssistedBuyingRanking {
+  BEST_MATCH // keyword/budget-proximity relevance (default)
+  VALUE      // cheapest first
+  PREMIUM    // priciest first
+  NEWEST     // most recently added first
+}
+
 // how a conversation ultimately resolved — for CRM/revenue reporting
 enum ConversationOutcome {
   OPEN
@@ -213,6 +221,8 @@ model Business {
   // natural-language product discovery/recommendation in the free-text AI flow — off by default, same rollout pattern as proactiveSuggestionsEnabled
   assistedBuyingEnabled Boolean @default(false)
   assistedBuyingMaxRecommendations Int @default(5)
+  assistedBuyingExcludedCategoryIds String[] @default([]) // categories Assisted Buying should never recommend from
+  assistedBuyingRankingPreference AssistedBuyingRanking @default(BEST_MATCH)
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?

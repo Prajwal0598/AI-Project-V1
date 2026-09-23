@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId } from "../../lib/api";
-import type { AutomationRule, Business, Me, OpportunityType, TeamUser } from "../../lib/api";
+import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser } from "../../lib/api";
 
 export default function SettingsPage() {
   const [biz, setBiz] = useState<Business | null>(null);
@@ -23,6 +23,9 @@ export default function SettingsPage() {
   const [proactiveSuggestionsEnabled, setProactiveSuggestionsEnabled] = useState(false);
   const [assistedBuyingEnabled, setAssistedBuyingEnabled] = useState(false);
   const [assistedBuyingMaxRecommendations, setAssistedBuyingMaxRecommendations] = useState("");
+  const [assistedBuyingRankingPreference, setAssistedBuyingRankingPreference] = useState<Business["assistedBuyingRankingPreference"]>("BEST_MATCH");
+  const [assistedBuyingExcludedCategoryIds, setAssistedBuyingExcludedCategoryIds] = useState<string[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [defaultRepeatPurchaseDays, setDefaultRepeatPurchaseDays] = useState("");
   const [rules, setRules] = useState<AutomationRule[]>([]);
   const [rulesError, setRulesError] = useState("");
@@ -51,10 +54,13 @@ export default function SettingsPage() {
       setProactiveSuggestionsEnabled(b.proactiveSuggestionsEnabled);
       setAssistedBuyingEnabled(b.assistedBuyingEnabled);
       setAssistedBuyingMaxRecommendations(String(b.assistedBuyingMaxRecommendations ?? 5));
+      setAssistedBuyingRankingPreference(b.assistedBuyingRankingPreference ?? "BEST_MATCH");
+      setAssistedBuyingExcludedCategoryIds(b.assistedBuyingExcludedCategoryIds ?? []);
       setDefaultRepeatPurchaseDays(String(b.defaultRepeatPurchaseDays ?? 30));
       setRazorpayKeyId(b.razorpayKeyId ?? "");
     }).catch(console.error);
     api.auth.me().then(setMe).catch(console.error);
+    api.categories.list(bizId).then(setCategories).catch(console.error);
     loadTeam();
     loadRules();
   }, []);
@@ -114,6 +120,8 @@ export default function SettingsPage() {
         proactiveSuggestionsEnabled,
         assistedBuyingEnabled,
         assistedBuyingMaxRecommendations: assistedBuyingMaxRecommendations.trim() ? Number(assistedBuyingMaxRecommendations) : undefined,
+        assistedBuyingRankingPreference,
+        assistedBuyingExcludedCategoryIds,
         defaultRepeatPurchaseDays: defaultRepeatPurchaseDays.trim() ? Number(defaultRepeatPurchaseDays) : undefined,
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
@@ -306,6 +314,30 @@ export default function SettingsPage() {
           <label>Max recommendations shown per request</label>
           <input value={assistedBuyingMaxRecommendations} onChange={e => setAssistedBuyingMaxRecommendations(e.target.value)} placeholder="e.g. 5" inputMode="numeric" />
         </div>
+        <div className="login-field" style={{ marginTop: 10 }}>
+          <label>Ranking preference</label>
+          <select value={assistedBuyingRankingPreference} onChange={e => setAssistedBuyingRankingPreference(e.target.value as Business["assistedBuyingRankingPreference"])}>
+            <option value="BEST_MATCH">Best match (relevance)</option>
+            <option value="VALUE">Value (cheapest first)</option>
+            <option value="PREMIUM">Premium (priciest first)</option>
+            <option value="NEWEST">Newest (most recently added first)</option>
+          </select>
+        </div>
+        {categories.length > 0 && <div style={{ marginTop: 10 }}>
+          <label style={{ fontSize: 13 }}>Exclude categories from recommendations</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6 }}>
+            {categories.map(c => (
+              <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={assistedBuyingExcludedCategoryIds.includes(c.id)}
+                  onChange={e => setAssistedBuyingExcludedCategoryIds(prev => e.target.checked ? [...prev, c.id] : prev.filter(id => id !== c.id))}
+                />
+                {c.name}
+              </label>
+            ))}
+          </div>
+        </div>}
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </section>

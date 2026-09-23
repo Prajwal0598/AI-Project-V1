@@ -78,6 +78,51 @@ describe("AssistedBuyingService", () => {
     });
   });
 
+  describe("handle — merchant controls", () => {
+    it("excludes categories the merchant configured, passing them through to the catalogue query", async () => {
+      prisma.business.findUnique.mockResolvedValue({ assistedBuyingMaxRecommendations: 5, assistedBuyingExcludedCategoryIds: ["cat-clearance"], assistedBuyingRankingPreference: "BEST_MATCH" });
+      prisma.product.findMany.mockResolvedValue([shirt]);
+
+      await service.handle("conv1", "biz1", "cust1", "shirt for a wedding under 2000");
+
+      expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ AND: expect.arrayContaining([{ OR: [{ categoryId: null }, { categoryId: { notIn: ["cat-clearance"] } }] }]) }),
+      }));
+    });
+
+    it("ranks by cheapest first when the ranking preference is VALUE", async () => {
+      const cheap = { ...shirt, id: "p3", name: "Basic Tee", variants: [{ id: "v9", price: 499, currency: "INR", inventory: 5 }] };
+      prisma.business.findUnique.mockResolvedValue({ assistedBuyingMaxRecommendations: 5, assistedBuyingExcludedCategoryIds: [], assistedBuyingRankingPreference: "VALUE" });
+      prisma.product.findMany.mockResolvedValue([shirt, cheap]);
+
+      await service.handle("conv1", "biz1", "cust1", "shirt under 5000");
+
+      // cheapest (Basic Tee, 499) should be sent first regardless of keyword relevance
+      expect(conversations.sendButtons.mock.calls[0][2]).toContain("Basic Tee");
+    });
+
+    it("ranks by priciest first when the ranking preference is PREMIUM", async () => {
+      const cheap = { ...shirt, id: "p3", name: "Basic Tee", variants: [{ id: "v9", price: 499, currency: "INR", inventory: 5 }] };
+      prisma.business.findUnique.mockResolvedValue({ assistedBuyingMaxRecommendations: 5, assistedBuyingExcludedCategoryIds: [], assistedBuyingRankingPreference: "PREMIUM" });
+      prisma.product.findMany.mockResolvedValue([cheap, shirt]);
+
+      await service.handle("conv1", "biz1", "cust1", "shirt under 5000");
+
+      expect(conversations.sendButtons.mock.calls[0][2]).toContain("Navy Linen Shirt"); // pricier (1799) shown first
+    });
+
+    it("ranks by most recently added first when the ranking preference is NEWEST", async () => {
+      const older = { ...shirt, id: "p3", name: "Old Stock Shirt", createdAt: new Date("2025-01-01") };
+      const newer = { ...shirt, id: "p4", name: "New Arrival Shirt", createdAt: new Date("2026-01-01") };
+      prisma.business.findUnique.mockResolvedValue({ assistedBuyingMaxRecommendations: 5, assistedBuyingExcludedCategoryIds: [], assistedBuyingRankingPreference: "NEWEST" });
+      prisma.product.findMany.mockResolvedValue([older, newer]);
+
+      await service.handle("conv1", "biz1", "cust1", "shirt under 5000");
+
+      expect(conversations.sendButtons.mock.calls[0][2]).toContain("New Arrival Shirt");
+    });
+  });
+
   describe("handle — comparison", () => {
     const jeans = { id: "p2", name: "Slim Jeans", description: "Stretch denim", variants: [{ price: 1299, currency: "INR", inventory: 4 }] };
 

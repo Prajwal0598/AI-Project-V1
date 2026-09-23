@@ -128,6 +128,8 @@ export class BusinessService {
         ...(input.proactiveSuggestionsEnabled !== undefined && { proactiveSuggestionsEnabled: input.proactiveSuggestionsEnabled }),
         ...(input.assistedBuyingEnabled !== undefined && { assistedBuyingEnabled: input.assistedBuyingEnabled }),
         ...(input.assistedBuyingMaxRecommendations !== undefined && { assistedBuyingMaxRecommendations: input.assistedBuyingMaxRecommendations }),
+        ...(input.assistedBuyingExcludedCategoryIds !== undefined && { assistedBuyingExcludedCategoryIds: input.assistedBuyingExcludedCategoryIds }),
+        ...(input.assistedBuyingRankingPreference !== undefined && { assistedBuyingRankingPreference: input.assistedBuyingRankingPreference }),
         ...(input.whatsappAccessToken !== undefined && { whatsappAccessTokenEncrypted: input.whatsappAccessToken.trim() ? encryptSecret(input.whatsappAccessToken.trim()) : null }),
         ...(input.instagramAccessToken !== undefined && { instagramAccessTokenEncrypted: input.instagramAccessToken.trim() ? encryptSecret(input.instagramAccessToken.trim()) : null }),
         ...(input.postmarkServerToken !== undefined && { postmarkServerTokenEncrypted: input.postmarkServerToken.trim() ? encryptSecret(input.postmarkServerToken.trim()) : null }),

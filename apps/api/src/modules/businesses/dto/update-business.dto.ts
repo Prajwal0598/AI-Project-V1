@@ -1,5 +1,6 @@
-import { IsBoolean, IsNumber, IsOptional, IsString, Min } from "class-validator";
+import { IsArray, IsBoolean, IsEnum, IsNumber, IsOptional, IsString, Min } from "class-validator";
 import { Type } from "class-transformer";
+import { AssistedBuyingRanking } from "@prisma/client";
 
 export class UpdateBusinessDto {
   @IsOptional()
@@ -66,6 +67,16 @@ export class UpdateBusinessDto {
   @Min(1)
   @Type(() => Number)
   assistedBuyingMaxRecommendations?: number;
+
+  // category IDs Assisted Buying should never recommend from
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  assistedBuyingExcludedCategoryIds?: string[];
+
+  @IsOptional()
+  @IsEnum(AssistedBuyingRanking)
+  assistedBuyingRankingPreference?: AssistedBuyingRanking;
 
   // plaintext in transit (HTTPS), encrypted at rest — an empty string clears the stored credential
   @IsOptional()
