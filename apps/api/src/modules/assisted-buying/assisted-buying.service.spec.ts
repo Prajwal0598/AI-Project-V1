@@ -20,6 +20,7 @@ describe("AssistedBuyingService", () => {
       conversation: { findFirst: jest.fn().mockResolvedValue({ assistedBuyingContext: null }), update: jest.fn() },
       business: { findUnique: jest.fn().mockResolvedValue({ assistedBuyingMaxRecommendations: 5 }) },
       product: { findMany: jest.fn(), findFirst: jest.fn() },
+      category: { findMany: jest.fn().mockResolvedValue([]) },
       aiActionLog: { create: jest.fn() },
     };
     conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
@@ -75,6 +76,59 @@ describe("AssistedBuyingService", () => {
         data: { assistedBuyingContext: { recommendations: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }], query: "shirt for a wedding under 2000" } },
       });
       expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_RECOMMENDATIONS_SHOWN", result: "shown" }) }));
+    });
+  });
+
+  describe("handle — category-aware matching (the 'black bag' bug)", () => {
+    it("treats a keyword matching a category name as a hard category filter, not just another OR'd keyword", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }]);
+      prisma.product.findMany.mockResolvedValue([]);
+
+      await service.handle("conv1", "biz1", "cust1", "do you have a black bag");
+
+      const where = prisma.product.findMany.mock.calls[0][0].where;
+      expect(where.categoryId).toBe("cat-bags"); // "bag" -> "Bags" category, applied as a hard filter
+      // the remaining keyword ("black") is still required via AND, but "bag" itself is no longer a free-text OR clause
+      expect(where.AND).toEqual(expect.arrayContaining([
+        { OR: [
+          { name: { contains: "black", mode: "insensitive" } },
+          { description: { contains: "black", mode: "insensitive" } },
+          { brand: { contains: "black", mode: "insensitive" } },
+        ] },
+      ]));
+    });
+
+    it("never returns a product from a different category just because it shares an unrelated keyword", async () => {
+      // simulates the exact bug: without a hard category filter, "black" alone would match a shirt too
+      const bag = { id: "p10", name: "Black Crossbody Bag", description: null, brand: null, imageUrl: null, category: { name: "Bags" }, variants: [{ id: "v10", price: 999, currency: "INR", inventory: 4 }] };
+      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }, { id: "cat-shirts", name: "Shirts" }]);
+      prisma.product.findMany.mockResolvedValue([bag]); // the mocked DB query itself now only returns bags, because categoryId is a hard filter
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "do you have a black bag");
+
+      expect(handled).toBe(true);
+      expect(prisma.product.findMany.mock.calls[0][0].where.categoryId).toBe("cat-bags");
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Black Crossbody Bag"), expect.any(Array), undefined);
+    });
+
+    it("normalizes singular/plural so 'bag' matches a 'Bags' category and 'shirts' matches a 'Shirt' category", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat-shirt", name: "Shirt" }]);
+      prisma.product.findMany.mockResolvedValue([]);
+
+      await service.handle("conv1", "biz1", "cust1", "show me some shirts under 2000");
+
+      expect(prisma.product.findMany.mock.calls[0][0].where.categoryId).toBe("cat-shirt");
+    });
+
+    it("falls back to plain AND-across-keywords matching when no keyword names a known category", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }]);
+      prisma.product.findMany.mockResolvedValue([]);
+
+      await service.handle("conv1", "biz1", "cust1", "red comfortable");
+
+      const where = prisma.product.findMany.mock.calls[0][0].where;
+      expect(where.categoryId).toBeUndefined();
+      expect(where.AND).toHaveLength(2); // one AND clause per keyword ("red", "comfortable"), each still OR'd across fields
     });
   });
 
