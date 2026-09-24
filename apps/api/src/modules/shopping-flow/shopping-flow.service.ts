@@ -10,10 +10,18 @@ const MAX_LIST_ROWS = 10;
 
 // stopwords stripped before matching search keywords against product name/description/category — includes
 // vague filler words ("something", "anything", "nice", "good") so e.g. "show me something under 1500" is
-// treated as a budget-only query instead of literally searching the catalogue for the word "something", and
+// treated as a budget-only query instead of literally searching the catalogue for the word "something";
 // generic catalogue nouns/question words ("what", "which", "products", "items") so e.g. "What fashion products
-// do you have?" extracts just the real constraint ("fashion") instead of also requiring a literal "what"/"products" match
-const SEARCH_STOPWORDS = new Set(["show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some", "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good", "what", "which", "products", "product", "items", "item"]);
+// do you have?" extracts just the real constraint ("fashion"); and pure grammar words (prepositions, modal
+// verbs, relative pronouns, conjunctions) that occasion-style questions are full of ("I'm going ON vacation,
+// WHAT WOULD you recommend?", "classy BUT NOT TOO expensive", "someone WHO loves coffee") but that are never
+// themselves a searchable product attribute
+const SEARCH_STOPWORDS = new Set([
+  "show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some",
+  "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good",
+  "what", "which", "products", "product", "items", "item",
+  "on", "in", "would", "who", "someone", "but", "not", "too", "going", "recommend", "attending", "suitable", "loves",
+]);
 
 // messages asking what the store carries at all, rather than searching for something specific — must be
 // checked before running a keyword search, otherwise e.g. "What do you sell?" gets searched literally and
@@ -181,6 +189,31 @@ export class ShoppingFlowService {
     let matches = products.filter((p) => p.variants[0]);
     if (filters.maxPrice !== undefined) matches = matches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
     if (filters.minPrice !== undefined) matches = matches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
+
+    // nothing satisfied every keyword — common for occasion/vibe questions ("something for a wedding") where
+    // no single product literally contains every word. Relax to whichever products match AT LEAST ONE keyword,
+    // ranked by how many they match, instead of a dead "no products matched" end — but only when there were
+    // multiple keywords to begin with, so a genuine single-attribute miss (e.g. a color nobody stocks) still
+    // correctly reports no match rather than surfacing unrelated products
+    let isExactMatch = true;
+    if (!matches.length && filters.keywords.length > 1) {
+      const relaxed = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", OR: keywordAndClauses(filters.keywords).flatMap((clause) => clause.OR) },
+        include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 }, category: true },
+        take: 30,
+      });
+      let relaxedMatches = relaxed.filter((p) => p.variants[0]);
+      if (filters.maxPrice !== undefined) relaxedMatches = relaxedMatches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
+      if (filters.minPrice !== undefined) relaxedMatches = relaxedMatches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
+      if (relaxedMatches.length) {
+        const keywordHits = (p: (typeof relaxedMatches)[number]) => {
+          const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
+          return filters.keywords.filter((kw) => haystack.includes(kw)).length;
+        };
+        matches = relaxedMatches.sort((a, b) => keywordHits(b) - keywordHits(a));
+        isExactMatch = false;
+      }
+    }
     matches = matches.slice(0, MAX_LIST_ROWS);
 
     if (!matches.length) {
@@ -190,7 +223,10 @@ export class ShoppingFlowService {
       return;
     }
 
-    await this.conversations.sendList(conversationId, businessId, `🔍 Found ${matches.length} matching product${matches.length === 1 ? "" : "s"}:`, "View", [
+    const header = isExactMatch
+      ? `🔍 Found ${matches.length} matching product${matches.length === 1 ? "" : "s"}:`
+      : `🔍 Nothing matched exactly, but here ${matches.length === 1 ? "is an option" : "are some options"} that might work:`;
+    await this.conversations.sendList(conversationId, businessId, header, "View", [
       { rows: matches.map((p) => {
         const v = p.variants[0];
         return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` };

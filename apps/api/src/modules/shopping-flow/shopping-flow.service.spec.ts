@@ -55,6 +55,13 @@ describe("parseSearchQuery", () => {
     expect(parseSearchQuery("show me something nice")).toEqual({ maxPrice: undefined, minPrice: undefined, keywords: [] });
   });
 
+  it("strips pure grammar words (prepositions, modal verbs, relative pronouns, conjunctions) from occasion-style questions", () => {
+    expect(parseSearchQuery("I'm going on vacation. What would you recommend?").keywords).toEqual(["vacation"]);
+    expect(parseSearchQuery("I want something classy but not too expensive.").keywords).toEqual(["classy", "expensive"]);
+    expect(parseSearchQuery("I need a gift for someone who loves coffee.").keywords).toEqual(["gift", "coffee"]);
+    expect(parseSearchQuery("I'm attending a wedding. Show me something suitable.").keywords).toEqual(["wedding"]);
+  });
+
   it("is case-insensitive", () => {
     expect(parseSearchQuery("RED SHOES UNDER 3000").maxPrice).toBe(3000);
   });
@@ -429,6 +436,69 @@ describe("ShoppingFlowService — state machine", () => {
       expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", [
         { rows: [{ id: "prod_p2", title: "Canvas Tote Bag", description: expect.stringContaining("899") }] },
       ]);
+    });
+  });
+
+  describe("Test 2 — occasion/vibe-based queries relax to a ranked partial match instead of a dead end", () => {
+    const hoodie = { id: "p3", name: "Weekend Casual Hoodie", description: "Relaxed fit for lazy weekends", brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v3", price: 1299, currency: "INR", inventory: 4 }] };
+    const yogaPants = { id: "p4", name: "Comfortable Yoga Pants", description: null, brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v4", price: 999, currency: "INR", inventory: 10 }] };
+    const coffeeMug = { id: "p5", name: "Coffee Lover's Mug", description: null, brand: null, imageUrl: null, category: { name: "Gifts" }, variants: [{ id: "v5", price: 349, currency: "INR", inventory: 20 }] };
+    const giftWrap = { id: "p6", name: "Premium Gift Wrap Kit", description: null, brand: null, imageUrl: null, category: { name: "Gifts" }, variants: [{ id: "v6", price: 199, currency: "INR", inventory: 15 }] };
+
+    it("'I need something comfortable for a casual weekend' ranks partial matches by how many keywords they satisfy", async () => {
+      prisma.product.findMany
+        .mockResolvedValueOnce([]) // exact AND across "comfortable"+"casual"+"weekend" — nothing matches all three
+        .mockResolvedValueOnce([yogaPants, hoodie]); // relaxed OR query, deliberately returned worst-match-first
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "I need something comfortable for a casual weekend");
+
+      expect(handled).toBe(true);
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(2);
+      const relaxedWhere = prisma.product.findMany.mock.calls[1][0].where;
+      expect(relaxedWhere.OR).toBeDefined();
+      expect(relaxedWhere.AND).toBeUndefined();
+      // the hoodie matches 2 of 3 keywords ("casual", "weekend") vs. the yoga pants' 1 ("comfortable") — reranked to come first
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Nothing matched exactly"), "View", [
+        { rows: [
+          { id: "prod_p3", title: "Weekend Casual Hoodie", description: expect.stringContaining("1,299") },
+          { id: "prod_p4", title: "Comfortable Yoga Pants", description: expect.stringContaining("999") },
+        ] },
+      ]);
+    });
+
+    it("'I need a gift for someone who loves coffee' surfaces loosely-related options instead of nothing", async () => {
+      prisma.product.findMany
+        .mockResolvedValueOnce([]) // exact AND across "gift"+"coffee" — nothing is literally both
+        .mockResolvedValueOnce([coffeeMug, giftWrap]);
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "I need a gift for someone who loves coffee.");
+
+      expect(handled).toBe(true);
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Nothing matched exactly"), "View", expect.any(Array));
+      // both single-keyword matches still surfaced, not silently dropped
+      const rows = conversations.sendList.mock.calls.at(-1)![4][0].rows;
+      expect(rows.map((r: { title: string }) => r.title)).toEqual(expect.arrayContaining(["Coffee Lover's Mug", "Premium Gift Wrap Kit"]));
+    });
+
+    it("does NOT relax a single-keyword miss (e.g. an unstocked colour) — still correctly reports no match", async () => {
+      prisma.product.findMany.mockResolvedValueOnce([]); // exact match on the single keyword "maroon" finds nothing
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "Do you have anything in maroon?");
+
+      expect(handled).toBe(true);
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(1); // no second (relaxed) query attempted
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", "😕 No products matched that search.", expect.any(Array));
+    });
+
+    it("'I need something nice for a party' still matches directly (single real keyword, no relaxation needed)", async () => {
+      const dress = { id: "p7", name: "Black Party Dress", description: null, brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v7", price: 2499, currency: "INR", inventory: 3 }] };
+      prisma.product.findMany.mockResolvedValueOnce([dress]);
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "I need something nice for a party");
+
+      expect(handled).toBe(true);
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(1);
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", expect.any(Array));
     });
   });
 });
