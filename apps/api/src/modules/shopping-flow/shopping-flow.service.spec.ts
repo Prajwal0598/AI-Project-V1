@@ -574,4 +574,61 @@ describe("ShoppingFlowService — state machine", () => {
       expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Added *1 × Casual Blue Denim Shirt*"), expect.any(Array));
     });
   });
+
+  describe("Test 5 — product details, follow-ups, and recommendation-pick", () => {
+    const tshirtFull = {
+      id: "p1", name: "Premium Cotton T-Shirt", description: "Soft breathable cotton tee", imageUrl: "/uploads/products/tshirt.jpg", categoryId: "cat-fashion",
+      variants: [
+        { id: "v1", price: 899, currency: "INR", inventory: 10, attributes: { color: "White" } },
+        { id: "v2", price: 899, currency: "INR", inventory: 5, attributes: { color: "Black" } },
+      ],
+    };
+
+    it("'Tell me more about the Premium Cotton T-Shirt' -> 'How much is it?' -> 'Is it available?' -> 'What colours do you have?' -> 'Is there anything similar but cheaper?' -> 'Which one would you recommend?'", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "Tell me more about the Premium Cotton T-Shirt" -> resolved BY NAME, shows the product directly
+      // (never run as a literal keyword search for "tell"/"more"/"about")
+      prisma.product.findMany.mockResolvedValueOnce([{ id: "p1", name: "Premium Cotton T-Shirt", description: "Soft breathable cotton tee", brand: null, category: { name: "Fashion" } }]);
+      prisma.product.findFirst.mockResolvedValue(tshirtFull); // reused for every "the product I'm looking at" lookup below
+      await flow.handleFreeText("conv1", "biz1", conversation, "Tell me more about the Premium Cotton T-Shirt");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toEqual([{ OR: expect.arrayContaining([{ name: { contains: "premium", mode: "insensitive" } }]) }, { OR: expect.arrayContaining([{ name: { contains: "cotton", mode: "insensitive" } }]) }, { OR: expect.arrayContaining([{ name: { contains: "shirt", mode: "insensitive" } }]) }]);
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", "Choose an option:", "Select", expect.any(Array)); // 2 variants -> variant picker
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "VIEWING_PRODUCT", activeProductId: "p1" } });
+      conversation = { ...conversation, activeProductId: "p1" };
+
+      // 2. "How much is it?" -> answers directly from the active product, no search at all
+      const findManyCallsBefore = prisma.product.findMany.mock.calls.length;
+      await flow.handleFreeText("conv1", "biz1", conversation, "How much is it?");
+      expect(prisma.product.findMany.mock.calls.length).toBe(findManyCallsBefore); // no new search query
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Premium Cotton T-Shirt* is INR 899"));
+
+      // 3. "Is it available?" -> same anchor, answers stock status
+      await flow.handleFreeText("conv1", "biz1", conversation, "Is it available?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("currently in stock"));
+
+      // 4. "What colours do you have?" -> lists variant attribute options instead of searching the catalogue for the literal word "colours"
+      await flow.handleFreeText("conv1", "biz1", conversation, "What colours do you have?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("White, Black"));
+
+      // 5. "Is there anything similar but cheaper?" -> same category, priced below the active product, excluding itself
+      const cheaperAlt = { id: "p2", name: "Classic Cotton Tee", variants: [{ id: "v3", price: 599, currency: "INR" }] };
+      prisma.product.findMany.mockResolvedValueOnce([cheaperAlt]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Is there anything similar but cheaper?");
+      const alternativesWhere = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      expect(alternativesWhere).toEqual(expect.objectContaining({ categoryId: "cat-fashion", id: { not: "p1" } }));
+      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("similar option"), "View", [
+        { rows: [{ id: "prod_p2", title: "Classic Cotton Tee", description: expect.stringContaining("599") }] },
+      ]);
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 6. "Which one would you recommend?" -> picks from the just-shown alternatives, not a fresh search for "one"
+      prisma.product.findFirst.mockResolvedValueOnce({ id: "p2", name: "Classic Cotton Tee", description: null, imageUrl: "/uploads/products/tee.jpg", variants: [{ id: "v3", price: 599, currency: "INR", inventory: 8 }] });
+      const findManyCallsBeforeRecommend = prisma.product.findMany.mock.calls.length;
+      await flow.handleFreeText("conv1", "biz1", conversation, "Which one would you recommend?");
+      expect(prisma.product.findMany.mock.calls.length).toBe(findManyCallsBeforeRecommend); // no new search query
+      expect(conversations.sendImage).toHaveBeenLastCalledWith("conv1", "biz1", expect.any(String), expect.stringContaining("Classic Cotton Tee"));
+    });
+  });
 });

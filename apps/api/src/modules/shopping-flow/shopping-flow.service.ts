@@ -35,6 +35,25 @@ const SEARCH_STOPWORDS = new Set([
 // returns "No products matched that search."
 export const STORE_DISCOVERY_RE = /\b(what do you (sell|offer|have|stock)|what (products?|items?|categories?) do you (have|sell|offer|stock)|what (products?|items?|categories?) (are (available|there)|do you have)|show me (your|the) (products?|catalogue|catalog|store|items?)|what can i (buy|get|purchase)|what do you (guys )?have)\b/i;
 
+// "Tell me more about X" / "More details on X" — asks about ONE specific product by name, not a general
+// search; the captured group is the product name/reference text to resolve against the catalogue
+const PRODUCT_DETAILS_RE = /\b(?:tell me (?:more )?about|more (?:details|info(?:rmation)?) (?:on|about)|details (?:on|about))\s+(.+)/i;
+
+// pronoun follow-ups ("How much IS IT?", "IS IT available?", "what colours do you have?") that only make sense
+// anchored to whichever product the customer is already looking at (Conversation.activeProductId)
+const PRICE_FOLLOWUP_RE = /\b(how much (is|does it cost|for it)|what('?s| is) the price|price\??)\b/i;
+const AVAILABILITY_FOLLOWUP_RE = /\b(is it available|in stock|do you have (it|this) in stock|is (it|this) in stock)\b/i;
+const OPTIONS_FOLLOWUP_RE = /\b(what colou?rs?|which colou?rs?|colou?r options|what sizes|which sizes|size options|what options|available options)\b/i;
+
+// "Is there anything similar but cheaper?" — a recommendation relative to whichever product is currently in view
+const SIMILAR_RE = /\bsimilar\b/i;
+const CHEAPER_RE = /\b(cheaper|less expensive|lower price|budget|affordable)\b/i;
+
+// "Which one would you recommend?" — asks for a pick among whatever was just shown, not a fresh search;
+// deliberately requires "which one/option" (not just "what would you recommend", which is an open-ended
+// occasion-style request that should still run as a normal search — see Test 2's "going on vacation" case)
+const RECOMMEND_PICK_RE = /\bwhich (one|option) (would you|do you|should i) (recommend|choose|pick|go with)\b/i;
+
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
 // accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
@@ -163,7 +182,7 @@ export class ShoppingFlowService {
   }
 
   /** Called for plain-text replies; returns true if this state consumed the text (caller should not also run the AI). */
-  async handleFreeText(conversationId: string, businessId: string, conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown }, text: string): Promise<boolean> {
+  async handleFreeText(conversationId: string, businessId: string, conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown }, text: string): Promise<boolean> {
     if (conversation.shoppingState === "AWAITING_QUANTITY") {
       await this.receiveQuantity(conversationId, businessId, conversation, text);
       return true;
@@ -182,7 +201,7 @@ export class ShoppingFlowService {
     // in natural language once they have items in their cart — the AI flow merges those cart items back in
     if (["MAIN_MENU", "BROWSING_CATEGORIES", "BROWSING_PRODUCTS", "VIEWING_PRODUCT"].includes(conversation.shoppingState)) {
       const context = conversation.assistedBuyingContext as unknown as ShoppingSearchContext | null;
-      await this.search(conversationId, businessId, conversation.customerId, text, context);
+      await this.search(conversationId, businessId, conversation.customerId, text, context, conversation.activeProductId ?? null);
       return true;
     }
     return false;
@@ -198,11 +217,117 @@ export class ShoppingFlowService {
     return null;
   }
 
-  private async search(conversationId: string, businessId: string, customerId: string, text: string, existingContext: ShoppingSearchContext | null) {
+  /** "Tell me more about the Premium Cotton T-Shirt" — resolves the referenced product BY NAME and shows its
+   * detail view directly, instead of running it as a generic catalogue search (which would treat "tell"/"more"/
+   * "about" as literal, meaningless search keywords). Returns false (falls through to a normal search) if the
+   * phrasing doesn't match, or if nothing in the catalogue matches the referenced name at all. */
+  private async tryProductDetailsByName(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
+    const match = text.match(PRODUCT_DETAILS_RE);
+    if (!match) return false;
+    const { keywords } = parseSearchQuery(match[1].replace(/[?!.]+$/, ""));
+    if (!keywords.length) return false;
+
+    const candidates = await this.prisma.product.findMany({
+      where: { businessId, status: "PUBLISHED", AND: keywordAndClauses(keywords) },
+      include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 }, category: true },
+      take: 5,
+    });
+    if (!candidates.length) return false;
+
+    const keywordHits = (p: (typeof candidates)[number]) => {
+      const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
+      return keywords.filter((kw) => haystack.includes(kw)).length;
+    };
+    const best = candidates.length === 1 ? candidates[0] : [...candidates].sort((a, b) => keywordHits(b) - keywordHits(a))[0];
+    await this.showProductDetail(conversationId, businessId, best.id, customerId);
+    return true;
+  }
+
+  /** Pronoun follow-ups ("How much IS IT?", "IS IT available?", "what colours do you have?") that only make
+   * sense anchored to whichever product the customer is already looking at. */
+  private async tryProductFollowUp(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
+    if (!activeProductId) return false;
+    const lower = text.toLowerCase();
+    if (!PRICE_FOLLOWUP_RE.test(lower) && !AVAILABILITY_FOLLOWUP_RE.test(lower) && !OPTIONS_FOLLOWUP_RE.test(lower)) return false;
+
+    const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId, status: "PUBLISHED" }, include: { variants: { where: { active: true } } } });
+    if (!product?.variants.length) return false;
+
+    if (PRICE_FOLLOWUP_RE.test(lower)) {
+      const prices = product.variants.map((v) => Number(v.price));
+      const currency = product.variants[0].currency;
+      const priceText = Math.min(...prices) === Math.max(...prices)
+        ? fmtMoney(prices[0], currency)
+        : `${fmtMoney(Math.min(...prices), currency)} – ${fmtMoney(Math.max(...prices), currency)}`;
+      await this.conversations.sendMessage(conversationId, businessId, `*${product.name}* is ${priceText}.`);
+      return true;
+    }
+    if (AVAILABILITY_FOLLOWUP_RE.test(lower)) {
+      const inStock = product.variants.some((v) => v.inventory === null || v.inventory > 0);
+      await this.conversations.sendMessage(conversationId, businessId, inStock ? `Yes, *${product.name}* is currently in stock! 🎉` : `😔 Sorry, *${product.name}* is currently out of stock.`);
+      return true;
+    }
+    // OPTIONS_FOLLOWUP_RE
+    const options = Array.from(new Set(product.variants.map((v) => formatVariantLabel(v.attributes)).filter((label): label is string => !!label)));
+    await this.conversations.sendMessage(conversationId, businessId, options.length
+      ? `*${product.name}* is available in: ${options.join(", ")}.`
+      : `*${product.name}* comes in one standard option — no size/colour variants.`);
+    return true;
+  }
+
+  /** "Is there anything similar but cheaper?" — finds other PUBLISHED products in the same category as the
+   * active product, priced below it, ordered closest-to-original-price first. */
+  private async trySimilarButCheaper(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
+    if (!activeProductId || !SIMILAR_RE.test(text) || !CHEAPER_RE.test(text)) return false;
+
+    const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId }, include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } } });
+    if (!product?.variants.length || !product.categoryId) return false;
+    const ownPrice = Number(product.variants[0].price);
+
+    const alternatives = await this.prisma.product.findMany({
+      where: { businessId, status: "PUBLISHED", categoryId: product.categoryId, id: { not: product.id }, variants: { some: { active: true, price: { lt: ownPrice } } } },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } },
+      take: MAX_LIST_ROWS,
+    });
+    const matches = alternatives.filter((p) => p.variants[0]).sort((a, b) => Number(b.variants[0].price) - Number(a.variants[0].price));
+
+    if (!matches.length) {
+      await this.conversations.sendMessage(conversationId, businessId, `😕 I don't have anything cheaper than *${product.name}* in the same category right now.`);
+      return true;
+    }
+    await this.conversations.sendList(conversationId, businessId, `Here ${matches.length === 1 ? "is a similar option" : "are some similar options"} that cost less:`, "View", [
+      { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: fmtMoney(p.variants[0].price, p.variants[0].currency) })) },
+    ]);
+    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
+  /** "Which one would you recommend?" — picks from whatever was just shown (e.g. the similar-but-cheaper list)
+   * rather than running a fresh, meaningless search for the literal word "one". */
+  private async tryRecommendationPick(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null, activeProductId: string | null): Promise<boolean> {
+    if (!RECOMMEND_PICK_RE.test(text.toLowerCase())) return false;
+    if (context?.lastResults?.length) {
+      await this.showProductDetail(conversationId, businessId, context.lastResults[0].productId, customerId);
+      return true;
+    }
+    if (activeProductId) {
+      await this.conversations.sendMessage(conversationId, businessId, "I'd go with the one you're already looking at — it's a great choice! 👍");
+      return true;
+    }
+    return false;
+  }
+
+  private async search(conversationId: string, businessId: string, customerId: string, text: string, existingContext: ShoppingSearchContext | null, activeProductId: string | null = null) {
     // an ordinal reference to a just-shown result ("show me the first one") takes priority over a fresh search —
     // otherwise "first"/"one" get treated as nonsensical literal search keywords and find nothing
     const referenced = this.resolveOrdinalReference(text, existingContext);
     if (referenced) return this.showProductDetail(conversationId, businessId, referenced.productId, customerId);
+
+    if (await this.tryRecommendationPick(conversationId, businessId, customerId, text, existingContext, activeProductId)) return;
+    if (await this.tryProductDetailsByName(conversationId, businessId, customerId, text)) return;
+    if (await this.tryProductFollowUp(conversationId, businessId, text, activeProductId)) return;
+    if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId)) return;
 
     // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
     // the catalogue for the literal words in the question just returns "No products matched that search."
