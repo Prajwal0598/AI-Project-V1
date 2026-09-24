@@ -49,6 +49,12 @@ describe("parseSearchQuery", () => {
     expect(parseSearchQuery("show me")).toEqual({ maxPrice: undefined, minPrice: undefined, keywords: [] });
   });
 
+  it("strips vague filler words ('something', 'anything', 'nice', 'good') so a budget-only ask isn't searched literally", () => {
+    expect(parseSearchQuery("show me something under 1500")).toEqual({ maxPrice: 1500, minPrice: undefined, keywords: [] });
+    expect(parseSearchQuery("anything good under 2000")).toEqual({ maxPrice: 2000, minPrice: undefined, keywords: [] });
+    expect(parseSearchQuery("show me something nice")).toEqual({ maxPrice: undefined, minPrice: undefined, keywords: [] });
+  });
+
   it("is case-insensitive", () => {
     expect(parseSearchQuery("RED SHOES UNDER 3000").maxPrice).toBe(3000);
   });
@@ -301,19 +307,57 @@ describe("ShoppingFlowService — state machine", () => {
       expect(handled).toBe(false);
     });
 
-    it("'do you have a black bag' never matches a black shirt (regression) — 'bag' is a hard category filter, not an OR'd keyword", async () => {
-      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }, { id: "cat-shirts", name: "Shirts" }]);
-      prisma.product.findMany.mockResolvedValue([]); // the mocked DB call itself only ever returns bags once categoryId is a hard filter
+    it("'do you have a black bag' never matches a black shirt (regression) — AND across keywords requires 'bag' to independently match too", async () => {
+      prisma.product.findMany.mockResolvedValue([]); // the mocked DB call stands in for the real AND filter correctly excluding the shirt
 
       await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "do you have a black bag");
 
       const where = prisma.product.findMany.mock.calls[0][0].where;
-      expect(where.categoryId).toBe("cat-bags");
-      expect(where.AND).toEqual([{ OR: [
-        { name: { contains: "black", mode: "insensitive" } },
-        { description: { contains: "black", mode: "insensitive" } },
-        { brand: { contains: "black", mode: "insensitive" } },
-      ] }]);
+      expect(where.AND).toEqual([
+        { OR: [
+          { name: { contains: "black", mode: "insensitive" } },
+          { description: { contains: "black", mode: "insensitive" } },
+          { brand: { contains: "black", mode: "insensitive" } },
+          { category: { name: { contains: "black", mode: "insensitive" } } },
+        ] },
+        { OR: [
+          { name: { contains: "bag", mode: "insensitive" } },
+          { description: { contains: "bag", mode: "insensitive" } },
+          { brand: { contains: "bag", mode: "insensitive" } },
+          { category: { name: { contains: "bag", mode: "insensitive" } } },
+        ] },
+      ]);
     });
+
+    it("'do you have any black shirts' still matches a product literally named 'Black Premium Shirt' regardless of which category it's actually filed under (regression — a hard category filter previously caused false negatives for mis-categorized products)", async () => {
+      prisma.product.findMany.mockResolvedValue([{ id: "p1", name: "Black Premium Shirt", description: null, variants: [{ price: 1999, currency: "INR", inventory: 5 }] }]);
+
+      await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "do you have any black shirts");
+
+      // "shirts" (plural) still has to match via its singular-normalized variant against a name literally containing "Shirt"
+      const where = prisma.product.findMany.mock.calls[0][0].where;
+      const shirtClause = where.AND[1];
+      expect(shirtClause.OR).toEqual(expect.arrayContaining([{ name: { contains: "shirt", mode: "insensitive" } }]));
+      expect(prisma.category.findMany).not.toHaveBeenCalled(); // no DB category lookup involved in matching at all anymore
+    });
+
+    it("'What do you sell?' is recognized as store discovery and shows categories, never runs it as a literal product search", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat1", name: "Fashion" }, { id: "cat2", name: "Bags" }]);
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "What do you sell?");
+
+      expect(handled).toBe(true);
+      expect(conversations.sendList).toHaveBeenCalled();
+      expect(prisma.product.findMany).not.toHaveBeenCalled();
+    });
+
+    it.each(["What products do you have?", "Show me your products", "What categories do you have?", "What can I buy?"])(
+      "'%s' is also recognized as store discovery",
+      async (text) => {
+        prisma.category.findMany.mockResolvedValue([{ id: "cat1", name: "Fashion" }]);
+        await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, text);
+        expect(prisma.product.findMany).not.toHaveBeenCalled();
+      },
+    );
   });
 });

@@ -8,8 +8,15 @@ import { CustomerSignalService } from "../customer-signals/customer-signal.servi
 
 const MAX_LIST_ROWS = 10;
 
-// stopwords stripped before matching search keywords against product name/description/category
-const SEARCH_STOPWORDS = new Set(["show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some", "please", "find", "search", "got", "is", "are", "there"]);
+// stopwords stripped before matching search keywords against product name/description/category — includes
+// vague filler words ("something", "anything", "nice", "good") so e.g. "show me something under 1500" is
+// treated as a budget-only query instead of literally searching the catalogue for the word "something"
+const SEARCH_STOPWORDS = new Set((["show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some", "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good"]));
+
+// messages asking what the store carries at all, rather than searching for something specific — must be
+// checked before running a keyword search, otherwise e.g. "What do you sell?" gets searched literally and
+// returns "No products matched that search."
+export const STORE_DISCOVERY_RE = /\b(what do you (sell|offer|have|stock)|what (products?|items?|categories?) do you (have|sell|offer|stock)|what (products?|items?|categories?) (are (available|there)|do you have)|show me (your|the) (products?|catalogue|catalog|store|items?)|what can i (buy|get|purchase)|what do you (guys )?have)\b/i;
 
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
@@ -28,43 +35,36 @@ export function parseSearchQuery(text: string): SearchFilters {
   return { maxPrice, minPrice, keywords };
 }
 
-// crude singular/plural normalization ("bags" <-> "bag") so a keyword can match a category name reliably
-// without needing a real stemming library for this deterministic V1
+// crude singular/plural normalization ("bags" <-> "bag") so a keyword also matches a product literally named
+// with the other form (e.g. a search for "shirts" still matches a product named "Black Premium Shirt") without
+// needing a real stemming library for this deterministic V1
 function normalizeSearchWord(word: string): string {
   return word.toLowerCase().replace(/s$/, "");
 }
 
 /**
- * If a keyword names one of the business's own categories, it should be treated as a HARD categoryId filter and
- * dropped from the free-text keyword list — this is what prevents "black bag" from matching a "Black Premium
- * Shirt": without it, every keyword gets OR'd across every field, so a product matching just one unrelated
- * word ("black") could still be returned even though it doesn't belong to the requested category ("bag").
+ * One AND-clause per keyword (each independently required — this is what fixes "black bag" matching a "Black
+ * Premium Shirt": the shirt satisfies the "black" clause but has no "bag" anywhere, so the AND across both
+ * keywords correctly excludes it). Each keyword is OR'd across name/description/brand/category-name, trying
+ * both its literal form and its singular-normalized form, since Prisma's `contains` has no stemming.
+ *
+ * Deliberately does NOT hard-filter by resolving a keyword to a categoryId: a business's actual product→category
+ * assignment can't be trusted to match what a customer calls something in conversation (e.g. a black shirt
+ * filed under a generic "Fashion" category rather than "Shirts") — a hard filter would silently exclude a real
+ * match instead of just deprioritizing it, which is worse than the original bug this replaced.
  */
-export async function resolveCategoryFilter(
-  prisma: PrismaService,
-  businessId: string,
-  keywords: string[],
-): Promise<{ categoryId?: string; remainingKeywords: string[] }> {
-  if (!keywords.length) return { remainingKeywords: keywords };
-  const categories = await prisma.category.findMany({ where: { businessId, active: true }, select: { id: true, name: true } });
-  for (const category of categories) {
-    const categoryWords = category.name.split(/\s+/).map(normalizeSearchWord);
-    const hit = keywords.find((kw) => categoryWords.includes(normalizeSearchWord(kw)));
-    if (hit) return { categoryId: category.id, remainingKeywords: keywords.filter((kw) => kw !== hit) };
-  }
-  return { remainingKeywords: keywords };
-}
-
-/** One AND-clause per keyword (each independently required, OR'd across name/description/brand/category-name). */
-export function keywordAndClauses(keywords: string[], includeCategoryName: boolean) {
-  return keywords.map((kw) => ({
-    OR: [
-      { name: { contains: kw, mode: "insensitive" as const } },
-      { description: { contains: kw, mode: "insensitive" as const } },
-      { brand: { contains: kw, mode: "insensitive" as const } },
-      ...(includeCategoryName ? [{ category: { name: { contains: kw, mode: "insensitive" as const } } }] : []),
-    ],
-  }));
+export function keywordAndClauses(keywords: string[]) {
+  return keywords.map((kw) => {
+    const variants = Array.from(new Set([kw, normalizeSearchWord(kw)]));
+    return {
+      OR: variants.flatMap((v) => [
+        { name: { contains: v, mode: "insensitive" as const } },
+        { description: { contains: v, mode: "insensitive" as const } },
+        { brand: { contains: v, mode: "insensitive" as const } },
+        { category: { name: { contains: v, mode: "insensitive" as const } } },
+      ]),
+    };
+  });
 }
 
 // thousands-grouped price string (WhatsApp text/captions render *bold*/_italic_ markdown, but list row titles/descriptions do not)
@@ -160,15 +160,17 @@ export class ShoppingFlowService {
   }
 
   private async search(conversationId: string, businessId: string, text: string) {
+    // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
+    // the catalogue for the literal words in the question just returns "No products matched that search."
+    if (STORE_DISCOVERY_RE.test(text)) return this.showShop(conversationId, businessId);
+
     const filters = parseSearchQuery(text);
-    const { categoryId, remainingKeywords } = await resolveCategoryFilter(this.prisma, businessId, filters.keywords);
     const products = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
-        ...(categoryId ? { categoryId } : {}),
-        // every remaining keyword must independently match somewhere (AND across keywords) — a product
-        // matching only "black" when "bag" was also required must not be returned
-        ...(remainingKeywords.length ? { AND: keywordAndClauses(remainingKeywords, !categoryId) } : {}),
+        // every keyword must independently match somewhere (AND across keywords) — a product matching only
+        // "black" when "bag" was also required must not be returned
+        ...(filters.keywords.length ? { AND: keywordAndClauses(filters.keywords) } : {}),
       },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
       take: 30,

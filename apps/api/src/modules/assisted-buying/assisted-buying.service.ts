@@ -5,7 +5,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
 import { toPublicImageUrl } from "../products/image-storage";
-import { parseSearchQuery, fmtMoney, resolveCategoryFilter, keywordAndClauses } from "../shopping-flow/shopping-flow.service";
+import { parseSearchQuery, fmtMoney, keywordAndClauses, STORE_DISCOVERY_RE } from "../shopping-flow/shopping-flow.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
 
 // ordinal words a customer might use to refer back to a just-shown recommendation ("add the first one")
@@ -45,6 +45,11 @@ export class AssistedBuyingService {
 
   /** Returns true if this turn was fully handled (a reply was already sent); false to fall through to the normal AI flow. */
   async handle(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
+    // "What do you sell?" etc. asks what the store carries at all — answer with categories, never run it as a
+    // product search (checked first: a fresh discovery question should never be misread as a cart reference
+    // just because it happens to arrive right after a recommendation set was shown)
+    if (STORE_DISCOVERY_RE.test(text)) return this.tryStoreDiscovery(conversationId, businessId, customerId, text);
+
     const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId }, select: { assistedBuyingContext: true } });
     const context = conversation?.assistedBuyingContext as unknown as AssistedBuyingContext | null;
 
@@ -59,6 +64,17 @@ export class AssistedBuyingService {
     }
 
     return this.tryRecommend(conversationId, businessId, customerId, text);
+  }
+
+  /** Answers "what do you sell?" with the business's own published categories — a catalogue entry point, not a product list. */
+  private async tryStoreDiscovery(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
+    const categories = await this.prisma.category.findMany({ where: { businessId, active: true, parentId: null }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], take: 10 });
+    const reply = categories.length
+      ? `Sure! We offer ${categories.map((c) => c.name).join(", ")}. What are you looking for?`
+      : "Sure! Let me know what you're looking for and I'll find it for you.";
+    await this.conversations.sendMessage(conversationId, businessId, reply);
+    await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_STORE_DISCOVERY", result: "shown", reason: text });
+    return true;
   }
 
   private async tryRecommend(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
@@ -221,22 +237,17 @@ export class AssistedBuyingService {
       ? { price: { ...(filters.minPrice != null ? { gte: filters.minPrice } : {}), ...(filters.maxPrice != null ? { lte: filters.maxPrice } : {}) } }
       : {};
 
-    // shared with ShoppingFlowService.search() — treats a category-naming keyword as a HARD filter instead of
-    // just another OR'd keyword, which is what actually fixes "black bag" matching a black shirt
-    const { categoryId: matchedCategoryId, remainingKeywords } = await resolveCategoryFilter(this.prisma, businessId, filters.keywords);
-
     const products = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
         variants: { some: { active: true, ...priceFilter } },
-        ...(matchedCategoryId ? { categoryId: matchedCategoryId } : {}),
         // AND (not OR keys, which would silently collide into a single object property) so every constraint
         // below is enforced together, never just one overwriting another
         AND: [
           ...(excludedCategoryIds.length ? [{ OR: [{ categoryId: null }, { categoryId: { notIn: excludedCategoryIds } }] }] : []),
-          // every remaining keyword must independently match somewhere (AND across keywords) — a product
-          // matching only "black" when "bag" was also required must not be returned
-          ...keywordAndClauses(remainingKeywords, !matchedCategoryId),
+          // every keyword must independently match somewhere (AND across keywords) — a product matching only
+          // "black" when "bag" was also required must not be returned
+          ...keywordAndClauses(filters.keywords),
         ],
       },
       take: limit,

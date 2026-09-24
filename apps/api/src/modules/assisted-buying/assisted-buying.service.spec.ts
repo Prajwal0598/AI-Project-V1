@@ -77,58 +77,97 @@ describe("AssistedBuyingService", () => {
       });
       expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_RECOMMENDATIONS_SHOWN", result: "shown" }) }));
     });
+
+    it("PRODUCT_CARD_INTEGRITY: each card's name, price and image always belong to the same product, even across multiple results (regression)", async () => {
+      const bag = { id: "p20", name: "Canvas Tote Bag", description: null, brand: null, imageUrl: "/uploads/products/bag.jpg", category: { name: "Bags" }, variants: [{ id: "v20", price: 899, currency: "INR", inventory: 2, attributes: null }] };
+      const jeans = { id: "p21", name: "Slim Fit Jeans", description: null, brand: null, imageUrl: "/uploads/products/jeans.jpg", category: { name: "Apparel" }, variants: [{ id: "v21", price: 1999, currency: "INR", inventory: 6, attributes: null }] };
+      prisma.product.findMany.mockResolvedValue([bag, jeans]);
+
+      await service.handle("conv1", "biz1", "cust1", "something under 2500");
+
+      // one sendButtons call per product, each pairing its OWN name/price/image — never mixed across products
+      const calls = conversations.sendButtons.mock.calls;
+      const bagCall = calls.find((c: unknown[]) => (c[2] as string).includes("Canvas Tote Bag"));
+      const jeansCall = calls.find((c: unknown[]) => (c[2] as string).includes("Slim Fit Jeans"));
+      expect(bagCall[2]).toContain("899");
+      expect(bagCall[4]).toContain("bag.jpg");
+      expect(jeansCall[2]).toContain("1,999");
+      expect(jeansCall[4]).toContain("jeans.jpg");
+    });
   });
 
-  describe("handle — category-aware matching (the 'black bag' bug)", () => {
-    it("treats a keyword matching a category name as a hard category filter, not just another OR'd keyword", async () => {
-      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }]);
+  describe("handle — keyword matching (the 'black bag' bug and its regression)", () => {
+    it("'do you have a black bag' requires 'bag' to independently match too (AND across keywords) — never matches a black shirt", async () => {
       prisma.product.findMany.mockResolvedValue([]);
 
       await service.handle("conv1", "biz1", "cust1", "do you have a black bag");
 
       const where = prisma.product.findMany.mock.calls[0][0].where;
-      expect(where.categoryId).toBe("cat-bags"); // "bag" -> "Bags" category, applied as a hard filter
-      // the remaining keyword ("black") is still required via AND, but "bag" itself is no longer a free-text OR clause
-      expect(where.AND).toEqual(expect.arrayContaining([
-        { OR: [
-          { name: { contains: "black", mode: "insensitive" } },
-          { description: { contains: "black", mode: "insensitive" } },
-          { brand: { contains: "black", mode: "insensitive" } },
-        ] },
-      ]));
+      const andClauses = where.AND as { OR: unknown[] }[];
+      // one AND-clause per keyword ("black", "bag") — a product missing either one entirely must be excluded
+      const bagClause = andClauses.find((c) => JSON.stringify(c).includes('"bag"'));
+      expect(bagClause).toEqual({ OR: [
+        { name: { contains: "bag", mode: "insensitive" } },
+        { description: { contains: "bag", mode: "insensitive" } },
+        { brand: { contains: "bag", mode: "insensitive" } },
+        { category: { name: { contains: "bag", mode: "insensitive" } } },
+      ] });
+      expect(prisma.category.findMany).not.toHaveBeenCalled(); // no DB category lookup involved in matching at all
     });
 
     it("never returns a product from a different category just because it shares an unrelated keyword", async () => {
-      // simulates the exact bug: without a hard category filter, "black" alone would match a shirt too
+      // simulates the exact bug: the shirt matches "black" but has no "bag" anywhere, so AND-across-keywords excludes it
       const bag = { id: "p10", name: "Black Crossbody Bag", description: null, brand: null, imageUrl: null, category: { name: "Bags" }, variants: [{ id: "v10", price: 999, currency: "INR", inventory: 4 }] };
-      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }, { id: "cat-shirts", name: "Shirts" }]);
-      prisma.product.findMany.mockResolvedValue([bag]); // the mocked DB query itself now only returns bags, because categoryId is a hard filter
+      prisma.product.findMany.mockResolvedValue([bag]); // stands in for the real query correctly excluding the shirt
 
       const handled = await service.handle("conv1", "biz1", "cust1", "do you have a black bag");
 
       expect(handled).toBe(true);
-      expect(prisma.product.findMany.mock.calls[0][0].where.categoryId).toBe("cat-bags");
       expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Black Crossbody Bag"), expect.any(Array), undefined);
     });
 
-    it("normalizes singular/plural so 'bag' matches a 'Bags' category and 'shirts' matches a 'Shirt' category", async () => {
-      prisma.category.findMany.mockResolvedValue([{ id: "cat-shirt", name: "Shirt" }]);
-      prisma.product.findMany.mockResolvedValue([]);
+    it("'black shirts' still matches a product literally named 'Black Premium Shirt' regardless of its actual category assignment (regression — a hard category filter previously caused false negatives for mis-categorized products)", async () => {
+      const blackShirt = { id: "p11", name: "Black Premium Shirt", description: null, brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v11", price: 1499, currency: "INR", inventory: 2 }] };
+      prisma.product.findMany.mockResolvedValue([blackShirt]);
 
-      await service.handle("conv1", "biz1", "cust1", "show me some shirts under 2000");
+      const handled = await service.handle("conv1", "biz1", "cust1", "do you have any black shirts");
 
-      expect(prisma.product.findMany.mock.calls[0][0].where.categoryId).toBe("cat-shirt");
+      expect(handled).toBe(true);
+      const where = prisma.product.findMany.mock.calls[0][0].where;
+      const andClauses = where.AND as { OR: { name?: { contains: string } }[] }[];
+      const shirtClause = andClauses.find((c) => c.OR.some((o) => o.name?.contains === "shirt"));
+      expect(shirtClause).toBeTruthy(); // "shirts" also tries its singular-normalized form against the literal product name
     });
 
     it("falls back to plain AND-across-keywords matching when no keyword names a known category", async () => {
-      prisma.category.findMany.mockResolvedValue([{ id: "cat-bags", name: "Bags" }]);
       prisma.product.findMany.mockResolvedValue([]);
 
       await service.handle("conv1", "biz1", "cust1", "red comfortable");
 
       const where = prisma.product.findMany.mock.calls[0][0].where;
-      expect(where.categoryId).toBeUndefined();
-      expect(where.AND).toHaveLength(2); // one AND clause per keyword ("red", "comfortable"), each still OR'd across fields
+      expect(where.AND).toHaveLength(2); // one AND clause per keyword ("red", "comfortable")
+    });
+  });
+
+  describe("handle — store discovery", () => {
+    it("'What do you sell?' answers with the business's own categories instead of running a product search", async () => {
+      prisma.category.findMany.mockResolvedValue([{ id: "cat1", name: "Fashion" }, { id: "cat2", name: "Bags" }]);
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "What do you sell?");
+
+      expect(handled).toBe(true);
+      expect(prisma.product.findMany).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Fashion"));
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_STORE_DISCOVERY" }) }));
+    });
+
+    it("still answers with a sensible reply when the business has no categories yet", async () => {
+      prisma.category.findMany.mockResolvedValue([]);
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "what products do you have?");
+
+      expect(handled).toBe(true);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.any(String));
     });
   });
 
