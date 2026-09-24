@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
@@ -7,6 +8,11 @@ import { toPublicImageUrl } from "../products/image-storage";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 
 const MAX_LIST_ROWS = 10;
+
+// ordinal words a customer might use to refer back to a just-shown result list ("show me the first one")
+const ORDINAL_WORDS: Record<string, number> = {
+  first: 0, "1st": 0, second: 1, "2nd": 1, third: 2, "3rd": 2, fourth: 3, "4th": 3, fifth: 4, "5th": 4,
+};
 
 // stopwords stripped before matching search keywords against product name/description/category — includes
 // vague filler words ("something", "anything", "nice", "good") so e.g. "show me something under 1500" is
@@ -21,6 +27,7 @@ const SEARCH_STOPWORDS = new Set([
   "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good",
   "what", "which", "products", "product", "items", "item",
   "on", "in", "would", "who", "someone", "but", "not", "too", "going", "recommend", "attending", "suitable", "loves",
+  "preferably", "prefer", "ideally",
 ]);
 
 // messages asking what the store carries at all, rather than searching for something specific — must be
@@ -29,6 +36,16 @@ const SEARCH_STOPWORDS = new Set([
 export const STORE_DISCOVERY_RE = /\b(what do you (sell|offer|have|stock)|what (products?|items?|categories?) do you (have|sell|offer|stock)|what (products?|items?|categories?) (are (available|there)|do you have)|show me (your|the) (products?|catalogue|catalog|store|items?)|what can i (buy|get|purchase)|what do you (guys )?have)\b/i;
 
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
+
+// accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
+// ShoppingFlowService/AssistedBuyingService is ever active per conversation, gated by shoppingState) so a
+// multi-turn refinement ("I need a shirt" / "something casual" / "preferably blue" / "under 1500") combines
+// into one search instead of each message overwriting the last, and "show me the first one" can resolve
+// against whatever was last shown
+interface ShoppingSearchContext {
+  filters: SearchFilters;
+  lastResults: { productId: string; variantId: string; name: string }[];
+}
 
 /** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
 export function parseSearchQuery(text: string): SearchFilters {
@@ -116,7 +133,8 @@ export class ShoppingFlowService {
       { id: "menu_cart", title: "🛒 View Cart" },
       { id: "menu_orders", title: "📦 My Orders" },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "MAIN_MENU" } });
+    // fresh greeting -> drop any search filters/results gathered in an earlier session so they can't silently bleed into a new one
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "MAIN_MENU", assistedBuyingContext: Prisma.JsonNull } });
   }
 
   async handleInteractive(conversationId: string, businessId: string, actionId: string) {
@@ -145,7 +163,7 @@ export class ShoppingFlowService {
   }
 
   /** Called for plain-text replies; returns true if this state consumed the text (caller should not also run the AI). */
-  async handleFreeText(conversationId: string, businessId: string, conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string }, text: string): Promise<boolean> {
+  async handleFreeText(conversationId: string, businessId: string, conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown }, text: string): Promise<boolean> {
     if (conversation.shoppingState === "AWAITING_QUANTITY") {
       await this.receiveQuantity(conversationId, businessId, conversation, text);
       return true;
@@ -163,18 +181,44 @@ export class ShoppingFlowService {
     // fall through to the free-text AI assistant instead, so a customer can still describe what else they want
     // in natural language once they have items in their cart — the AI flow merges those cart items back in
     if (["MAIN_MENU", "BROWSING_CATEGORIES", "BROWSING_PRODUCTS", "VIEWING_PRODUCT"].includes(conversation.shoppingState)) {
-      await this.search(conversationId, businessId, text);
+      const context = conversation.assistedBuyingContext as unknown as ShoppingSearchContext | null;
+      await this.search(conversationId, businessId, conversation.customerId, text, context);
       return true;
     }
     return false;
   }
 
-  private async search(conversationId: string, businessId: string, text: string) {
+  /** Resolves "show me the first one"/"the second one" etc. against the product list from the customer's own last search — checked before treating those words as (nonsensical) literal search keywords. */
+  private resolveOrdinalReference(text: string, context: ShoppingSearchContext | null): { productId: string; variantId: string; name: string } | null {
+    if (!context?.lastResults?.length) return null;
+    const lower = text.toLowerCase();
+    for (const [word, idx] of Object.entries(ORDINAL_WORDS)) {
+      if (idx < context.lastResults.length && new RegExp(`\\b${word}\\b`).test(lower)) return context.lastResults[idx];
+    }
+    return null;
+  }
+
+  private async search(conversationId: string, businessId: string, customerId: string, text: string, existingContext: ShoppingSearchContext | null) {
+    // an ordinal reference to a just-shown result ("show me the first one") takes priority over a fresh search —
+    // otherwise "first"/"one" get treated as nonsensical literal search keywords and find nothing
+    const referenced = this.resolveOrdinalReference(text, existingContext);
+    if (referenced) return this.showProductDetail(conversationId, businessId, referenced.productId, customerId);
+
     // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
     // the catalogue for the literal words in the question just returns "No products matched that search."
     if (STORE_DISCOVERY_RE.test(text)) return this.showShop(conversationId, businessId);
 
-    const filters = parseSearchQuery(text);
+    const parsed = parseSearchQuery(text);
+    // merge this turn's constraints onto whatever's already been gathered this conversation — a customer
+    // refining a search across several messages ("I need a shirt" / "something casual" / "preferably blue" /
+    // "under 1500") means all four together, not four independent, mutually-forgetful searches
+    const priorFilters = existingContext?.filters;
+    const filters: SearchFilters = {
+      keywords: Array.from(new Set([...(priorFilters?.keywords ?? []), ...parsed.keywords])),
+      maxPrice: parsed.maxPrice ?? priorFilters?.maxPrice,
+      minPrice: parsed.minPrice ?? priorFilters?.minPrice,
+    };
+
     const products = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
@@ -218,8 +262,9 @@ export class ShoppingFlowService {
 
     if (!matches.length) {
       await this.conversations.sendButtons(conversationId, businessId, "😕 No products matched that search.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
-      // reset to IDLE so a dead-end search doesn't strand the customer outside the greeting/menu path
-      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE" } });
+      // reset to IDLE (and drop the accumulated context) so a dead-end search doesn't strand the customer, or
+      // silently keep filtering later turns by constraints that just proved to match nothing
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE", assistedBuyingContext: Prisma.JsonNull } });
       return;
     }
 
@@ -232,7 +277,8 @@ export class ShoppingFlowService {
         return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` };
       }) },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null } });
+    const context: ShoppingSearchContext = { filters, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
   }
 
   private async showShop(conversationId: string, businessId: string, categoryId?: string) {
@@ -243,7 +289,7 @@ export class ShoppingFlowService {
     await this.conversations.sendList(conversationId, businessId, "🗂️ Choose a category to browse:", "Browse", [
       { rows: categories.map((c) => ({ id: `cat_${c.id}`, title: c.name })) },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_CATEGORIES" } });
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_CATEGORIES", assistedBuyingContext: Prisma.JsonNull } });
   }
 
   private async showProducts(conversationId: string, businessId: string, categoryId: string | null) {
@@ -267,7 +313,7 @@ export class ShoppingFlowService {
         return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${stock}` };
       }) },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId } });
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId, assistedBuyingContext: Prisma.JsonNull } });
   }
 
   private async showProductDetail(conversationId: string, businessId: string, productId: string, customerId: string) {
@@ -328,7 +374,10 @@ export class ShoppingFlowService {
   }
 
   private async receiveQuantity(conversationId: string, businessId: string, conversation: { pendingVariantId: string | null; customerId: string }, text: string) {
-    const quantity = parseInt(text.match(/\d+/)?.[0] ?? "", 10);
+    // a plain affirmative ("I'll take it", "yes", "sure") after being shown a single-variant product means
+    // quantity 1 — customers confirming a purchase rarely type the number itself
+    const isAffirmative = /^\s*(i'?ll take it|take it|i want it|yes|yeah|yep|sure|ok(ay)?|sounds good|perfect|great)\s*[!.]*\s*$/i.test(text);
+    const quantity = isAffirmative ? 1 : parseInt(text.match(/\d+/)?.[0] ?? "", 10);
     if (!conversation.pendingVariantId || !Number.isFinite(quantity) || quantity < 1) {
       await this.conversations.sendMessage(conversationId, businessId, "Please reply with a valid quantity, e.g. 2.");
       return;

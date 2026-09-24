@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { parseSearchQuery, fmtMoney, formatVariantLabel, ShoppingFlowService } from "./shopping-flow.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { ConversationService } from "../conversations/conversation.service";
@@ -152,7 +153,7 @@ describe("ShoppingFlowService — state machine", () => {
       prisma.category.findMany.mockResolvedValue([{ id: "cat1", name: "Jeans" }]);
       await flow.handleInteractive("conv1", "biz1", "menu_shop");
       expect(conversations.sendList).toHaveBeenCalled();
-      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_CATEGORIES" } });
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_CATEGORIES", assistedBuyingContext: Prisma.JsonNull } });
     });
 
     it("menu_shop with NO categories falls straight through to the product list (BROWSING_PRODUCTS)", async () => {
@@ -160,7 +161,7 @@ describe("ShoppingFlowService — state machine", () => {
       prisma.category.findMany.mockResolvedValue([]);
       prisma.product.findMany.mockResolvedValue([{ id: "p1", name: "Shirt", variants: [{ price: 799, currency: "INR", inventory: 5 }] }]);
       await flow.handleInteractive("conv1", "biz1", "menu_shop");
-      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null } });
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null, assistedBuyingContext: Prisma.JsonNull } });
     });
 
     it("cat_<id> shows that category's products and records activeCategoryId", async () => {
@@ -168,7 +169,7 @@ describe("ShoppingFlowService — state machine", () => {
       prisma.product.findMany.mockResolvedValue([{ id: "p1", name: "Jeans", variants: [{ price: 1999, currency: "INR", inventory: 3 }] }]);
       await flow.handleInteractive("conv1", "biz1", "cat_abc123");
       expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ categoryId: "abc123" }) }));
-      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: "abc123" } });
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: "abc123", assistedBuyingContext: Prisma.JsonNull } });
     });
 
     it("nav_continue ('Keep Shopping') always returns to the top-level catalog, ignoring any previously-active category (regression)", async () => {
@@ -380,7 +381,7 @@ describe("ShoppingFlowService — state machine", () => {
       // 1. "Hi" -> always (re)opens the main menu, regardless of prior state
       await flow.sendMainMenu("conv1", "biz1");
       expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Welcome to"), expect.any(Array));
-      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "MAIN_MENU" } });
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "MAIN_MENU", assistedBuyingContext: Prisma.JsonNull } });
 
       // 2. "What do you sell?" -> store discovery, shows categories, never runs a literal product search
       prisma.category.findMany.mockResolvedValue(categories);
@@ -390,7 +391,7 @@ describe("ShoppingFlowService — state machine", () => {
         { rows: [{ id: "cat_cat1", title: "Fashion" }, { id: "cat_cat2", title: "Bags" }, { id: "cat_cat3", title: "Accessories" }] },
       ]);
       expect(prisma.product.findMany).not.toHaveBeenCalled();
-      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_CATEGORIES" } });
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_CATEGORIES", assistedBuyingContext: Prisma.JsonNull } });
 
       // 3. "Show me your products" -> also store discovery (still just the catalogue entry point, not a search)
       conversations.sendList.mockClear();
@@ -499,6 +500,78 @@ describe("ShoppingFlowService — state machine", () => {
       expect(handled).toBe(true);
       expect(prisma.product.findMany).toHaveBeenCalledTimes(1);
       expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", expect.any(Array));
+    });
+  });
+
+  describe("Test 4 — conversation memory across multiple refining turns", () => {
+    const shirt1 = { id: "p1", name: "Casual Blue Denim Shirt", description: "Relaxed casual fit", brand: null, imageUrl: "/uploads/products/shirt1.jpg", category: { name: "Fashion" }, variants: [{ id: "v1", price: 1299, currency: "INR", inventory: 5 }] };
+    const shirt2 = { id: "p2", name: "Blue Casual Linen Shirt", description: null, brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v2", price: 1450, currency: "INR", inventory: 3 }] };
+
+    function lastContext() {
+      return prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext;
+    }
+
+    it("'I need a shirt' -> 'Something casual' -> 'Preferably blue' -> 'Under 1500' -> 'Show me the first one' -> 'I'll take it'", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", assistedBuyingContext: null };
+
+      // 1. "I need a shirt"
+      prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "I need a shirt");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toEqual([{ OR: expect.arrayContaining([{ name: { contains: "shirt", mode: "insensitive" } }]) }]);
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+      expect((conversation.assistedBuyingContext as { filters: { keywords: string[] } }).filters.keywords).toEqual(["shirt"]);
+
+      // 2. "Something casual" -> merges onto "shirt" instead of starting a brand new, unrelated search
+      prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Something casual");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toHaveLength(2); // "shirt" AND "casual"
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+      expect((conversation.assistedBuyingContext as { filters: { keywords: string[] } }).filters.keywords).toEqual(["shirt", "casual"]);
+
+      // 3. "Preferably blue" -> "preferably" is filler (stripped), "blue" merges onto the accumulated keywords too
+      prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Preferably blue");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toHaveLength(3); // "shirt" AND "casual" AND "blue"
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+      expect((conversation.assistedBuyingContext as { filters: { keywords: string[] } }).filters.keywords).toEqual(["shirt", "casual", "blue"]);
+
+      // 4. "Under 1500" -> the price bound stacks ON TOP of the 3 accumulated keywords, not instead of them
+      prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Under 1500");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toHaveLength(3); // this turn added no new keywords
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+      const ctx = conversation.assistedBuyingContext as { filters: { keywords: string[]; maxPrice?: number }; lastResults: { productId: string; name: string }[] };
+      expect(ctx.filters).toEqual({ keywords: ["shirt", "casual", "blue"], maxPrice: 1500, minPrice: undefined });
+      expect(ctx.lastResults.map((r) => r.name)).toEqual(["Casual Blue Denim Shirt", "Blue Casual Linen Shirt"]);
+      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Found 2 matching products"), "View", [
+        { rows: [
+          { id: "prod_p1", title: "Casual Blue Denim Shirt", description: expect.stringContaining("1,299") },
+          { id: "prod_p2", title: "Blue Casual Linen Shirt", description: expect.stringContaining("1,450") },
+        ] },
+      ]);
+
+      // 5. "Show me the first one" -> resolves the ORDINAL against the just-shown list, never runs it as a keyword search
+      prisma.product.findFirst.mockResolvedValueOnce({
+        id: "p1", name: "Casual Blue Denim Shirt", description: "Relaxed casual fit", imageUrl: "/uploads/products/shirt1.jpg",
+        variants: [{ id: "v1", price: 1299, currency: "INR", inventory: 5 }],
+      });
+      const handledFirst = await flow.handleFreeText("conv1", "biz1", conversation, "Show me the first one");
+      expect(handledFirst).toBe(true);
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(4); // no additional search query for this turn
+      expect(prisma.product.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "p1", businessId: "biz1", status: "PUBLISHED" } }));
+      expect(conversations.sendImage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("shirt1.jpg"), expect.stringContaining("Casual Blue Denim Shirt"));
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: "p1", pendingVariantId: "v1" } });
+
+      // 6. "I'll take it" -> a plain affirmative while AWAITING_QUANTITY means quantity 1, no number required
+      prisma.variant.findFirst.mockResolvedValueOnce({ id: "v1", price: 1299, currency: "INR", inventory: 5, product: { name: "Casual Blue Denim Shirt" } });
+      cart.getOrCreateActive.mockResolvedValueOnce({ id: "cart1" });
+      cart.addItem.mockResolvedValueOnce({ items: [{ variantId: "v1", quantity: 1 }] });
+      cart.totals.mockReturnValueOnce({ subtotal: 1299, currency: "INR" });
+      const handledLast = await flow.handleFreeText("conv1", "biz1", { shoppingState: "AWAITING_QUANTITY", pendingVariantId: "v1", customerId: "cust1" }, "I'll take it");
+      expect(handledLast).toBe(true);
+      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 1);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Added *1 × Casual Blue Denim Shirt*"), expect.any(Array));
     });
   });
 });
