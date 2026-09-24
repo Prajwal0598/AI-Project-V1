@@ -360,4 +360,75 @@ describe("ShoppingFlowService — state machine", () => {
       },
     );
   });
+
+  describe("full conversation replay — Hi / discovery / category search / black shirt / budget-only", () => {
+    // representative catalogue for "Prajwal Studio": a black shirt filed under the generic "Fashion" category
+    // (not a dedicated "Shirts" category) plus a couple of other items, exactly the shape that previously
+    // caused the "no black shirts available" false negative
+    const blackShirt = { id: "p1", name: "Black Premium Shirt", description: "Slim fit formal shirt", brand: null, imageUrl: "/uploads/products/shirt.jpg", category: { name: "Fashion" }, variants: [{ id: "v1", price: 1799, currency: "INR", inventory: 5 }] };
+    const bag = { id: "p2", name: "Canvas Tote Bag", description: null, brand: null, imageUrl: "/uploads/products/bag.jpg", category: { name: "Bags" }, variants: [{ id: "v2", price: 899, currency: "INR", inventory: 2 }] };
+    const categories = [{ id: "cat1", name: "Fashion" }, { id: "cat2", name: "Bags" }, { id: "cat3", name: "Accessories" }];
+
+    it("replays the exact 7-message test conversation end to end", async () => {
+      // 1. "Hi" -> always (re)opens the main menu, regardless of prior state
+      await flow.sendMainMenu("conv1", "biz1");
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Welcome to"), expect.any(Array));
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "MAIN_MENU" } });
+
+      // 2. "What do you sell?" -> store discovery, shows categories, never runs a literal product search
+      prisma.category.findMany.mockResolvedValue(categories);
+      let handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "What do you sell?");
+      expect(handled).toBe(true);
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Choose a category"), "Browse", [
+        { rows: [{ id: "cat_cat1", title: "Fashion" }, { id: "cat_cat2", title: "Bags" }, { id: "cat_cat3", title: "Accessories" }] },
+      ]);
+      expect(prisma.product.findMany).not.toHaveBeenCalled();
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith({ where: { id: "conv1" }, data: { shoppingState: "BROWSING_CATEGORIES" } });
+
+      // 3. "Show me your products" -> also store discovery (still just the catalogue entry point, not a search)
+      conversations.sendList.mockClear();
+      handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "BROWSING_CATEGORIES", pendingVariantId: null, customerId: "cust1" }, "Show me your products");
+      expect(handled).toBe(true);
+      expect(conversations.sendList).toHaveBeenCalled();
+      expect(prisma.product.findMany).not.toHaveBeenCalled();
+
+      // 4. "What fashion products do you have?" -> a real category-scoped search this time (not pure discovery);
+      // extracts just "fashion" as the keyword (stopwords strip "what"/"products"/"do"/"you"/"have")
+      prisma.product.findMany.mockResolvedValueOnce([blackShirt]);
+      handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "BROWSING_CATEGORIES", pendingVariantId: null, customerId: "cust1" }, "What fashion products do you have?");
+      expect(handled).toBe(true);
+      let where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      expect(where.AND).toEqual([{ OR: expect.arrayContaining([{ category: { name: { contains: "fashion", mode: "insensitive" } } }]) }]);
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", expect.any(Array));
+
+      // 5. "Show me shirts" -> matches the black shirt purely on its own name, regardless of category
+      prisma.product.findMany.mockResolvedValueOnce([blackShirt]);
+      handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null, customerId: "cust1" }, "Show me shirts");
+      expect(handled).toBe(true);
+      where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      expect(where.AND[0].OR).toEqual(expect.arrayContaining([{ name: { contains: "shirt", mode: "insensitive" } }]));
+
+      // 6. "Do you have any black shirts?" -> the reported bug: must still find the black shirt (AND requires
+      // BOTH "black" and "shirt(s)" to independently match — the shirt's own name satisfies both)
+      prisma.product.findMany.mockResolvedValueOnce([blackShirt]);
+      handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null, customerId: "cust1" }, "Do you have any black shirts?");
+      expect(handled).toBe(true);
+      where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      expect(where.AND).toHaveLength(2); // "black" AND "shirts" both independently required
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", [
+        { rows: [{ id: "prod_p1", title: "Black Premium Shirt", description: expect.stringContaining("1,799") }] },
+      ]);
+
+      // 7. "Show me something under 1500" -> budget-only: "something" is stripped, only maxPrice applies,
+      // so the affordable bag (899) is returned even though it has no keyword overlap at all
+      prisma.product.findMany.mockResolvedValueOnce([bag, blackShirt]); // shirt (1799) is over budget, filtered out below
+      handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null, customerId: "cust1" }, "Show me something under 1500");
+      expect(handled).toBe(true);
+      where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      expect(where.AND).toBeUndefined(); // no keywords left at all once "something" is stripped
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", [
+        { rows: [{ id: "prod_p2", title: "Canvas Tote Bag", description: expect.stringContaining("899") }] },
+      ]);
+    });
+  });
 });

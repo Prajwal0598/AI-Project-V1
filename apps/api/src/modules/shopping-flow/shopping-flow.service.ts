@@ -10,8 +10,10 @@ const MAX_LIST_ROWS = 10;
 
 // stopwords stripped before matching search keywords against product name/description/category — includes
 // vague filler words ("something", "anything", "nice", "good") so e.g. "show me something under 1500" is
-// treated as a budget-only query instead of literally searching the catalogue for the word "something"
-const SEARCH_STOPWORDS = new Set((["show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some", "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good"]));
+// treated as a budget-only query instead of literally searching the catalogue for the word "something", and
+// generic catalogue nouns/question words ("what", "which", "products", "items") so e.g. "What fashion products
+// do you have?" extracts just the real constraint ("fashion") instead of also requiring a literal "what"/"products" match
+const SEARCH_STOPWORDS = new Set(["show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some", "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good", "what", "which", "products", "product", "items", "item"]);
 
 // messages asking what the store carries at all, rather than searching for something specific — must be
 // checked before running a keyword search, otherwise e.g. "What do you sell?" gets searched literally and
