@@ -6,6 +6,7 @@ export const QUEUES = {
   REPEAT_PURCHASE_SCAN: "repeat-purchase-scan",
   UNANSWERED_CONVERSATION_SCAN: "unanswered-conversation-scan",
   CUSTOMER_HEALTH_SCAN: "customer-health-scan",
+  DATABASE_BACKUP: "database-backup",
 } as const;
 
 export interface FollowUpJobData {

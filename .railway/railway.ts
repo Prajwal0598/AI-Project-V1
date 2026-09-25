@@ -19,6 +19,10 @@ export default defineRailway(() => {
   // product images are saved to local disk (apps/api/src/modules/products/image-storage.ts) with no
   // cloud storage backend yet — without this, every redeploy wipes every merchant's uploaded photos
   const productUploads = volume("api-uploads", { sizeMB: 500, region: "sfo" });
+  // stopgap manual Postgres backups (jobs/database-backup.ts) until the account is on Railway Pro, which
+  // includes automatic backups/PITR natively — deliberately a SEPARATE volume from the Postgres service's
+  // own, so a problem with the live database volume doesn't also take out its own backups
+  const postgresBackups = volume("postgres-backups", { sizeMB: 2000, region: "sfo" });
 
   const api = service("api", {
     source: github(REPO, { branch: "main" }),
@@ -58,10 +62,16 @@ export default defineRailway(() => {
     build: "pnpm db:generate && pnpm --filter @ai-customer-agent/worker build",
     start: "pnpm --filter @ai-customer-agent/worker start",
     healthcheck: "/health",
+    volumeMounts: {
+      "/app/apps/worker/backups": postgresBackups,
+    },
     env: {
       DATABASE_URL: db.env.DATABASE_URL,
       REDIS_URL: cache.env.REDIS_URL,
       PORT: "4001",
+      BACKUP_DIR: "/app/apps/worker/backups",
+      BACKUP_RETENTION_DAYS: "14",
+      DATABASE_BACKUP_CRON: preserve(),
       OPENAI_API_KEY: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),
       SENTRY_DSN: preserve(),

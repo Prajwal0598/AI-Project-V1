@@ -15,6 +15,7 @@ import { processAbandonedCart } from "./jobs/abandoned-cart";
 import { processRepeatPurchaseScan } from "./jobs/repeat-purchase-scan";
 import { processUnansweredConversationScan } from "./jobs/unanswered-conversation-scan";
 import { processCustomerHealthScan } from "./jobs/customer-health-scan";
+import { processDatabaseBackup } from "./jobs/database-backup";
 import { initErrorReporting, captureException } from "./error-reporting";
 
 initErrorReporting();
@@ -140,8 +141,33 @@ customerHealthScanQueue.add("scan", {}, { repeat: { pattern: process.env.CUSTOME
   console.error("[customer-health-scan] failed to schedule recurring job", err);
 });
 
+const databaseBackupQueue = new Queue(QUEUES.DATABASE_BACKUP, { connection });
+const databaseBackupWorker = new Worker(QUEUES.DATABASE_BACKUP, processDatabaseBackup, {
+  connection,
+  concurrency: 1,
+});
+
+databaseBackupWorker.on("completed", (job, result) => {
+  console.log(`[database-backup] job ${job.id} completed`, result);
+});
+
+databaseBackupWorker.on("failed", (job, err) => {
+  console.error(`[database-backup] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.DATABASE_BACKUP, jobId: job?.id });
+});
+
+// stopgap until Railway Pro's automatic backups/PITR are enabled (see jobs/database-backup.ts) — runs once
+// daily at 03:00 server time (low-traffic window), plus once immediately on startup so a fresh deploy isn't
+// left with zero backups for up to 24h waiting for the first scheduled run
+databaseBackupQueue.add("backup", {}, { repeat: { pattern: process.env.DATABASE_BACKUP_CRON ?? "0 3 * * *" }, jobId: "database-backup-daily" }).catch((err) => {
+  console.error("[database-backup] failed to schedule recurring job", err);
+});
+databaseBackupQueue.add("backup-initial", {}).catch((err) => {
+  console.error("[database-backup] failed to schedule initial job", err);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}, ${QUEUES.DATABASE_BACKUP}`);
 
 // lightweight health endpoint so Railway/an external uptime monitor can confirm the worker process is actually
 // alive and every BullMQ worker is running, not just that the container hasn't crashed
@@ -149,6 +175,7 @@ const allWorkers: Record<string, Worker> = {
   [QUEUES.FOLLOW_UP]: followUpWorker, [QUEUES.ORDER_PROGRESS]: orderProgressWorker, [QUEUES.ORDER_EXPIRY]: orderExpiryWorker,
   [QUEUES.ABANDONED_CART]: abandonedCartWorker, [QUEUES.REPEAT_PURCHASE_SCAN]: repeatPurchaseScanWorker,
   [QUEUES.UNANSWERED_CONVERSATION_SCAN]: unansweredConversationScanWorker, [QUEUES.CUSTOMER_HEALTH_SCAN]: customerHealthScanWorker,
+  [QUEUES.DATABASE_BACKUP]: databaseBackupWorker,
 };
 const healthServer = createServer((req, res) => {
   if (req.url !== "/health") { res.writeHead(404); res.end(); return; }
@@ -173,6 +200,8 @@ process.on("SIGTERM", async () => {
   await unansweredConversationScanQueue.close();
   await customerHealthScanWorker.close();
   await customerHealthScanQueue.close();
+  await databaseBackupWorker.close();
+  await databaseBackupQueue.close();
   await connection.quit();
   process.exit(0);
 });
