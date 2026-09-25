@@ -22,6 +22,11 @@ const HIGH_PURCHASE_INTENT_THRESHOLD = 3;
 // ever invoked so there's no chance of a hallucinated "Payment successful!" reply based on unverified say-so.
 const PAYMENT_CLAIM_RE = /\b(i(?:'ve| have)(?: already)? paid|i paid|payment(?:'s| is)? (?:done|complete|sent|made)|i(?:'ve| have) (?:sent|made|completed) (?:the |my )?payment|sent (?:the |my )?payment)\b/i;
 
+// "Where is my order?" / "What's my order status?" / "When will my order arrive?" / "Show me my recent orders" —
+// must be answered from the REAL order record, never an invented shipping estimate. Checked deterministically
+// for the same reason as PAYMENT_CLAIM_RE above — a factual data question shouldn't depend on LLM compliance.
+const ORDER_STATUS_QUERY_RE = /\b(where(?:'s| is) my order|what'?s? my order status|order status|when will my order arrive|when (?:is|will) my order (?:arriving|coming|delivered)|track(?:ing)? my order|show (?:me )?my (?:recent )?orders?)\b/i;
+
 // structured-output schema forces the model to always fill these fields rather than
 // deciding whether to invoke a tool — models are far more reliable at schema-fill than tool-choice
 const REPLY_SCHEMA = {
@@ -132,6 +137,18 @@ export class AiService {
         : "Thanks for letting me know! I don't see a confirmation from our payment provider yet — I'll update you here automatically the moment it comes through, no need to resend anything.";
       await this.conversations.sendMessage(conversationId, businessId, reply);
       await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, orderId: conversation.activeOrderId, action: "REPLY_SKIPPED", result: "skipped", reason: "unverified payment claim answered from real order status, not the LLM" });
+      return { message: reply, orderCreated: null };
+    }
+
+    // deterministic order-status guard — same reasoning as the payment-claim guard above: shipping/tracking/
+    // status answers must be grounded in the real order record, never left to the LLM to (possibly) invent
+    if (latestInbound && ORDER_STATUS_QUERY_RE.test(latestInbound.content)) {
+      const recentOrders = await this.orders.getRecentForCustomer(conversation.customerId, businessId, 5);
+      const reply = recentOrders.length
+        ? `📦 Here's what I have on file:\n\n${recentOrders.map(formatOrderLine).join("\n")}`
+        : "📦 I don't see any orders on file for you yet — let me know if you'd like to place one!";
+      await this.conversations.sendMessage(conversationId, businessId, reply);
+      await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, action: "REPLY_SKIPPED", result: "skipped", reason: "order-status question answered from real order data, not the LLM" });
       return { message: reply, orderCreated: null };
     }
 

@@ -119,3 +119,69 @@ describe("AiService — payment-claim guard", () => {
     expect(prisma.order.findUnique).not.toHaveBeenCalled();
   });
 });
+
+describe("AiService — order-status guard", () => {
+  let prisma: any;
+  let conversations: { sendMessage: jest.Mock; sendButtons: jest.Mock };
+  let orders: { getRecentForCustomer: jest.Mock };
+  let ai: AiService;
+
+  const recentOrder = {
+    id: "order1abcdef", status: "PENDING_PAYMENT", fulfillmentStatus: "NOT_STARTED", total: 899, currency: "INR",
+    createdAt: new Date("2026-09-20"), items: [{ name: "Premium Cotton T-Shirt", quantity: 1 }],
+  };
+
+  const conversationFor = (messageText: string) => ({
+    id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+    activeOrderId: "order1abcdef", customer: { firstName: "Alex", lastName: null },
+    business: { name: "Test Biz", assistedBuyingEnabled: false, products: [] },
+    messages: [{ direction: "INBOUND", content: messageText, sentAt: new Date(), metadata: null }],
+  });
+
+  beforeEach(() => {
+    orders = { getRecentForCustomer: jest.fn().mockResolvedValue([recentOrder]) };
+    prisma = { conversation: { findFirst: jest.fn() }, aiActionLog: { create: jest.fn() } };
+    conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
+    ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+    );
+  });
+
+  it.each([
+    "Where is my order?",
+    "What's my order status?",
+    "When will my order arrive?",
+    "Show me my recent orders",
+  ])("'%s' is answered from the real order record, never an invented shipping estimate", async (messageText) => {
+    prisma.conversation.findFirst.mockResolvedValue(conversationFor(messageText));
+    const result = await ai.generateAndSendReply("conv1", "biz1");
+    expect(orders.getRecentForCustomer).toHaveBeenCalledWith("cust1", "biz1", 5);
+    const reply = conversations.sendMessage.mock.calls[0][2] as string;
+    expect(reply).toContain("PENDING PAYMENT"); // the real status, not a made-up shipping ETA
+    expect(reply).not.toMatch(/deliver(?:ed|y) (?:tomorrow|today|by|in \d)/i); // no invented delivery estimate
+    expect(result.message).toBe(reply);
+  });
+
+  it("is honest when there are no orders on file yet", async () => {
+    orders.getRecentForCustomer.mockResolvedValue([]);
+    prisma.conversation.findFirst.mockResolvedValue(conversationFor("Where is my order?"));
+    await ai.generateAndSendReply("conv1", "biz1");
+    const reply = conversations.sendMessage.mock.calls[0][2] as string;
+    expect(reply).toContain("don't see any orders");
+  });
+
+  it("is a no-op for unrelated messages (control case) — falls through past the guard", async () => {
+    prisma.conversation.findFirst.mockResolvedValue(conversationFor("I'd like to buy another shirt"));
+    // guard doesn't match -> falls through to the normal LLM turn (which itself also calls getRecentForCustomer
+    // for prompt context, so that alone isn't a useful signal) -> throws without an API key configured; what
+    // matters here is that the guard's OWN reply was never sent
+    await expect(ai.generateAndSendReply("conv1", "biz1")).rejects.toThrow();
+    expect(conversations.sendMessage).not.toHaveBeenCalled();
+  });
+});
