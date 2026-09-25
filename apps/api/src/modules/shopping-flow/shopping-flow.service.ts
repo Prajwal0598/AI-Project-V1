@@ -74,17 +74,22 @@ function wordToNumber(word: string): number | null {
   return Number.isFinite(digits) && digits > 0 ? digits : null;
 }
 
-// "Add two of them" / "Add another one" — a quantity referring to whichever product was last touched in the
-// cart, not a fresh product-name search (checked BEFORE the named-add pattern, which is more permissive)
-const ADD_QUANTITY_RE = /^\s*add\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\s*(?:more\s+)?(?:of\s+them|of\s+it|of\s+that)?\s*[.!?]*\s*$/i;
+// "Add two of them" / "Add another one" / "Add another" — a quantity referring to whichever product was last
+// touched in the cart, not a fresh product-name search (checked BEFORE the named-add pattern, which is more
+// permissive). "another" has no trailing digit of its own, so a following "one"/"more" is optional and implies +1.
+const ADD_QUANTITY_RE = /^\s*add\s+(?:(one|two|three|four|five|six|seven|eight|nine|ten|\d+)|another)\s*(?:one|more)?\s*(?:of\s+them|of\s+it|of\s+that)?[.!?]*\s*$/i;
 
 // "Add the Premium Cotton T-Shirt to my cart" / "Add the Rose Gold Watch too" — adds a NAMED product; the
 // negative lookahead keeps this from swallowing "add two of them"-style quantity references
 const ADD_NAMED_RE = /^\s*(?:add|buy|get)\s+(?:the\s+)?(?!(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\b)(.+?)\s*(?:to (?:my )?cart|too)?[.!?]*\s*$/i;
 
-// "Actually make that three" / "Make it 3" — an ABSOLUTE quantity SET for the last-touched cart item, not an
-// additive "add 3 more"
-const SET_QUANTITY_RE = /\bmake\s+(?:that|it)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/i;
+// "I want 2 Premium Cotton T-Shirts" / "I'd like 3 X" / "Can I get 2 X" / "I'll take 2 X" — a NAMED product
+// with an EXPLICIT quantity stated up front, distinct from ADD_NAMED_RE's implicit quantity of 1
+const ADD_NAMED_WITH_QTY_RE = /\b(?:i want|i'?d like|i would like|can i get|i'?ll take|i will take|get me)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(.+?)[.!?]*\s*$/i;
+
+// "Actually make that three" / "Make it 3" / "No, just 3" — an ABSOLUTE quantity SET for the last-touched
+// cart item, not an additive "add 3 more"
+const SET_QUANTITY_RE = /\b(?:make\s+(?:that|it)|just)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/i;
 
 // "Remove one" (decrement the last-touched item's quantity) vs "Remove the watch" (drop a NAMED product
 // entirely) — the captured text is inspected at runtime to tell the two apart
@@ -452,20 +457,24 @@ export class ShoppingFlowService {
     return true;
   }
 
-  /** "Add the Premium Cotton T-Shirt to my cart" (a NAMED product) / "Add two of them" (a quantity referring
-   * to whichever product was last added). Both actually mutate the real cart — never just a confirmation
-   * message with no underlying change. */
+  /** "Add the Premium Cotton T-Shirt to my cart" (a NAMED product, implicit qty 1) / "I want 2 Premium Cotton
+   * T-Shirts" (a NAMED product with an EXPLICIT quantity) / "Add two of them" / "Add another one" (a quantity
+   * referring to whichever product was last added). All actually mutate the real cart — never just a
+   * confirmation message with no underlying change. */
   private async tryCartAdd(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
     const qtyMatch = text.match(ADD_QUANTITY_RE);
     if (qtyMatch) {
       if (!context?.lastCartItem) return false;
-      const qty = wordToNumber(qtyMatch[1]) ?? 1;
+      const qty = qtyMatch[1] ? (wordToNumber(qtyMatch[1]) ?? 1) : 1; // group 1 is unset when "another" (not a number word) matched — that always means +1
       return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "add", qty);
     }
 
-    const namedMatch = text.match(ADD_NAMED_RE);
+    const namedWithQtyMatch = text.match(ADD_NAMED_WITH_QTY_RE);
+    const namedMatch = namedWithQtyMatch ?? text.match(ADD_NAMED_RE);
     if (!namedMatch) return false;
-    const { keywords } = parseSearchQuery(namedMatch[1]);
+    const nameText = namedWithQtyMatch ? namedWithQtyMatch[2] : namedMatch[1];
+    const explicitQty = namedWithQtyMatch ? wordToNumber(namedWithQtyMatch[1]) ?? 1 : 1;
+    const { keywords } = parseSearchQuery(nameText);
     if (!keywords.length) return false;
 
     const candidates = await this.prisma.product.findMany({
@@ -477,11 +486,11 @@ export class ShoppingFlowService {
     const product = this.bestKeywordMatch(candidates, keywords);
     if (!product.variants[0]) return false;
 
-    return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", 1);
+    return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", explicitQty);
   }
 
-  /** "Actually make that three" — an ABSOLUTE quantity SET for the last-touched cart item, not an additive
-   * "add 3 more" (which would silently double-count against whatever the customer already added). */
+  /** "Actually make that three" / "No, just 3" — an ABSOLUTE quantity SET for the last-touched cart item, not
+   * an additive "add 3 more" (which would silently double-count against whatever the customer already added). */
   private async trySetCartQuantity(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
     const match = text.match(SET_QUANTITY_RE);
     if (!match || !context?.lastCartItem) return false;

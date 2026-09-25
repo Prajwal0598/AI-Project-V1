@@ -765,4 +765,45 @@ describe("ShoppingFlowService — state machine", () => {
       expect(finalListing).toContain("1,798"); // 899*2 only
     });
   });
+
+  describe("Test — quantity understanding: increment vs replacement", () => {
+    const tshirtCandidate = { id: "p1", name: "Premium Cotton T-Shirt", description: null, brand: null, category: { name: "Fashion" }, variants: [{ id: "v1", price: 899, currency: "INR", inventory: 20 }] };
+    const tshirtLine = (quantity: number) => ({ variantId: "v1", quantity, variant: { price: 899, currency: "INR", product: { id: "p1", name: "Premium Cotton T-Shirt" } } });
+
+    it("'I want 2 X' -> 'Actually, make it 5' -> 'No, just 3' -> 'Add another one' — correctly distinguishes an explicit quantity, two absolute replacements, and an increment", async () => {
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] });
+      cart.totals.mockImplementation((c: { items: { variant: { price: number; currency: string } }[] }) => ({
+        subtotal: c.items.reduce((sum, i: any) => sum + i.variant.price * i.quantity, 0),
+        currency: c.items[0]?.variant.currency ?? "INR",
+      }));
+
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "I want 2 Premium Cotton T-Shirts" -> a NAMED product with an EXPLICIT quantity, actually added (not just searched)
+      prisma.product.findMany.mockResolvedValueOnce([tshirtCandidate]);
+      cart.addItem.mockResolvedValueOnce({ items: [tshirtLine(2)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "I want 2 Premium Cotton T-Shirts");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 2);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 2 in your cart"), expect.any(Array));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 2. "Actually, make it 5" -> an ABSOLUTE replacement to 5, via updateItemQuantity — NOT additive (2+5=7)
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [tshirtLine(5)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Actually, make it 5");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 5);
+      expect(cart.addItem).toHaveBeenCalledTimes(1); // no incorrect additive call this turn
+
+      // 3. "No, just 3" -> a DIFFERENT trigger phrase for the same absolute-replacement semantics (5 -> 3)
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [tshirtLine(3)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "No, just 3");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 3);
+
+      // 4. "Add another one" -> back to ADDITIVE: +1 more (3 -> 4), not a third replacement
+      cart.addItem.mockResolvedValueOnce({ items: [tshirtLine(4)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Add another one");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 1);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 4 in your cart"), expect.any(Array));
+    });
+  });
 });
