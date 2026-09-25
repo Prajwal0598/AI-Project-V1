@@ -1,3 +1,4 @@
+import { BadRequestException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { parseSearchQuery, fmtMoney, formatVariantLabel, ShoppingFlowService } from "./shopping-flow.service";
 import type { PrismaService } from "../../database/prisma.service";
@@ -804,6 +805,45 @@ describe("ShoppingFlowService — state machine", () => {
       await flow.handleFreeText("conv1", "biz1", conversation, "Add another one");
       expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 1);
       expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 4 in your cart"), expect.any(Array));
+    });
+  });
+
+  describe("Test — inventory awareness: rejects/adjusts quantities against real stock", () => {
+    const dressCandidate = { id: "p9", name: "Black Party Dress", description: null, brand: null, category: { name: "Fashion" }, variants: [{ id: "v9", price: 2999, currency: "INR", inventory: 8 }] };
+    const dressLine = (quantity: number) => ({ variantId: "v9", quantity, variant: { price: 2999, currency: "INR", product: { id: "p9", name: "Black Party Dress" } } });
+
+    it("'I want 20 X' (only 8 in stock) -> 'Okay, give me 5' -> 'Can I get 10 instead?' — over-requests are rejected, not silently capped or ignored, and the rejected product is still remembered", async () => {
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] });
+      cart.totals.mockImplementation((c: { items: { variant: { price: number; currency: string } }[] }) => ({
+        subtotal: c.items.reduce((sum, i: any) => sum + i.variant.price * i.quantity, 0),
+        currency: c.items[0]?.variant.currency ?? "INR",
+      }));
+
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "I want 20 Black Party Dresses" -> rejected (only 8 in stock), NOT silently added
+      prisma.product.findMany.mockResolvedValueOnce([dressCandidate]);
+      cart.addItem.mockRejectedValueOnce(new BadRequestException("Only 8 left in stock."));
+      await flow.handleFreeText("conv1", "biz1", conversation, "I want 20 Black Party Dresses");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v9", 20);
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", "Only 8 left in stock.");
+      expect(conversations.sendButtons).not.toHaveBeenCalled(); // no false "added to cart" confirmation
+      // even a rejected attempt must still remember which product it was about, for the follow-up correction below
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 2. "Okay, give me 5" -> within stock, actually applied (5 <= 8)
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [dressLine(5)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Okay, give me 5");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v9", 5);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 5 in your cart"), expect.any(Array));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 3. "Can I get 10 instead?" -> rejected again (still only 8 in stock), not silently adjusted to the cap
+      cart.updateItemQuantity.mockRejectedValueOnce(new BadRequestException("Only 8 left in stock."));
+      await flow.handleFreeText("conv1", "biz1", conversation, "Can I get 10 instead?");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v9", 10);
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", "Only 8 left in stock.");
     });
   });
 });

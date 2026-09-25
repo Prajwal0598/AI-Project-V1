@@ -27,7 +27,7 @@ const SEARCH_STOPWORDS = new Set([
   "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good",
   "what", "which", "products", "product", "items", "item",
   "on", "in", "would", "who", "someone", "but", "not", "too", "going", "recommend", "attending", "suitable", "loves",
-  "preferably", "prefer", "ideally",
+  "preferably", "prefer", "ideally", "instead",
 ]);
 
 // messages asking what the store carries at all, rather than searching for something specific — must be
@@ -87,9 +87,11 @@ const ADD_NAMED_RE = /^\s*(?:add|buy|get)\s+(?:the\s+)?(?!(?:one|two|three|four|
 // with an EXPLICIT quantity stated up front, distinct from ADD_NAMED_RE's implicit quantity of 1
 const ADD_NAMED_WITH_QTY_RE = /\b(?:i want|i'?d like|i would like|can i get|i'?ll take|i will take|get me)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(.+?)[.!?]*\s*$/i;
 
-// "Actually make that three" / "Make it 3" / "No, just 3" — an ABSOLUTE quantity SET for the last-touched
-// cart item, not an additive "add 3 more"
-const SET_QUANTITY_RE = /\b(?:make\s+(?:that|it)|just)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/i;
+// "Actually make that three" / "Make it 3" / "No, just 3" / "Okay, give me 5" / "Can I get 10 instead?" — an
+// ABSOLUTE quantity SET for the last-touched cart item, not an additive "add 3 more". The number can come
+// before OR after the trigger word ("give me 5" vs "10 instead"), so the two orderings are separate
+// alternatives with their own capture group.
+const SET_QUANTITY_RE = /\b(?:make\s+(?:that|it)|just|give me)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+instead\b/i;
 
 // "Remove one" (decrement the last-touched item's quantity) vs "Remove the watch" (drop a NAMED product
 // entirely) — the captured text is inspected at runtime to tell the two apart
@@ -450,6 +452,10 @@ export class ShoppingFlowService {
         [{ id: "nav_viewcart", title: "View Cart" }, { id: "cart_checkout", title: "Checkout" }]);
     } catch (error) {
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not update your cart.");
+      // even though this attempt was rejected (e.g. a stock-limit error), still remember which product it was
+      // about — otherwise a follow-up quantity-only correction ("okay, give me 5") has nothing to apply to
+      const rejectedContext: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: [], lastCartItem: item };
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeProductId: item.productId, assistedBuyingContext: rejectedContext as unknown as Prisma.InputJsonValue } });
       return true;
     }
     const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: [], lastCartItem: item };
@@ -489,12 +495,13 @@ export class ShoppingFlowService {
     return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", explicitQty);
   }
 
-  /** "Actually make that three" / "No, just 3" — an ABSOLUTE quantity SET for the last-touched cart item, not
-   * an additive "add 3 more" (which would silently double-count against whatever the customer already added). */
+  /** "Actually make that three" / "No, just 3" / "Okay, give me 5" / "Can I get 10 instead?" — an ABSOLUTE
+   * quantity SET for the last-touched cart item, not an additive "add 3 more" (which would silently
+   * double-count against whatever the customer already added). */
   private async trySetCartQuantity(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
     const match = text.match(SET_QUANTITY_RE);
     if (!match || !context?.lastCartItem) return false;
-    const qty = wordToNumber(match[1]);
+    const qty = wordToNumber(match[1] ?? match[2]);
     if (qty === null) return false;
     return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", qty);
   }
