@@ -123,7 +123,7 @@ describe("ShoppingFlowService — state machine", () => {
       variant: { findFirst: jest.fn() },
     };
     conversations = { sendButtons: jest.fn(), sendList: jest.fn(), sendMessage: jest.fn(), sendImage: jest.fn() };
-    cart = { getOrCreateActive: jest.fn(), addItem: jest.fn(), totals: jest.fn() };
+    cart = { getOrCreateActive: jest.fn(), findActiveForConversation: jest.fn(), addItem: jest.fn(), updateItemQuantity: jest.fn(), totals: jest.fn() };
     orders = {};
     signals = { record: jest.fn() };
     flow = new ShoppingFlowService(
@@ -682,6 +682,87 @@ describe("ShoppingFlowService — state machine", () => {
       expect(giftReply).toContain("don't have enough detail");
       expect(giftReply).toContain("Rose Gold Watch");
       expect(giftReply).toContain("Minimal Silver Watch");
+    });
+  });
+
+  describe("Test 7 — cart intelligence: free text must actually mutate the real cart", () => {
+    const tshirtCandidate = { id: "p1", name: "Premium Cotton T-Shirt", description: null, brand: null, category: { name: "Fashion" }, variants: [{ id: "v1", price: 899, currency: "INR", inventory: 20 }] };
+    const watchCandidate = { id: "p2", name: "Rose Gold Watch", description: null, brand: null, category: { name: "Accessories" }, variants: [{ id: "v2", price: 4999, currency: "INR", inventory: 10 }] };
+    const tshirtLine = (quantity: number) => ({ variantId: "v1", quantity, variant: { price: 899, currency: "INR", product: { id: "p1", name: "Premium Cotton T-Shirt" } } });
+    const watchLine = (quantity: number) => ({ variantId: "v2", quantity, variant: { price: 4999, currency: "INR", product: { id: "p2", name: "Rose Gold Watch" } } });
+
+    it("'Add the Premium Cotton T-Shirt' -> 'Add two of them' -> 'make that three' -> 'Remove one' -> 'Add the Rose Gold Watch too' -> 'What's in my cart?' -> 'How much is everything?' -> 'Remove the watch' -> 'Show me my cart again'", async () => {
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] }); // safe blanket default — only .id matters except where overridden below for showCart() calls
+      cart.totals.mockImplementation((c: { items: { variant: { price: number; currency: string } }[] }) => ({
+        subtotal: c.items.reduce((sum, i: any) => sum + i.variant.price * i.quantity, 0),
+        currency: c.items[0]?.variant.currency ?? "INR",
+      }));
+
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "Add the Premium Cotton T-Shirt to my cart" -> resolves the NAMED product and actually adds it (qty 1)
+      prisma.product.findMany.mockResolvedValueOnce([tshirtCandidate]);
+      cart.addItem.mockResolvedValueOnce({ items: [tshirtLine(1)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Add the Premium Cotton T-Shirt to my cart");
+      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 1);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 1 in your cart"), expect.any(Array));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 2. "Add two of them" -> ADDITIVE: increments the same variant by 2 (1 -> 3), resolved via the pronoun, not a new search
+      cart.addItem.mockResolvedValueOnce({ items: [tshirtLine(3)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Add two of them");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 2);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("now 3 in your cart"), expect.any(Array));
+
+      // 3. "Actually make that three" -> an ABSOLUTE set to 3, via updateItemQuantity — NOT cart.addItem(3), which would wrongly result in 6
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [tshirtLine(3)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Actually make that three");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 3);
+      expect(cart.addItem).toHaveBeenCalledTimes(2); // no additional (wrong) addItem call for this turn
+
+      // 4. "Remove one" -> decrements the last-touched item's quantity by 1 (3 -> 2), via an absolute set, not cart.addItem(-1)
+      cart.findActiveForConversation.mockResolvedValueOnce({ items: [tshirtLine(3)] });
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [tshirtLine(2)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Remove one");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 2);
+
+      // 5. "Add the Rose Gold Watch too" -> a SECOND, different product added alongside the t-shirt
+      prisma.product.findMany.mockResolvedValueOnce([watchCandidate]);
+      cart.addItem.mockResolvedValueOnce({ items: [tshirtLine(2), watchLine(1)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Add the Rose Gold Watch too");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v2", 1);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Rose Gold Watch* — now 1 in your cart"), expect.any(Array));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 6. "What's in my cart?" -> the REAL current cart contents (both items), not a fabricated summary
+      cart.getOrCreateActive.mockResolvedValueOnce({ id: "cart1", items: [tshirtLine(2), watchLine(1)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "What's in my cart?");
+      const cartListing = conversations.sendMessage.mock.calls.at(-1)![2] as string;
+      expect(cartListing).toContain("Premium Cotton T-Shirt");
+      expect(cartListing).toContain("Rose Gold Watch");
+      expect(cartListing).toContain("6,797"); // 899*2 + 4999*1
+
+      // 7. "How much is everything?" -> the same real cart total, computed, not stated from memory
+      cart.getOrCreateActive.mockResolvedValueOnce({ id: "cart1", items: [tshirtLine(2), watchLine(1)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "How much is everything?");
+      expect(conversations.sendMessage.mock.calls.at(-1)![2]).toContain("6,797");
+
+      // 8. "Remove the watch" -> drops that NAMED product entirely (quantity -> 0), not a decrement by 1
+      cart.findActiveForConversation.mockResolvedValueOnce({ items: [tshirtLine(2), watchLine(1)] });
+      cart.updateItemQuantity.mockResolvedValueOnce({ items: [tshirtLine(2)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Remove the watch");
+      expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v2", 0);
+      expect(conversations.sendButtons).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Removed *Rose Gold Watch*"), expect.any(Array));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 9. "Show me my cart again" -> reflects the watch's removal — only the t-shirt remains
+      cart.getOrCreateActive.mockResolvedValueOnce({ id: "cart1", items: [tshirtLine(2)] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "Show me my cart again");
+      const finalListing = conversations.sendMessage.mock.calls.at(-1)![2] as string;
+      expect(finalListing).toContain("Premium Cotton T-Shirt");
+      expect(finalListing).not.toContain("Rose Gold Watch");
+      expect(finalListing).toContain("1,798"); // 899*2 only
     });
   });
 });

@@ -65,6 +65,35 @@ const SPLIT_COMPARISON_SEGMENTS_RE = /\s+(?:and|vs\.?|versus)\s+/i;
 const COMPARISON_FOLLOWUP_RE = /^\s*which\b.*\b(cheaper|better|nicer|suitable|affordable|gift|choice|value)\b/i;
 const FOLLOWUP_CHEAPER_RE = /\b(cheap|afford|value|lower price)\w*\b/i;
 
+// number words used throughout cart commands ("add TWO of them", "make that THREE", "remove ONE")
+const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function wordToNumber(word: string): number | null {
+  const lower = word.toLowerCase();
+  if (NUMBER_WORDS[lower] !== undefined) return NUMBER_WORDS[lower];
+  const digits = Number(lower);
+  return Number.isFinite(digits) && digits > 0 ? digits : null;
+}
+
+// "Add two of them" / "Add another one" — a quantity referring to whichever product was last touched in the
+// cart, not a fresh product-name search (checked BEFORE the named-add pattern, which is more permissive)
+const ADD_QUANTITY_RE = /^\s*add\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\s*(?:more\s+)?(?:of\s+them|of\s+it|of\s+that)?\s*[.!?]*\s*$/i;
+
+// "Add the Premium Cotton T-Shirt to my cart" / "Add the Rose Gold Watch too" — adds a NAMED product; the
+// negative lookahead keeps this from swallowing "add two of them"-style quantity references
+const ADD_NAMED_RE = /^\s*(?:add|buy|get)\s+(?:the\s+)?(?!(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\b)(.+?)\s*(?:to (?:my )?cart|too)?[.!?]*\s*$/i;
+
+// "Actually make that three" / "Make it 3" — an ABSOLUTE quantity SET for the last-touched cart item, not an
+// additive "add 3 more"
+const SET_QUANTITY_RE = /\bmake\s+(?:that|it)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/i;
+
+// "Remove one" (decrement the last-touched item's quantity) vs "Remove the watch" (drop a NAMED product
+// entirely) — the captured text is inspected at runtime to tell the two apart
+const REMOVE_RE = /^\s*remove\s+(.+?)\s*(?:from (?:my )?cart)?[.!?]*\s*$/i;
+
+// "What's in my cart?" / "Show me my cart again" / "How much is everything?" — view the cart (its own listing
+// already states the total, so both phrasings are handled the same way)
+const VIEW_CART_RE = /\b(what'?s? in my cart|show (?:me )?my cart|view (?:my )?cart|see my cart|how much (?:is|for) everything|what'?s? my (?:cart )?total|total (?:cost|price))\b/i;
+
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
 // accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
@@ -76,6 +105,7 @@ interface ShoppingSearchContext {
   filters: SearchFilters;
   lastResults: { productId: string; variantId: string; name: string }[];
   comparedProductIds?: string[];
+  lastCartItem?: { productId: string; variantId: string; name: string };
 }
 
 /** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
@@ -397,11 +427,121 @@ export class ShoppingFlowService {
     return false;
   }
 
+  /** Mutates the cart for a resolved product/variant, sends a confirmation grounded in the ACTUAL resulting
+   * cart state, and remembers it as the "last cart item touched" for pronoun follow-ups ("add two of them",
+   * "actually make that three", "remove one") — all without changing shoppingState away from a free-text-
+   * routable state, so those follow-ups keep reaching search() on subsequent turns. */
+  private async mutateCartItem(conversationId: string, businessId: string, customerId: string, item: { productId: string; variantId: string; name: string }, mode: "add" | "set", amount: number): Promise<boolean> {
+    const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
+    try {
+      const updated = mode === "add"
+        ? await this.cart.addItem(activeCart.id, businessId, item.variantId, amount)
+        : await this.cart.updateItemQuantity(activeCart.id, businessId, item.variantId, amount);
+      const { subtotal, currency } = this.cart.totals(updated);
+      const newQuantity = updated.items.find((i) => i.variantId === item.variantId)?.quantity ?? 0;
+      await this.conversations.sendButtons(conversationId, businessId, newQuantity > 0
+        ? `✅ *${item.name}* — now ${newQuantity} in your cart.\n🛒 Cart total: *${fmtMoney(subtotal, currency)}*`
+        : `✅ Removed *${item.name}* from your cart.\n🛒 Cart total: *${fmtMoney(subtotal, currency)}*`,
+        [{ id: "nav_viewcart", title: "View Cart" }, { id: "cart_checkout", title: "Checkout" }]);
+    } catch (error) {
+      await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not update your cart.");
+      return true;
+    }
+    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: [], lastCartItem: item };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeProductId: item.productId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
+  /** "Add the Premium Cotton T-Shirt to my cart" (a NAMED product) / "Add two of them" (a quantity referring
+   * to whichever product was last added). Both actually mutate the real cart — never just a confirmation
+   * message with no underlying change. */
+  private async tryCartAdd(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
+    const qtyMatch = text.match(ADD_QUANTITY_RE);
+    if (qtyMatch) {
+      if (!context?.lastCartItem) return false;
+      const qty = wordToNumber(qtyMatch[1]) ?? 1;
+      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "add", qty);
+    }
+
+    const namedMatch = text.match(ADD_NAMED_RE);
+    if (!namedMatch) return false;
+    const { keywords } = parseSearchQuery(namedMatch[1]);
+    if (!keywords.length) return false;
+
+    const candidates = await this.prisma.product.findMany({
+      where: { businessId, status: "PUBLISHED", AND: keywordAndClauses(keywords) },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 }, category: true },
+      take: 5,
+    });
+    if (!candidates.length) return false;
+    const product = this.bestKeywordMatch(candidates, keywords);
+    if (!product.variants[0]) return false;
+
+    return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", 1);
+  }
+
+  /** "Actually make that three" — an ABSOLUTE quantity SET for the last-touched cart item, not an additive
+   * "add 3 more" (which would silently double-count against whatever the customer already added). */
+  private async trySetCartQuantity(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
+    const match = text.match(SET_QUANTITY_RE);
+    if (!match || !context?.lastCartItem) return false;
+    const qty = wordToNumber(match[1]);
+    if (qty === null) return false;
+    return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", qty);
+  }
+
+  /** "Remove one" (decrements the last-touched cart item's quantity) vs "Remove the watch" (drops a NAMED
+   * product from the cart entirely, regardless of its quantity) — the captured text after "remove" decides
+   * which behaviour applies. */
+  private async tryRemoveFromCart(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
+    const match = text.match(REMOVE_RE);
+    if (!match) return false;
+    const captured = match[1].replace(/^\s*the\s+/i, "").trim();
+
+    const activeCart = await this.cart.findActiveForConversation(conversationId, businessId);
+    if (!activeCart?.items.length) {
+      await this.conversations.sendMessage(conversationId, businessId, "🛒 Your cart is already empty.");
+      return true;
+    }
+
+    const asNumber = wordToNumber(captured);
+    if (asNumber !== null) {
+      if (!context?.lastCartItem) return false;
+      const item = activeCart.items.find((i) => i.variantId === context.lastCartItem!.variantId);
+      if (!item) return false;
+      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", Math.max(0, item.quantity - asNumber));
+    }
+
+    // named removal — find the matching cart line by product name rather than requiring the exact string
+    const lower = captured.toLowerCase();
+    const item = activeCart.items.find((i) => i.variant.product.name.toLowerCase().includes(lower));
+    if (!item) {
+      await this.conversations.sendMessage(conversationId, businessId, `I couldn't find "${captured}" in your cart.`);
+      return true;
+    }
+    return this.mutateCartItem(conversationId, businessId, customerId, { productId: item.variant.product.id, variantId: item.variantId, name: item.variant.product.name }, "set", 0);
+  }
+
+  /** "What's in my cart?" / "Show me my cart again" / "How much is everything?" — the existing cart summary
+   * already states the grand total, so all three phrasings are answered the same way. */
+  private async tryViewCart(conversationId: string, businessId: string, customerId: string, text: string): Promise<boolean> {
+    if (!VIEW_CART_RE.test(text.toLowerCase())) return false;
+    await this.showCart(conversationId, businessId, customerId);
+    return true;
+  }
+
   private async search(conversationId: string, businessId: string, customerId: string, text: string, existingContext: ShoppingSearchContext | null, activeProductId: string | null = null) {
     // an ordinal reference to a just-shown result ("show me the first one") takes priority over a fresh search —
     // otherwise "first"/"one" get treated as nonsensical literal search keywords and find nothing
     const referenced = this.resolveOrdinalReference(text, existingContext);
     if (referenced) return this.showProductDetail(conversationId, businessId, referenced.productId, customerId);
+
+    // cart commands must actually mutate the real cart, not just talk about it — checked early since they're
+    // fairly distinctive phrasings ("add"/"remove"/"cart"/"everything") unlikely to collide with anything else
+    if (await this.tryCartAdd(conversationId, businessId, customerId, text, existingContext)) return;
+    if (await this.trySetCartQuantity(conversationId, businessId, customerId, text, existingContext)) return;
+    if (await this.tryRemoveFromCart(conversationId, businessId, customerId, text, existingContext)) return;
+    if (await this.tryViewCart(conversationId, businessId, customerId, text)) return;
 
     if (await this.tryComparisonFollowUp(conversationId, businessId, text, existingContext)) return;
     if (await this.tryRecommendationPick(conversationId, businessId, customerId, text, existingContext, activeProductId)) return;
