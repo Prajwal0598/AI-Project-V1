@@ -17,6 +17,11 @@ const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.
 // 3+ interactions with the same product inside the signal-lookback window escalates a plain enquiry to HIGH_PURCHASE_INTENT
 const HIGH_PURCHASE_INTENT_THRESHOLD = 3;
 
+// "I have paid" / "payment done" / "I've sent the payment" — a customer CLAIM that must never be taken at face
+// value; only the real Razorpay webhook can mark an order PAID. Checked deterministically before the LLM is
+// ever invoked so there's no chance of a hallucinated "Payment successful!" reply based on unverified say-so.
+const PAYMENT_CLAIM_RE = /\b(i(?:'ve| have)(?: already)? paid|i paid|payment(?:'s| is)? (?:done|complete|sent|made)|i(?:'ve| have) (?:sent|made|completed) (?:the |my )?payment|sent (?:the |my )?payment)\b/i;
+
 // structured-output schema forces the model to always fill these fields rather than
 // deciding whether to invoke a tool — models are far more reliable at schema-fill than tool-choice
 const REPLY_SCHEMA = {
@@ -116,11 +121,24 @@ export class AiService {
       return { message: null, orderCreated: null };
     }
 
+    const latestInbound = conversation.messages.find((m) => m.direction === MessageDirection.INBOUND);
+
+    // deterministic payment-claim guard — takes priority over everything else below, including Assisted Buying
+    // and the LLM turn, so an unverified "I have paid" can NEVER be answered with a false confirmation
+    if (latestInbound && conversation.activeOrderId && PAYMENT_CLAIM_RE.test(latestInbound.content)) {
+      const order = await this.prisma.order.findUnique({ where: { id: conversation.activeOrderId } });
+      const reply = order && (order.status === OrderStatus.PAID || order.status === OrderStatus.FULFILLED)
+        ? `🎉 Yes — we've received your payment and your order (${order.currency} ${order.total}) is confirmed!`
+        : "Thanks for letting me know! I don't see a confirmation from our payment provider yet — I'll update you here automatically the moment it comes through, no need to resend anything.";
+      await this.conversations.sendMessage(conversationId, businessId, reply);
+      await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, orderId: conversation.activeOrderId, action: "REPLY_SKIPPED", result: "skipped", reason: "unverified payment claim answered from real order status, not the LLM" });
+      return { message: reply, orderCreated: null };
+    }
+
     // Assisted Buying (opt-in): natural-language product discovery/recommendation, deterministic retrieval —
     // handled entirely outside the schema-driven turn below when it recognizes a shopping query or a reference
     // to a just-shown recommendation ("add the first one"); falls through to the normal AI reply otherwise
     if (conversation.business.assistedBuyingEnabled) {
-      const latestInbound = conversation.messages.find((m) => m.direction === MessageDirection.INBOUND);
       if (latestInbound) {
         const handled = await this.assistedBuying.handle(conversationId, businessId, conversation.customerId, latestInbound.content);
         if (handled) return { message: null, orderCreated: null };
