@@ -5,6 +5,7 @@ import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
 import { ShoppingFlowService } from "../shopping-flow/shopping-flow.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
+import { captureException } from "../../common/error-reporting.helper";
 import { parseWhatsAppWebhook, ParsedWhatsAppMessage } from "./whatsapp-parser";
 
 // simple greetings/explicit menu requests trigger the deterministic shopping menu instead of the AI —
@@ -29,6 +30,7 @@ export class WhatsAppWebhookService {
         await this.processMessage(msg);
       } catch (err) {
         this.logger.error(`Failed to process WhatsApp message ${msg.waMessageId}`, err);
+        captureException(err, { waMessageId: msg.waMessageId, phoneNumberId: msg.phoneNumberId });
       }
     }
   }
@@ -148,6 +150,7 @@ export class WhatsAppWebhookService {
       await this.ai.generateAndSendReply(conversation.id, business.id);
     } catch (err) {
       this.logger.error(`Automatic AI reply failed for conversation ${conversation.id}`, err);
+      captureException(err, { conversationId: conversation.id, businessId: business.id, channel: "whatsapp" });
     }
   }
 }

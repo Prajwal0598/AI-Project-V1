@@ -49,6 +49,7 @@ export default defineRailway(() => {
       // reference between api<->web at plan time) — see NEXT_PUBLIC_API_URL below on `web`
       WEB_ORIGIN: preserve(),
       API_PUBLIC_URL: preserve(),
+      SENTRY_DSN: preserve(),
     },
   });
 
@@ -56,11 +57,14 @@ export default defineRailway(() => {
     source: github(REPO, { branch: "main" }),
     build: "pnpm db:generate && pnpm --filter @ai-customer-agent/worker build",
     start: "pnpm --filter @ai-customer-agent/worker start",
+    healthcheck: "/health",
     env: {
       DATABASE_URL: db.env.DATABASE_URL,
       REDIS_URL: cache.env.REDIS_URL,
+      PORT: "4001",
       OPENAI_API_KEY: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),
+      SENTRY_DSN: preserve(),
     },
   });
 
@@ -76,6 +80,7 @@ export default defineRailway(() => {
       // SDK), but only meaningful once Meta App Review/Business Verification is complete (see docs/app-overview.md)
       NEXT_PUBLIC_META_APP_ID: preserve(),
       NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID: preserve(),
+      NEXT_PUBLIC_SENTRY_DSN: preserve(),
     },
   });
 

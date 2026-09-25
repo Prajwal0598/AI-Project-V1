@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { Business, Order } from "@prisma/client";
 import { decryptSecret } from "../../common/crypto.helper";
 import { verifyRazorpaySignature } from "../../common/razorpay-signature.helper";
+import { captureException } from "../../common/error-reporting.helper";
 
 interface RazorpayCredentials {
   keyId: string;
@@ -88,6 +89,7 @@ export class RazorpayService {
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         this.logger.error(`Razorpay payment link creation failed for order ${order.id}: ${JSON.stringify(errBody)}`);
+        captureException(new Error("Razorpay payment link creation failed"), { orderId: order.id, businessId: business.id, errBody });
         return null;
       }
 
@@ -95,6 +97,7 @@ export class RazorpayService {
       return { id: data.id, shortUrl: data.short_url };
     } catch (err) {
       this.logger.error(`Razorpay payment link request failed for order ${order.id}`, err instanceof Error ? err.stack : String(err));
+      captureException(err, { orderId: order.id, businessId: business.id });
       return null;
     }
   }

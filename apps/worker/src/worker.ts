@@ -6,6 +6,7 @@ for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../.
 }
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
+import { createServer } from "node:http";
 import { QUEUES, OrderProgressQueueJob } from "./queues";
 import { processFollowUp } from "./jobs/follow-up";
 import { makeOrderProgressProcessor } from "./jobs/order-progress";
@@ -14,6 +15,9 @@ import { processAbandonedCart } from "./jobs/abandoned-cart";
 import { processRepeatPurchaseScan } from "./jobs/repeat-purchase-scan";
 import { processUnansweredConversationScan } from "./jobs/unanswered-conversation-scan";
 import { processCustomerHealthScan } from "./jobs/customer-health-scan";
+import { initErrorReporting, captureException } from "./error-reporting";
+
+initErrorReporting();
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -30,6 +34,7 @@ followUpWorker.on("completed", (job, result) => {
 
 followUpWorker.on("failed", (job, err) => {
   console.error(`[follow-up] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.FOLLOW_UP, jobId: job?.id });
 });
 
 const orderProgressQueue = new Queue<OrderProgressQueueJob>(QUEUES.ORDER_PROGRESS, { connection });
@@ -44,6 +49,7 @@ orderProgressWorker.on("completed", (job, result) => {
 
 orderProgressWorker.on("failed", (job, err) => {
   console.error(`[order-progress] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.ORDER_PROGRESS, jobId: job?.id });
 });
 
 const orderExpiryWorker = new Worker(QUEUES.ORDER_EXPIRY, processOrderExpiry, {
@@ -57,6 +63,7 @@ orderExpiryWorker.on("completed", (job, result) => {
 
 orderExpiryWorker.on("failed", (job, err) => {
   console.error(`[order-expiry] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.ORDER_EXPIRY, jobId: job?.id });
 });
 
 const abandonedCartWorker = new Worker(QUEUES.ABANDONED_CART, processAbandonedCart, {
@@ -70,6 +77,7 @@ abandonedCartWorker.on("completed", (job, result) => {
 
 abandonedCartWorker.on("failed", (job, err) => {
   console.error(`[abandoned-cart] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.ABANDONED_CART, jobId: job?.id });
 });
 
 const repeatPurchaseScanQueue = new Queue(QUEUES.REPEAT_PURCHASE_SCAN, { connection });
@@ -84,6 +92,7 @@ repeatPurchaseScanWorker.on("completed", (job, result) => {
 
 repeatPurchaseScanWorker.on("failed", (job, err) => {
   console.error(`[repeat-purchase-scan] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.REPEAT_PURCHASE_SCAN, jobId: job?.id });
 });
 
 // runs once daily at 09:00 server time — scans every opted-in business for customers statistically due to reorder
@@ -103,6 +112,7 @@ unansweredConversationScanWorker.on("completed", (job, result) => {
 
 unansweredConversationScanWorker.on("failed", (job, err) => {
   console.error(`[unanswered-conversation-scan] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.UNANSWERED_CONVERSATION_SCAN, jobId: job?.id });
 });
 
 // runs every 30 minutes — escalated conversations shouldn't sit unanswered for long
@@ -122,6 +132,7 @@ customerHealthScanWorker.on("completed", (job, result) => {
 
 customerHealthScanWorker.on("failed", (job, err) => {
   console.error(`[customer-health-scan] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.CUSTOMER_HEALTH_SCAN, jobId: job?.id });
 });
 
 // runs once daily at 10:00 server time — win-back and high-value check-in nudges
@@ -132,7 +143,25 @@ customerHealthScanQueue.add("scan", {}, { repeat: { pattern: process.env.CUSTOME
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
 console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}`);
 
+// lightweight health endpoint so Railway/an external uptime monitor can confirm the worker process is actually
+// alive and every BullMQ worker is running, not just that the container hasn't crashed
+const allWorkers: Record<string, Worker> = {
+  [QUEUES.FOLLOW_UP]: followUpWorker, [QUEUES.ORDER_PROGRESS]: orderProgressWorker, [QUEUES.ORDER_EXPIRY]: orderExpiryWorker,
+  [QUEUES.ABANDONED_CART]: abandonedCartWorker, [QUEUES.REPEAT_PURCHASE_SCAN]: repeatPurchaseScanWorker,
+  [QUEUES.UNANSWERED_CONVERSATION_SCAN]: unansweredConversationScanWorker, [QUEUES.CUSTOMER_HEALTH_SCAN]: customerHealthScanWorker,
+};
+const healthServer = createServer((req, res) => {
+  if (req.url !== "/health") { res.writeHead(404); res.end(); return; }
+  const workers = Object.fromEntries(Object.entries(allWorkers).map(([name, w]) => [name, w.isRunning()]));
+  const healthy = Object.values(workers).every(Boolean);
+  res.writeHead(healthy ? 200 : 503, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: healthy ? "ok" : "degraded", service: "ai-customer-agent-worker", workers }));
+});
+const healthPort = Number(process.env.PORT || process.env.WORKER_PORT) || 4001;
+healthServer.listen(healthPort, () => console.log(`[worker] health endpoint listening on :${healthPort}/health`));
+
 process.on("SIGTERM", async () => {
+  healthServer.close();
   await followUpWorker.close();
   await orderProgressWorker.close();
   await orderProgressQueue.close();

@@ -1,18 +1,21 @@
 import "reflect-metadata";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { NestFactory } from "@nestjs/core";
+import { NestFactory, HttpAdapterHost } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
 import { config } from "dotenv";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { assertRequiredEnv } from "./common/env";
+import { initErrorReporting } from "./common/error-reporting.helper";
+import { SentryExceptionFilter } from "./common/sentry-exception.filter";
 
 async function bootstrap() {
   for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
     if (existsSync(path)) config({ path, override: false });
   }
   assertRequiredEnv();
+  initErrorReporting();
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix("api");
   // default "same-origin" CORP blocks the browser (not curl) from loading uploaded product images
@@ -23,6 +26,7 @@ async function bootstrap() {
     credentials: true
   });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+  app.useGlobalFilters(new SentryExceptionFilter(app.get(HttpAdapterHost).httpAdapter));
   app.enableShutdownHooks();
   await app.listen(Number(process.env.PORT) || 4000);
 }

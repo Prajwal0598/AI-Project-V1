@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api, getToken, setToken, setRefreshToken } from "../../lib/api";
 
 export default function LoginPage() {
@@ -74,6 +75,12 @@ export default function LoginPage() {
           <button onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
             {mode === "login" ? "Sign up" : "Sign in"}
           </button>
+        </p>
+        <p style={{ marginTop: 24, fontSize: 11, color: "var(--muted)", display: "flex", gap: 12, justifyContent: "center" }}>
+          <Link href="/privacy" style={{ color: "var(--muted)" }}>Privacy</Link>
+          <Link href="/terms" style={{ color: "var(--muted)" }}>Terms</Link>
+          <Link href="/cookies" style={{ color: "var(--muted)" }}>Cookies</Link>
+          <Link href="/data-deletion" style={{ color: "var(--muted)" }}>Data Deletion</Link>
         </p>
       </div>
     </div>

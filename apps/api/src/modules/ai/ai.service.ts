@@ -6,6 +6,7 @@ import { OrderService } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
+import { captureException } from "../../common/error-reporting.helper";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CartService } from "../cart/cart.service";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
@@ -290,6 +291,7 @@ ${transcript || "No previous messages. Greet the customer and share the product 
       } catch (error) {
         if (error instanceof ServiceUnavailableException) throw error;
         this.logger.error("OpenAI request failed", error instanceof Error ? error.stack : String(error));
+        captureException(error, { conversationId, businessId });
         throw new ServiceUnavailableException("The AI service could not create a reply draft. Check the server key, model access, and billing configuration.");
       }
     })();

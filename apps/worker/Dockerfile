@@ -32,4 +32,6 @@ FROM runtime-base AS runtime
 ENV NODE_ENV=production
 COPY --from=build /app /app
 WORKDIR /app/apps/worker
+# health endpoint (GET /health) for Railway/uptime monitoring — see PORT/WORKER_PORT in .env.example
+EXPOSE 4001
 CMD ["node", "dist/worker.js"]

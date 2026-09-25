@@ -6,6 +6,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { RazorpayService } from "../payments/razorpay.service";
 import { RazorpayWebhookService, type RazorpayWebhookPayload } from "./razorpay-webhook.service";
 import { isProduction } from "../../common/env";
+import { captureException } from "../../common/error-reporting.helper";
 
 // businessId is embedded in the URL path (unlike WhatsApp/Instagram, which use one shared app-level secret) —
 // each business has its OWN Razorpay account/webhook secret, so we need to know which one before verifying
@@ -39,6 +40,7 @@ export class RazorpayWebhookController {
     if (result === "skipped") {
       if (isProduction()) {
         this.logger.error(`Rejected Razorpay webhook for business ${businessId} — no webhook secret configured in production.`);
+        captureException(new Error("Razorpay webhook secret not configured in production"), { businessId });
         throw new ForbiddenException("Webhook signature verification is not configured.");
       }
       this.logger.warn(`Razorpay webhook secret not configured for business ${businessId} — signature is NOT being verified.`);
