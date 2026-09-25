@@ -1,9 +1,7 @@
 # Multi-stage build for the BullMQ worker. Build context MUST be the monorepo root, e.g.:
 #   docker build -f apps/worker/Dockerfile -t relay-worker .
 FROM node:20-slim AS runtime-base
-# postgresql-client provides pg_dump, used by jobs/database-backup.ts as a stopgap until Railway Pro's
-# automatic Postgres backups are enabled
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 FROM node:20-slim AS base

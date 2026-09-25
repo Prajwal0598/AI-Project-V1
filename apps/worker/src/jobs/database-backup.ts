@@ -1,34 +1,53 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdir, readdir, stat, unlink } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
-const execFileAsync = promisify(execFile);
+import { prisma } from "../prisma";
 
 const BACKUP_DIR = process.env.BACKUP_DIR ?? "/app/backups";
 const RETENTION_DAYS = Number(process.env.BACKUP_RETENTION_DAYS) || 14;
 
 /**
  * Stopgap manual backup, since Railway's automatic Postgres backups/point-in-time-recovery require the Pro
- * plan (not currently on it — see docs/app-overview.md). Runs `pg_dump` (plain SQL, not the custom binary
- * format, so a restore never depends on matching pg_dump/pg_restore versions) against DATABASE_URL onto a
- * dedicated Railway volume — separate from the Postgres service's own volume, so a problem with the live
- * database doesn't also destroy its own backups. Superseded once the account moves to Railway Pro.
+ * plan (not currently on it — see docs/app-overview.md). Originally shelled out to `pg_dump`, but Railway's
+ * Railpack build only has Postgres 17 client tools available (via Debian's own apt repo) while the server
+ * runs Postgres 18 — pg_dump refuses to run against a NEWER server than itself, with no override flag, and
+ * pulling in a version-matched client would need the separate apt.postgresql.org repo, which isn't reachable
+ * through Railpack's simple aptPackages config. Dumping DATA ONLY via Prisma's own connection sidesteps this
+ * entirely (no version-sensitive catalog introspection, no external binary) — the SCHEMA itself is already
+ * fully recoverable from the git-tracked Prisma migrations via `prisma migrate deploy`, so a restore is:
+ * 1) `prisma migrate deploy` against a fresh database, 2) re-insert each table's rows from this dump's JSON.
  */
 export async function processDatabaseBackup() {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) return { skipped: "DATABASE_URL not configured" };
-
   await mkdir(BACKUP_DIR, { recursive: true });
-  const filename = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}.sql`;
-  const filepath = join(BACKUP_DIR, filename);
 
-  // connection string passed as an argv element (not shell-interpolated) — execFile never spawns a shell
-  await execFileAsync("pg_dump", [databaseUrl, "-f", filepath], { maxBuffer: 1024 * 1024 * 64 });
+  const tables = await prisma.$queryRaw<{ tablename: string }[]>`
+    SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename != '_prisma_migrations'
+  `;
+
+  const dump: Record<string, unknown[]> = {};
+  for (const { tablename } of tables) {
+    dump[tablename] = await prisma.$queryRawUnsafe(`SELECT * FROM "${tablename}"`);
+  }
+
+  const filename = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json.gz`;
+  const filepath = join(BACKUP_DIR, filename);
+  const body = JSON.stringify({ dumpedAt: new Date().toISOString(), tables: dump }, jsonReplacer);
+  await writeFile(filepath, gzipSync(body));
   const { size } = await stat(filepath);
 
   const pruned = await pruneOldBackups();
-  return { file: filename, sizeBytes: size, pruned };
+  return { file: filename, sizeBytes: size, tableCount: tables.length, pruned };
+}
+
+// Prisma returns Decimal as a Decimal.js instance, bigint as native bigint, and Buffer for bytea columns —
+// none of which JSON.stringify handles natively
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Buffer) return value.toString("base64");
+  if (value && typeof value === "object" && "toFixed" in value && typeof (value as { toFixed: unknown }).toFixed === "function") {
+    return (value as { toString(): string }).toString(); // Decimal.js
+  }
+  return value;
 }
 
 export async function pruneOldBackups(): Promise<string[]> {
