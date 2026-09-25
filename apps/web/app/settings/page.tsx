@@ -1,8 +1,19 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Script from "next/script";
 import { AppShell } from "../../components/app-shell";
-import { api, getBusinessId } from "../../lib/api";
-import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser } from "../../lib/api";
+import { api, getBusinessId, whatsappEmbeddedSignup } from "../../lib/api";
+import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView } from "../../lib/api";
+
+declare global {
+  interface Window {
+    FB?: { init: (opts: Record<string, unknown>) => void; login: (cb: (res: { authResponse?: { code?: string } }) => void, opts: Record<string, unknown>) => void };
+    fbAsyncInit?: () => void;
+  }
+}
+
+const META_APP_ID = process.env.NEXT_PUBLIC_META_APP_ID;
+const META_WHATSAPP_CONFIG_ID = process.env.NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID;
 
 export default function SettingsPage() {
   const [biz, setBiz] = useState<Business | null>(null);
@@ -38,6 +49,11 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [waStatus, setWaStatus] = useState<WhatsAppConnectionStatusView | null>(null);
+  const [waConnecting, setWaConnecting] = useState(false);
+  const [waConnectError, setWaConnectError] = useState("");
+  const [showManualWhatsApp, setShowManualWhatsApp] = useState(false);
+  const pendingSignupRef = useRef<{ wabaId: string; phoneNumberId: string } | null>(null);
 
   useEffect(() => {
     const bizId = getBusinessId();
@@ -61,9 +77,64 @@ export default function SettingsPage() {
     }).catch(console.error);
     api.auth.me().then(setMe).catch(console.error);
     api.categories.list(bizId).then(setCategories).catch(console.error);
+    whatsappEmbeddedSignup.getStatus().then(setWaStatus).catch(console.error);
     loadTeam();
     loadRules();
   }, []);
+
+  // Meta's Embedded Signup flow posts the connected WABA/phone number IDs via a window message event,
+  // separately from the authorization "code" FB.login's own callback returns — both are needed to complete
+  // onboarding, so this listener stashes them until FB.login's callback fires with the code (see connectWhatsApp)
+  useEffect(() => {
+    function handleSignupMessage(event: MessageEvent) {
+      if (event.origin !== "https://www.facebook.com" && event.origin !== "https://web.facebook.com") return;
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "WA_EMBEDDED_SIGNUP" && data.event === "FINISH" && data.data?.waba_id && data.data?.phone_number_id) {
+          pendingSignupRef.current = { wabaId: data.data.waba_id, phoneNumberId: data.data.phone_number_id };
+        }
+      } catch { /* not a JSON message we care about */ }
+    }
+    window.addEventListener("message", handleSignupMessage);
+    return () => window.removeEventListener("message", handleSignupMessage);
+  }, []);
+
+  function connectWhatsApp() {
+    setWaConnectError("");
+    if (!META_APP_ID || !META_WHATSAPP_CONFIG_ID) {
+      setWaConnectError("WhatsApp Embedded Signup isn't configured yet — set NEXT_PUBLIC_META_APP_ID / NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID, or use the manual connection below.");
+      return;
+    }
+    if (!window.FB) {
+      setWaConnectError("Facebook SDK hasn't loaded yet — please wait a moment and try again.");
+      return;
+    }
+    pendingSignupRef.current = null;
+    window.FB.login((response) => {
+      const code = response.authResponse?.code;
+      if (!code) {
+        setWaConnectError("WhatsApp connection was cancelled or denied.");
+        return;
+      }
+      const pending = pendingSignupRef.current;
+      if (!pending) {
+        setWaConnectError("Could not determine which WhatsApp account was selected — please try again.");
+        return;
+      }
+      setWaConnecting(true);
+      whatsappEmbeddedSignup.complete({ code, wabaId: pending.wabaId, phoneNumberId: pending.phoneNumberId })
+        .then(setWaStatus)
+        .catch(err => setWaConnectError(err instanceof Error ? err.message : "Could not complete the WhatsApp connection."))
+        .finally(() => setWaConnecting(false));
+    }, { config_id: META_WHATSAPP_CONFIG_ID, response_type: "code", override_default_response_type: true });
+  }
+
+  async function disconnectWhatsApp() {
+    setWaConnectError("");
+    try {
+      setWaStatus(await whatsappEmbeddedSignup.disconnect());
+    } catch (err) { setWaConnectError(err instanceof Error ? err.message : "Could not disconnect WhatsApp."); }
+  }
 
   function loadRules() {
     const bizId = getBusinessId();
@@ -139,6 +210,16 @@ export default function SettingsPage() {
   }
 
   return <AppShell title="Settings" subtitle="Manage your workspace, channels, and AI controls.">
+    {META_APP_ID && (
+      <Script
+        src="https://connect.facebook.net/en_US/sdk.js"
+        strategy="afterInteractive"
+        onLoad={() => {
+          window.fbAsyncInit = () => window.FB?.init({ appId: META_APP_ID, autoLogAppEvents: true, xfbml: false, version: "v21.0" });
+          window.fbAsyncInit();
+        }}
+      />
+    )}
     {saveError && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{saveError} <button onClick={() => setSaveError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
     <section className="settings-section">
       <h2>Business profile</h2>
@@ -152,20 +233,45 @@ export default function SettingsPage() {
     </section>
 
     <section className="settings-section">
-      <h2>WhatsApp configuration</h2>
-      <p>Required for the webhook to route inbound messages to your workspace.</p>
-      <div style={{ maxWidth: 420, marginTop: 16 }}>
-        <div className="login-field">
-          <label>Phone Number ID</label>
-          <input value={waPhoneId} onChange={e => setWaPhoneId(e.target.value)} placeholder="Numeric ID from Meta Developer Console" />
+      <h2>WhatsApp Business</h2>
+      {waConnectError && <p style={{ color: "#b94940", fontSize: 12, marginBottom: 8 }}>{waConnectError}</p>}
+      {waStatus?.status === "CONNECTED" ? (
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <p style={{ color: "var(--green)", fontWeight: 600 }}>✓ Connected</p>
+          <p>Business: {waStatus.businessName}</p>
+          <p>Number: {waStatus.displayPhoneNumber}</p>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting}>Manage Connection</button>
+            <button onClick={disconnectWhatsApp} disabled={waConnecting}>Disconnect</button>
+          </div>
         </div>
-        <div className="login-field">
-          <label>Access token {biz?.whatsappAccessTokenConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
-          <input type="password" value={waAccessToken} onChange={e => setWaAccessToken(e.target.value)} placeholder={biz?.whatsappAccessTokenConfigured ? "•••••••• (leave blank to keep)" : "Permanent access token from Meta"} />
+      ) : (
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <p>Connect your WhatsApp Business account to let Relay talk to your customers.</p>
+          {waStatus && !["DISCONNECTED", "CONNECTED"].includes(waStatus.status) && (
+            <p style={{ fontSize: 12, color: "var(--muted)" }}>Current status: {waStatus.status.replace(/_/g, " ").toLowerCase()}{waStatus.lastErrorMessage ? ` — ${waStatus.lastErrorMessage}` : ""}</p>
+          )}
+          <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting}>{waConnecting ? "Connecting…" : "Connect WhatsApp"}</button>
         </div>
-        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Stored encrypted per-business. Falls back to <code>WHATSAPP_ACCESS_TOKEN</code> in <code>.env</code> if left unset. <code>WHATSAPP_VERIFY_TOKEN</code>/<code>WHATSAPP_APP_SECRET</code> remain server-side only.</p>
-        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
-      </div>
+      )}
+      <button onClick={() => setShowManualWhatsApp(v => !v)} style={{ marginTop: 16, fontSize: 12, textDecoration: "underline" }}>
+        {showManualWhatsApp ? "Hide" : "Advanced: connect manually instead"}
+      </button>
+      {showManualWhatsApp && (
+        <div style={{ maxWidth: 420, marginTop: 12 }}>
+          <p style={{ fontSize: 12, color: "var(--muted)" }}>Fallback for when Embedded Signup isn't available — paste credentials directly from the Meta Developer Console.</p>
+          <div className="login-field">
+            <label>Phone Number ID</label>
+            <input value={waPhoneId} onChange={e => setWaPhoneId(e.target.value)} placeholder="Numeric ID from Meta Developer Console" />
+          </div>
+          <div className="login-field">
+            <label>Access token {biz?.whatsappAccessTokenConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
+            <input type="password" value={waAccessToken} onChange={e => setWaAccessToken(e.target.value)} placeholder={biz?.whatsappAccessTokenConfigured ? "•••••••• (leave blank to keep)" : "Permanent access token from Meta"} />
+          </div>
+          <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Stored encrypted per-business. Falls back to <code>WHATSAPP_ACCESS_TOKEN</code> in <code>.env</code> if left unset. <code>WHATSAPP_VERIFY_TOKEN</code>/<code>WHATSAPP_APP_SECRET</code> remain server-side only.</p>
+          <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+        </div>
+      )}
     </section>
 
     <section className="settings-section">

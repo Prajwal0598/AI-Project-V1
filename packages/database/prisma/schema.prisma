@@ -203,6 +203,19 @@ enum ActivityEventType {
   LEAD_SCORED
 }
 
+// connection lifecycle for Meta WhatsApp Embedded Signup — CONNECTED is only ever set once BOTH server-side
+// phone registration AND webhook subscription have succeeded, never just after the OAuth redirect completes
+enum WhatsAppConnectionStatus {
+  DISCONNECTED
+  ONBOARDING
+  AUTHORIZED
+  CONFIGURING
+  WEBHOOK_CONNECTED
+  CONNECTED
+  RETRY_REQUIRED
+  SETUP_REQUIRED
+}
+
 model Business {
   id                    String         @id @default(cuid())
   name                  String
@@ -227,6 +240,16 @@ model Business {
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?
   postmarkServerTokenEncrypted   String?
+  // Meta WhatsApp Embedded Signup — populated by the onboarding flow instead of the merchant pasting them manually;
+  // whatsappPhoneNumberId/whatsappAccessTokenEncrypted above are reused (same fields, same encryption) for either path
+  metaBusinessId               String?  // Meta Business Manager portfolio ID
+  whatsappBusinessAccountId    String?  // WABA ID
+  whatsappDisplayPhoneNumber   String?  // human-readable number (e.g. "+91 XXXXX XXXXX") shown on the Connected card
+  whatsappConnectionStatus     WhatsAppConnectionStatus @default(DISCONNECTED)
+  whatsappConnectedAt          DateTime?
+  whatsappLastValidatedAt      DateTime?
+  whatsappLastErrorCode        String?
+  whatsappLastErrorMessage     String?
   // Razorpay: keyId is not sensitive (safe to store plain, needed to resolve which secret to decrypt), but the
   // key secret and webhook secret are encrypted the same way as the channel tokens above
   razorpayKeyId                    String?

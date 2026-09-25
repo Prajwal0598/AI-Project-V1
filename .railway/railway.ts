@@ -40,6 +40,7 @@ export default defineRailway(() => {
       OPENAI_API_KEY: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),
       WHATSAPP_APP_SECRET: preserve(),
+      META_APP_ID: preserve(),
       INSTAGRAM_APP_SECRET: preserve(),
       EMAIL_WEBHOOK_SECRET: preserve(),
       WHATSAPP_VERIFY_TOKEN: preserve(),
@@ -71,6 +72,10 @@ export default defineRailway(() => {
       // Next.js inlines NEXT_PUBLIC_* at BUILD time — set to the api service's real public URL
       // after its first deploy (Railway's own dashboard shows the generated domain)
       NEXT_PUBLIC_API_URL: preserve(),
+      // Meta App ID + WhatsApp Embedded Signup configuration_id — not secret (used client-side by the FB JS
+      // SDK), but only meaningful once Meta App Review/Business Verification is complete (see docs/app-overview.md)
+      NEXT_PUBLIC_META_APP_ID: preserve(),
+      NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID: preserve(),
     },
   });
 

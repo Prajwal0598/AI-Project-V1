@@ -140,6 +140,18 @@ export interface Business {
   updatedAt: string;
 }
 
+export type WhatsAppConnectionStatus = "DISCONNECTED" | "ONBOARDING" | "AUTHORIZED" | "CONFIGURING" | "WEBHOOK_CONNECTED" | "CONNECTED" | "RETRY_REQUIRED" | "SETUP_REQUIRED";
+
+export interface WhatsAppConnectionStatusView {
+  status: WhatsAppConnectionStatus;
+  phoneNumberId: string | null;
+  displayPhoneNumber: string | null;
+  businessName: string | null;
+  connectedAt: string | null;
+  lastValidatedAt: string | null;
+  lastErrorMessage: string | null;
+}
+
 export interface BusinessStats {
   leads: number;
   customers: number;
@@ -633,4 +645,11 @@ export const api = {
     broadcast: (id: string) => request<{ targeted: number; created: number }>(`/promotions/${id}/broadcast`, { method: "POST" }),
     remove: (id: string) => request<Promotion>(`/promotions/${id}`, { method: "DELETE" }),
   },
+};
+
+export const whatsappEmbeddedSignup = {
+  getStatus: () => request<WhatsAppConnectionStatusView>("/integrations/whatsapp"),
+  complete: (data: { code: string; wabaId: string; phoneNumberId: string }) =>
+    request<WhatsAppConnectionStatusView>("/integrations/whatsapp/embedded-signup/complete", { method: "POST", body: JSON.stringify(data) }),
+  disconnect: () => request<WhatsAppConnectionStatusView>("/integrations/whatsapp/disconnect", { method: "POST" }),
 };
