@@ -974,4 +974,46 @@ describe("ShoppingFlowService — state machine", () => {
       expect(conversations.sendList).not.toHaveBeenCalled();
     });
   });
+
+  describe("Test — upselling: 'anything more premium' means an upgrade, not a random alternative", () => {
+    const premiumBeans = { id: "p1", name: "Premium Coffee Beans", description: null, brand: null, imageUrl: null, categoryId: "cat-kitchen", category: { name: "Home & Kitchen" }, variants: [{ id: "v1", price: 499, currency: "INR", inventory: 30 }] };
+    const baristaReserve = { id: "p2", name: "Barista Reserve Coffee Beans", description: null, brand: null, imageUrl: null, variants: [{ id: "v2", price: 1499, currency: "INR", inventory: 10 }] };
+
+    it("'Show me coffee beans under 1000' -> 'Do you have anything more premium?' — resolves the upgrade against the just-found product, not a fresh/random search", async () => {
+      const conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "Show me coffee beans under 1000" -> ordinary search, finds the (only) match; the customer never
+      // taps into it, so there's no activeProductId yet — just a remembered lastResults entry
+      prisma.product.findMany.mockResolvedValueOnce([premiumBeans]);
+      const handled = await flow.handleFreeText("conv1", "biz1", conversation, "Show me coffee beans under 1000");
+      expect(handled).toBe(true);
+      const update = prisma.conversation.update.mock.calls.at(-1)![0];
+      expect(update.data.activeProductId).toBeUndefined(); // no product tapped yet
+      expect(update.data.assistedBuyingContext.lastResults).toEqual([{ productId: "p1", variantId: "v1", name: "Premium Coffee Beans" }]);
+
+      // 2. "Do you have anything more premium?" -> an UPSELL relative to the just-found coffee beans (resolved
+      // via lastResults since no product was tapped), not a fresh keyword search for "anything"/"premium" and
+      // not just any other coffee product — must be priced ABOVE the original, same category
+      prisma.product.findFirst.mockResolvedValueOnce(premiumBeans);
+      prisma.product.findMany.mockResolvedValueOnce([baristaReserve]);
+      await flow.handleFreeText("conv1", "biz1", { ...conversation, ...update.data, assistedBuyingContext: update.data.assistedBuyingContext }, "Do you have anything more premium?");
+      expect(prisma.product.findFirst).toHaveBeenLastCalledWith(expect.objectContaining({ where: { id: "p1", businessId: "biz1" } }));
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where).toEqual(expect.objectContaining({
+        categoryId: "cat-kitchen", id: { not: "p1" }, variants: { some: { active: true, price: { gt: 499 } } },
+      }));
+      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("more premium"), "View", [
+        { rows: [{ id: "prod_p2", title: "Barista Reserve Coffee Beans", description: "INR 1,499" }] },
+      ]);
+    });
+
+    it("is honest when the current product is already the most premium in its category", async () => {
+      const conversation = { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null, customerId: "cust1", activeProductId: "p1", assistedBuyingContext: null };
+      prisma.product.findFirst.mockResolvedValueOnce(premiumBeans);
+      prisma.product.findMany.mockResolvedValueOnce([]); // nothing priced higher in the same category
+      await flow.handleFreeText("conv1", "biz1", conversation, "Anything higher end?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("most premium option"));
+      expect(conversations.sendList).not.toHaveBeenCalled();
+    });
+  });
 });

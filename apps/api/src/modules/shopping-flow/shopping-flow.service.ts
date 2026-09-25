@@ -54,6 +54,11 @@ const OPTIONS_FOLLOWUP_RE = /\b(what colou?rs?|which colou?rs?|colou?r options|w
 const SIMILAR_RE = /\bsimilar\b/i;
 const CHEAPER_RE = /\b(cheaper|less expensive|lower price|budget|affordable)\b/i;
 
+// "Do you have anything more premium?" / "Anything higher end?" / "Something nicer/fancier?" / "Can I upgrade?"
+// — an UPSELL request relative to whatever was just shown, not a fresh (random) search for another coffee
+// product; deliberately distinct from CHEAPER_RE's downgrade direction
+const UPGRADE_RE = /\b(more premium|higher.?end|higher quality|better quality|nicer|fancier|upgrade|upscale|top.?of.?the.?line|more expensive|pricier|something better)\b/i;
+
 // "What else would go well with this?" / "What goes well with it?" / "Anything to pair with this?" — asks for
 // merchant-configured companions (ProductRelation) for the active product, not a fresh search for "else"/"well"
 const CROSS_SELL_RE = /\b(?:what(?: else)? (?:would|should|could|do you recommend to)?\s*(?:go|pair)s?(?: well)? with (?:this|it)|goes? well with (?:this|it)|pairs? well with (?:this|it)|anything (?:else )?(?:that )?(?:goes|pairs|to go|to pair) with (?:this|it))\b/i;
@@ -437,6 +442,37 @@ export class ShoppingFlowService {
     return true;
   }
 
+  /** "Do you have anything more premium?" — an UPSELL relative to whichever product is currently in view (or,
+   * if the customer never tapped into one, the top result of the last search) — never just another random
+   * product in the same category. Same-category alternatives priced ABOVE it, closest premium option first. */
+  private async tryMorePremium(conversationId: string, businessId: string, text: string, context: ShoppingSearchContext | null, activeProductId: string | null): Promise<boolean> {
+    if (!UPGRADE_RE.test(text.toLowerCase())) return false;
+    const referenceId = activeProductId ?? context?.lastResults?.[0]?.productId;
+    if (!referenceId) return false;
+
+    const product = await this.prisma.product.findFirst({ where: { id: referenceId, businessId }, include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } } });
+    if (!product?.variants.length || !product.categoryId) return false;
+    const ownPrice = Number(product.variants[0].price);
+
+    const alternatives = await this.prisma.product.findMany({
+      where: { businessId, status: "PUBLISHED", categoryId: product.categoryId, id: { not: product.id }, variants: { some: { active: true, price: { gt: ownPrice } } } },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } },
+      take: MAX_LIST_ROWS,
+    });
+    const matches = alternatives.filter((p) => p.variants[0]).sort((a, b) => Number(a.variants[0].price) - Number(b.variants[0].price));
+
+    if (!matches.length) {
+      await this.conversations.sendMessage(conversationId, businessId, `That's actually our most premium option in that category right now — *${product.name}* is as good as it gets! 👌`);
+      return true;
+    }
+    await this.conversations.sendList(conversationId, businessId, `✨ Here ${matches.length === 1 ? "is a more premium option" : "are some more premium options"}:`, "View", [
+      { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: fmtMoney(p.variants[0].price, p.variants[0].currency) })) },
+    ]);
+    const upgradedContext: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: upgradedContext as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
   /** "What else would go well with this?" — merchant-configured CROSS_SELL/UPSELL companions (ProductRelation)
    * for the active product, never an invented pairing. */
   private async tryCrossSell(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
@@ -659,6 +695,7 @@ export class ShoppingFlowService {
     if (await this.tryCompareProducts(conversationId, businessId, text)) return;
     if (await this.tryProductFollowUp(conversationId, businessId, text, activeProductId)) return;
     if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId)) return;
+    if (await this.tryMorePremium(conversationId, businessId, text, existingContext, activeProductId)) return;
     if (await this.tryCrossSell(conversationId, businessId, text, activeProductId)) return;
 
     // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
