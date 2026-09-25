@@ -185,3 +185,53 @@ describe("AiService — order-status guard", () => {
     expect(conversations.sendMessage).not.toHaveBeenCalled();
   });
 });
+
+describe("AiService — repeat purchase grounding", () => {
+  it("instructs the model to resolve 'the same thing I bought last time' against real order history, and never invent a product", async () => {
+    const pastOrder = {
+      id: "o1", status: "PAID", fulfillmentStatus: "DELIVERED", total: 899, currency: "INR",
+      createdAt: new Date("2026-09-01"), items: [{ name: "Premium Cotton T-Shirt", quantity: 1 }],
+    };
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([pastOrder]) };
+    const prisma: any = {
+      conversation: { findFirst: jest.fn().mockResolvedValue({
+        id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+        activeOrderId: null, customer: { firstName: "Alex", lastName: null },
+        business: { name: "Test Biz", assistedBuyingEnabled: false, products: [{ id: "p1", name: "Premium Cotton T-Shirt", variants: [{ id: "v1", price: 899, currency: "INR", inventory: 10 }] }] },
+        messages: [{ direction: "INBOUND", content: "I want to buy the same thing I bought last time", sentAt: new Date(), metadata: null }],
+      }) },
+      aiActionLog: { create: jest.fn() },
+    };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+    );
+
+    let capturedInstructions = "";
+    const create = jest.fn(async (args: { instructions: string }) => {
+      capturedInstructions = args.instructions;
+      return { output_text: JSON.stringify({
+        reply: "Got it — reordering your Premium Cotton T-Shirt! What's your shipping address?",
+        items: [{ productName: "Premium Cotton T-Shirt", quantity: 1 }],
+        shippingAddress: null, paymentMethod: null, orderConfirmed: false, cancelOrder: false,
+        needsHumanReview: false, needsHumanReviewReason: null, showProductImages: [],
+      }) };
+    });
+    (ai as unknown as { client: unknown }).client = { responses: { create } };
+
+    await ai.generateAndSendReply("conv1", "biz1");
+
+    expect(capturedInstructions).toContain("REPEAT PURCHASE");
+    expect(capturedInstructions).toContain("Never invent or guess a product");
+    expect(capturedInstructions).toContain("REPLACES that item's quantity"); // "make it two this time" sets, not adds
+    // the real past-order item name must actually be present in the prompt for the model to ground against
+    expect(capturedInstructions).toContain("Premium Cotton T-Shirt");
+    expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Premium Cotton T-Shirt"));
+  });
+});
