@@ -54,6 +54,10 @@ const OPTIONS_FOLLOWUP_RE = /\b(what colou?rs?|which colou?rs?|colou?r options|w
 const SIMILAR_RE = /\bsimilar\b/i;
 const CHEAPER_RE = /\b(cheaper|less expensive|lower price|budget|affordable)\b/i;
 
+// "What else would go well with this?" / "What goes well with it?" / "Anything to pair with this?" — asks for
+// merchant-configured companions (ProductRelation) for the active product, not a fresh search for "else"/"well"
+const CROSS_SELL_RE = /\b(?:what(?: else)? (?:would|should|could|do you recommend to)?\s*(?:go|pair)s?(?: well)? with (?:this|it)|goes? well with (?:this|it)|pairs? well with (?:this|it)|anything (?:else )?(?:that )?(?:goes|pairs|to go|to pair) with (?:this|it))\b/i;
+
 // "Which one would you recommend?" / "Which one would you personally recommend?" — asks for a pick among
 // whatever was just shown, not a fresh search; deliberately requires "which one/option" (not just "what would
 // you recommend", which is an open-ended occasion-style request that should still run as a normal search — see
@@ -90,9 +94,12 @@ function wordToNumber(word: string): number | null {
 // permissive). "another" has no trailing digit of its own, so a following "one"/"more" is optional and implies +1.
 const ADD_QUANTITY_RE = /^\s*add\s+(?:(one|two|three|four|five|six|seven|eight|nine|ten|\d+)|another)\s*(?:one|more)?\s*(?:of\s+them|of\s+it|of\s+that)?[.!?]*\s*$/i;
 
-// "Add the Premium Cotton T-Shirt to my cart" / "Add the Rose Gold Watch too" — adds a NAMED product; the
-// negative lookahead keeps this from swallowing "add two of them"-style quantity references
-const ADD_NAMED_RE = /^\s*(?:add|buy|get)\s+(?:the\s+)?(?!(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\b)(.+?)\s*(?:to (?:my )?cart|too)?[.!?]*\s*$/i;
+// "Add the Premium Cotton T-Shirt to my cart" / "Add the Rose Gold Watch too" / "I want to buy the Rose Gold
+// Watch" — adds a NAMED product (implicit qty 1); the optional "i want/i'd like/i would like to" prefix only
+// applies before "buy/get" (a strong, unambiguous purchase-intent verb) — bare "I want X" without it must stay
+// a SEARCH (see Test 2's occasion queries), not an accidental add-to-cart. The negative lookahead keeps this
+// from swallowing "add two of them"-style quantity references.
+const ADD_NAMED_RE = /^\s*(?:(?:i want|i'?d like|i would like) to )?(?:add|buy|get)\s+(?:the\s+)?(?!(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|another)\b)(.+?)\s*(?:to (?:my )?cart|too)?[.!?]*\s*$/i;
 
 // "I want 2 Premium Cotton T-Shirts" / "I'd like 3 X" / "Can I get 2 X" / "I'll take 2 X" — a NAMED product
 // with an EXPLICIT quantity stated up front, distinct from ADD_NAMED_RE's implicit quantity of 1
@@ -430,6 +437,33 @@ export class ShoppingFlowService {
     return true;
   }
 
+  /** "What else would go well with this?" — merchant-configured CROSS_SELL/UPSELL companions (ProductRelation)
+   * for the active product, never an invented pairing. */
+  private async tryCrossSell(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
+    if (!activeProductId || !CROSS_SELL_RE.test(text.toLowerCase())) return false;
+
+    const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId } });
+    if (!product) return false;
+
+    const relations = await this.prisma.productRelation.findMany({
+      where: { businessId, productId: activeProductId },
+      include: { relatedProduct: { include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } } } },
+      orderBy: { createdAt: "desc" },
+    });
+    const matches = relations.filter((r) => r.relatedProduct.status === "PUBLISHED" && r.relatedProduct.variants[0]).slice(0, MAX_LIST_ROWS);
+
+    if (!matches.length) {
+      await this.conversations.sendMessage(conversationId, businessId, `😕 I don't have specific pairing suggestions for *${product.name}* yet — let me know if you'd like to browse more of the store.`);
+      return true;
+    }
+    await this.conversations.sendList(conversationId, businessId, `🤝 Goes well with *${product.name}*:`, "View", [
+      { rows: matches.map((r) => ({ id: `prod_${r.relatedProduct.id}`, title: r.relatedProduct.name, description: fmtMoney(r.relatedProduct.variants[0].price, r.relatedProduct.variants[0].currency) })) },
+    ]);
+    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((r) => ({ productId: r.relatedProduct.id, variantId: r.relatedProduct.variants[0].id, name: r.relatedProduct.name })) };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
   /** Explains WHY a product fits the customer's accumulated ask — grounded only in facts we actually have
    * (its real price vs. their stated budget, its real category vs. their stated interests), never an invented
    * spec. Falls back to a neutral line when there's nothing concrete to cite. */
@@ -625,6 +659,7 @@ export class ShoppingFlowService {
     if (await this.tryCompareProducts(conversationId, businessId, text)) return;
     if (await this.tryProductFollowUp(conversationId, businessId, text, activeProductId)) return;
     if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId)) return;
+    if (await this.tryCrossSell(conversationId, businessId, text, activeProductId)) return;
 
     // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
     // the catalogue for the literal words in the question just returns "No products matched that search."

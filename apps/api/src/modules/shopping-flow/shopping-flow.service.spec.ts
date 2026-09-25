@@ -122,6 +122,7 @@ describe("ShoppingFlowService — state machine", () => {
       category: { findMany: jest.fn().mockResolvedValue([]) },
       product: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
       variant: { findFirst: jest.fn() },
+      productRelation: { findMany: jest.fn().mockResolvedValue([]) },
     };
     conversations = { sendButtons: jest.fn(), sendList: jest.fn(), sendMessage: jest.fn(), sendImage: jest.fn() };
     cart = { getOrCreateActive: jest.fn(), findActiveForConversation: jest.fn(), addItem: jest.fn(), updateItemQuantity: jest.fn(), totals: jest.fn() };
@@ -920,6 +921,57 @@ describe("ShoppingFlowService — state machine", () => {
       const recommendMessage = conversations.sendMessage.mock.calls.at(-2)![2] as string;
       expect(recommendMessage).toContain("Silk Scarf");
       expect(recommendMessage).toContain("budget"); // grounded reasoning, not a silent pick
+    });
+  });
+
+  describe("Test — cross-selling: ProductRelation-grounded 'what else goes with this'", () => {
+    const coffeeBeans = { id: "p1", name: "Premium Coffee Beans", description: null, brand: null, imageUrl: null, category: { name: "Home & Kitchen" }, variants: [{ id: "v1", price: 499, currency: "INR", inventory: 30 }] };
+
+    it("'I want to buy Premium Coffee Beans' actually adds it (not just a search), then 'What else would go well with this?' surfaces the merchant-configured companions", async () => {
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] });
+      cart.totals.mockImplementation((c: { items: { variant: { price: number; currency: string } }[] }) => ({
+        subtotal: c.items.reduce((sum, i: any) => sum + i.variant.price * i.quantity, 0),
+        currency: c.items[0]?.variant.currency ?? "INR",
+      }));
+
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "I want to buy Premium Coffee Beans" -> a real add-to-cart (implicit qty 1), not a keyword search
+      prisma.product.findMany.mockResolvedValueOnce([coffeeBeans]);
+      cart.addItem.mockResolvedValueOnce({ items: [{ variantId: "v1", quantity: 1, variant: { price: 499, currency: "INR", product: { id: "p1", name: "Premium Coffee Beans" } } }] });
+      await flow.handleFreeText("conv1", "biz1", conversation, "I want to buy Premium Coffee Beans");
+      expect(cart.addItem).toHaveBeenLastCalledWith("cart1", "biz1", "v1", 1);
+      const update = prisma.conversation.update.mock.calls.at(-1)![0];
+      expect(update.data.activeProductId).toBe("p1"); // anchors the active product for the cross-sell follow-up below
+      conversation = { ...conversation, ...update.data, assistedBuyingContext: update.data.assistedBuyingContext };
+
+      // 2. "What else would go well with this?" -> the merchant-configured CROSS_SELL/UPSELL companions for the
+      // active product, not a fresh (meaningless) search for "else"/"well"
+      prisma.product.findFirst.mockResolvedValueOnce(coffeeBeans);
+      prisma.productRelation.findMany.mockResolvedValueOnce([
+        { relatedProduct: { id: "p2", name: "Ceramic Coffee Mug", status: "PUBLISHED", variants: [{ id: "v2", price: 299, currency: "INR" }] } },
+        { relatedProduct: { id: "p3", name: "Cold Brew Coffee Kit", status: "PUBLISHED", variants: [{ id: "v3", price: 899, currency: "INR" }] } },
+        { relatedProduct: { id: "p4", name: "Coffee Lover Gift Box", status: "PUBLISHED", variants: [{ id: "v4", price: 1299, currency: "INR" }] } },
+      ]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "What else would go well with this?");
+      expect(prisma.productRelation.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { businessId: "biz1", productId: "p1" } }));
+      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Premium Coffee Beans"), "View", [
+        { rows: [
+          { id: "prod_p2", title: "Ceramic Coffee Mug", description: "INR 299" },
+          { id: "prod_p3", title: "Cold Brew Coffee Kit", description: "INR 899" },
+          { id: "prod_p4", title: "Coffee Lover Gift Box", description: "INR 1,299" },
+        ] },
+      ]);
+    });
+
+    it("is honest when no relation is configured yet — never invents a pairing", async () => {
+      const conversation = { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null, customerId: "cust1", activeProductId: "p1", assistedBuyingContext: null };
+      prisma.product.findFirst.mockResolvedValueOnce(coffeeBeans);
+      prisma.productRelation.findMany.mockResolvedValueOnce([]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "What else would go well with this?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("don't have specific pairing suggestions"));
+      expect(conversations.sendList).not.toHaveBeenCalled();
     });
   });
 });
