@@ -54,6 +54,17 @@ const CHEAPER_RE = /\b(cheaper|less expensive|lower price|budget|affordable)\b/i
 // occasion-style request that should still run as a normal search — see Test 2's "going on vacation" case)
 const RECOMMEND_PICK_RE = /\bwhich (one|option) (would you|do you|should i) (recommend|choose|pick|go with)\b/i;
 
+// "Compare X and Y" / "What's the difference between X and Y?" — a fresh comparison request naming two
+// products; strips everything up to the trigger phrase, leaving "X and Y" to split and resolve by name
+const COMPARISON_RE = /\b(compare|difference between)\b/i;
+const STRIP_COMPARISON_PREFIX_RE = /^.*?\b(?:compare|difference between)\b/i;
+const SPLIT_COMPARISON_SEGMENTS_RE = /\s+(?:and|vs\.?|versus)\s+/i;
+
+// "Which is cheaper?" / "Which one is better for casual wear?" / "Which watch would make a better gift?" —
+// a follow-up about whichever pair was JUST compared, not a fresh search for the word "cheaper"/"better"
+const COMPARISON_FOLLOWUP_RE = /^\s*which\b.*\b(cheaper|better|nicer|suitable|affordable|gift|choice|value)\b/i;
+const FOLLOWUP_CHEAPER_RE = /\b(cheap|afford|value|lower price)\w*\b/i;
+
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
 // accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
@@ -64,6 +75,7 @@ interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string
 interface ShoppingSearchContext {
   filters: SearchFilters;
   lastResults: { productId: string; variantId: string; name: string }[];
+  comparedProductIds?: string[];
 }
 
 /** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
@@ -217,6 +229,16 @@ export class ShoppingFlowService {
     return null;
   }
 
+  /** Best-matching product among candidates that share some keyword overlap — used whenever a customer's own
+   * phrasing (not an exact name) needs to resolve to a single, most-likely product. */
+  private bestKeywordMatch<T extends { name: string; description: string | null; brand: string | null; category?: { name: string } | null }>(candidates: T[], keywords: string[]): T {
+    const hits = (p: T) => {
+      const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
+      return keywords.filter((kw) => haystack.includes(kw)).length;
+    };
+    return candidates.length === 1 ? candidates[0] : [...candidates].sort((a, b) => hits(b) - hits(a))[0];
+  }
+
   /** "Tell me more about the Premium Cotton T-Shirt" — resolves the referenced product BY NAME and shows its
    * detail view directly, instead of running it as a generic catalogue search (which would treat "tell"/"more"/
    * "about" as literal, meaningless search keywords). Returns false (falls through to a normal search) if the
@@ -234,12 +256,69 @@ export class ShoppingFlowService {
     });
     if (!candidates.length) return false;
 
-    const keywordHits = (p: (typeof candidates)[number]) => {
-      const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
-      return keywords.filter((kw) => haystack.includes(kw)).length;
+    await this.showProductDetail(conversationId, businessId, this.bestKeywordMatch(candidates, keywords).id, customerId);
+    return true;
+  }
+
+  /** "Compare the Rose Gold Watch and Minimal Silver Watch" / "What's the difference between X and Y?" —
+   * resolves BOTH named products and sends a grounded, template-only summary of their real catalogue facts
+   * (name/price/stock/description) — never an invented claim about specs the catalogue doesn't have. Stores
+   * the compared set so a follow-up ("Which is cheaper?") can resolve against it. */
+  private async tryCompareProducts(conversationId: string, businessId: string, text: string): Promise<boolean> {
+    if (!COMPARISON_RE.test(text)) return false;
+    const remainder = text.replace(STRIP_COMPARISON_PREFIX_RE, "").replace(/[?!.]+$/, "").trim();
+    const segments = remainder.split(SPLIT_COMPARISON_SEGMENTS_RE).map((s) => s.replace(/^\s*the\s+/i, "").trim()).filter(Boolean);
+    if (segments.length < 2) return false;
+
+    const resolved: { id: string; name: string; description: string | null; variants: { id: string; price: unknown; currency: string; inventory: number | null }[] }[] = [];
+    for (const segment of segments.slice(0, 3)) {
+      const { keywords } = parseSearchQuery(segment);
+      if (!keywords.length) continue;
+      const candidates = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", AND: keywordAndClauses(keywords) },
+        include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 }, category: true },
+        take: 5,
+      });
+      if (candidates.length) resolved.push(this.bestKeywordMatch(candidates, keywords));
+    }
+    const withVariant = resolved.filter((p) => p.variants[0]);
+    if (withVariant.length < 2) return false;
+
+    const lines = withVariant.map((p) => `*${p.name}* — ${fmtMoney(p.variants[0].price as never, p.variants[0].currency)}${p.variants[0].inventory === 0 ? " (out of stock)" : ""}${p.description ? `\n_${p.description}_` : ""}`);
+    await this.conversations.sendMessage(conversationId, businessId, lines.join("\n\n"));
+
+    const context: ShoppingSearchContext = {
+      filters: { keywords: [] },
+      lastResults: withVariant.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })),
+      comparedProductIds: withVariant.map((p) => p.id),
     };
-    const best = candidates.length === 1 ? candidates[0] : [...candidates].sort((a, b) => keywordHits(b) - keywordHits(a))[0];
-    await this.showProductDetail(conversationId, businessId, best.id, customerId);
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
+  /** "Which is cheaper?" / "Which one is better for casual wear?" / "Which watch would make a better gift?" —
+   * a follow-up about whichever pair was just compared. Price is a real catalogue fact, so a "cheaper"
+   * question gets a confident, grounded answer; subjective/occasion criteria (style, gifting) have no
+   * catalogue signal at all, so rather than inventing one, restate the real facts instead. */
+  private async tryComparisonFollowUp(conversationId: string, businessId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
+    if (!COMPARISON_FOLLOWUP_RE.test(text.toLowerCase()) || !context?.comparedProductIds || context.comparedProductIds.length < 2) return false;
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: context.comparedProductIds }, businessId },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } },
+    });
+    const withVariant = products.filter((p) => p.variants[0]);
+    if (withVariant.length < 2) return false;
+
+    if (FOLLOWUP_CHEAPER_RE.test(text)) {
+      const [cheapest, next] = [...withVariant].sort((a, b) => Number(a.variants[0].price) - Number(b.variants[0].price));
+      const diff = Number(next.variants[0].price) - Number(cheapest.variants[0].price);
+      await this.conversations.sendMessage(conversationId, businessId, `*${cheapest.name}* is cheaper — ${fmtMoney(cheapest.variants[0].price, cheapest.variants[0].currency)} vs ${fmtMoney(next.variants[0].price, next.variants[0].currency)} (${fmtMoney(diff, cheapest.variants[0].currency)} less).`);
+      return true;
+    }
+
+    const lines = withVariant.map((p) => `*${p.name}* — ${fmtMoney(p.variants[0].price, p.variants[0].currency)}${p.variants[0].inventory === 0 ? " (out of stock)" : ""}`);
+    await this.conversations.sendMessage(conversationId, businessId, `I don't have enough detail in our catalogue to say which is definitively better for that — here's what I can confirm:\n\n${lines.join("\n\n")}\n\nLet me know if price or availability should be the deciding factor!`);
     return true;
   }
 
@@ -324,8 +403,10 @@ export class ShoppingFlowService {
     const referenced = this.resolveOrdinalReference(text, existingContext);
     if (referenced) return this.showProductDetail(conversationId, businessId, referenced.productId, customerId);
 
+    if (await this.tryComparisonFollowUp(conversationId, businessId, text, existingContext)) return;
     if (await this.tryRecommendationPick(conversationId, businessId, customerId, text, existingContext, activeProductId)) return;
     if (await this.tryProductDetailsByName(conversationId, businessId, customerId, text)) return;
+    if (await this.tryCompareProducts(conversationId, businessId, text)) return;
     if (await this.tryProductFollowUp(conversationId, businessId, text, activeProductId)) return;
     if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId)) return;
 

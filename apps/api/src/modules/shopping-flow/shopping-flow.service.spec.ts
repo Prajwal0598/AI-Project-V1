@@ -631,4 +631,57 @@ describe("ShoppingFlowService — state machine", () => {
       expect(conversations.sendImage).toHaveBeenLastCalledWith("conv1", "biz1", expect.any(String), expect.stringContaining("Classic Cotton Tee"));
     });
   });
+
+  describe("Test 6 — product comparison, grounded in catalogue facts only", () => {
+    const tshirt1 = { id: "p1", name: "Premium Cotton T-Shirt", description: "Soft breathable cotton tee", brand: null, category: { name: "Fashion" }, variants: [{ id: "v1", price: 899, currency: "INR", inventory: 10 }] };
+    const tshirt2 = { id: "p2", name: "Oversized Beige T-Shirt", description: "Relaxed oversized fit", brand: null, category: { name: "Fashion" }, variants: [{ id: "v2", price: 1099, currency: "INR", inventory: 6 }] };
+    const watch1 = { id: "p3", name: "Rose Gold Watch", description: "Elegant rose gold finish", brand: null, category: { name: "Accessories" }, variants: [{ id: "v3", price: 4999, currency: "INR", inventory: 4 }] };
+    const watch2 = { id: "p4", name: "Minimal Silver Watch", description: "Sleek minimalist design", brand: null, category: { name: "Accessories" }, variants: [{ id: "v4", price: 3499, currency: "INR", inventory: 7 }] };
+
+    it("'What's the difference...T-Shirt?' -> 'Which is cheaper?' -> 'Which one is better for casual wear?' -> 'Compare...Watch.' -> 'Which watch would make a better gift?'", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "What's the difference between the Premium Cotton T-Shirt and Oversized Beige T-Shirt?" -> resolves
+      // BOTH named products and sends only grounded facts (name/price/stock/description), never invented specs
+      prisma.product.findMany.mockResolvedValueOnce([tshirt1]).mockResolvedValueOnce([tshirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "What's the difference between the Premium Cotton T-Shirt and Oversized Beige T-Shirt?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Premium Cotton T-Shirt"));
+      expect(conversations.sendMessage.mock.calls.at(-1)![2]).toContain("Oversized Beige T-Shirt");
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ assistedBuyingContext: expect.objectContaining({ comparedProductIds: ["p1", "p2"] }) }),
+      }));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 2. "Which is cheaper?" -> a real catalogue fact (price) -> confident, grounded answer
+      prisma.product.findMany.mockResolvedValueOnce([tshirt1, tshirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Which is cheaper?");
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Premium Cotton T-Shirt* is cheaper"));
+
+      // 3. "Which one is better for casual wear?" -> no catalogue signal exists for this — must NOT invent one
+      prisma.product.findMany.mockResolvedValueOnce([tshirt1, tshirt2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Which one is better for casual wear?");
+      const casualWearReply = conversations.sendMessage.mock.calls.at(-1)![2] as string;
+      expect(casualWearReply).toContain("don't have enough detail");
+      expect(casualWearReply).toContain("Premium Cotton T-Shirt");
+      expect(casualWearReply).toContain("Oversized Beige T-Shirt");
+
+      // 4. "Compare the Rose Gold Watch and Minimal Silver Watch." -> a FRESH comparison overwrites the old one
+      prisma.product.findMany.mockResolvedValueOnce([watch1]).mockResolvedValueOnce([watch2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Compare the Rose Gold Watch and Minimal Silver Watch.");
+      expect(prisma.conversation.update).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ assistedBuyingContext: expect.objectContaining({ comparedProductIds: ["p3", "p4"] }) }),
+      }));
+      conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
+
+      // 5. "Which watch would make a better gift?" -> follows the NEW watch comparison, not the old t-shirts;
+      // "gift-worthiness" has no catalogue signal either, so again restates facts rather than inventing one
+      prisma.product.findMany.mockResolvedValueOnce([watch1, watch2]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Which watch would make a better gift?");
+      const giftReply = conversations.sendMessage.mock.calls.at(-1)![2] as string;
+      expect(giftReply).toContain("don't have enough detail");
+      expect(giftReply).toContain("Rose Gold Watch");
+      expect(giftReply).toContain("Minimal Silver Watch");
+    });
+  });
 });
