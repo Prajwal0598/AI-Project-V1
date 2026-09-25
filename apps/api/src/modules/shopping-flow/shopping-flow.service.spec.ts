@@ -624,11 +624,15 @@ describe("ShoppingFlowService — state machine", () => {
       ]);
       conversation = { ...conversation, assistedBuyingContext: prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext };
 
-      // 6. "Which one would you recommend?" -> picks from the just-shown alternatives, not a fresh search for "one"
-      prisma.product.findFirst.mockResolvedValueOnce({ id: "p2", name: "Classic Cotton Tee", description: null, imageUrl: "/uploads/products/tee.jpg", variants: [{ id: "v3", price: 599, currency: "INR", inventory: 8 }] });
+      // 6. "Which one would you recommend?" -> picks from the just-shown alternatives, not a fresh search for "one",
+      // and explains why (grounded in the actual category/price, not an invented reason)
+      prisma.product.findFirst
+        .mockResolvedValueOnce({ id: "p2", name: "Classic Cotton Tee", category: { name: "Fashion" }, variants: [{ id: "v3", price: 599, currency: "INR" }] }) // reasoning lookup
+        .mockResolvedValueOnce({ id: "p2", name: "Classic Cotton Tee", description: null, imageUrl: "/uploads/products/tee.jpg", variants: [{ id: "v3", price: 599, currency: "INR", inventory: 8 }] }); // showProductDetail's own lookup
       const findManyCallsBeforeRecommend = prisma.product.findMany.mock.calls.length;
       await flow.handleFreeText("conv1", "biz1", conversation, "Which one would you recommend?");
       expect(prisma.product.findMany.mock.calls.length).toBe(findManyCallsBeforeRecommend); // no new search query
+      expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Classic Cotton Tee"));
       expect(conversations.sendImage).toHaveBeenLastCalledWith("conv1", "biz1", expect.any(String), expect.stringContaining("Classic Cotton Tee"));
     });
   });
@@ -844,6 +848,78 @@ describe("ShoppingFlowService — state machine", () => {
       await flow.handleFreeText("conv1", "biz1", conversation, "Can I get 10 instead?");
       expect(cart.updateItemQuantity).toHaveBeenLastCalledWith("cart1", "biz1", "v9", 10);
       expect(conversations.sendMessage).toHaveBeenLastCalledWith("conv1", "biz1", "Only 8 left in stock.");
+    });
+  });
+
+  describe("Test — recommendation engine: multi-turn gift search, top-N picks, and grounded reasoning", () => {
+    const scarf = { id: "p1", name: "Silk Scarf", description: null, brand: null, imageUrl: null, category: { name: "Fashion" }, variants: [{ id: "v1", price: 999, currency: "INR", inventory: 12 }] };
+    const necklace = { id: "p2", name: "Rose Gold Necklace", description: null, brand: null, imageUrl: null, category: { name: "Accessories" }, variants: [{ id: "v2", price: 1499, currency: "INR", inventory: 6 }] };
+    const handbag = { id: "p3", name: "Leather Handbag", description: null, brand: null, imageUrl: null, category: { name: "Accessories" }, variants: [{ id: "v3", price: 2499, currency: "INR", inventory: 4 }] };
+    const sunglasses = { id: "p4", name: "Sunglasses", description: null, brand: null, imageUrl: null, category: { name: "Accessories" }, variants: [{ id: "v4", price: 799, currency: "INR", inventory: 15 }] };
+
+    it("'gift for my girlfriend under 3000' -> 'she likes fashion' -> 'she also likes accessories' -> 'top 3 options' -> 'which one would you personally recommend' — budget survives a generic-word miss, interests accumulate, and picks are explained", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", activeProductId: null, assistedBuyingContext: null };
+
+      // 1. "I need a gift for my girlfriend under 3000" -> exact AND on the sole real keyword "gift" finds
+      // nothing (no product is literally tagged "gift"), but the budget must NOT be lost — falls back to a
+      // plain budget-only browse instead of a dead end that wipes the ₹3000 constraint
+      prisma.product.findMany.mockResolvedValueOnce([]); // exact AND on "gift"
+      prisma.product.findMany.mockResolvedValueOnce([scarf, necklace, handbag, sunglasses]); // budget-only fallback
+      await flow.handleFreeText("conv1", "biz1", conversation, "I need a gift for my girlfriend under 3000");
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.any(String), "View", [
+        { rows: expect.arrayContaining([expect.objectContaining({ title: "Silk Scarf" }), expect.objectContaining({ title: "Rose Gold Necklace" })]) },
+      ]);
+      let update = prisma.conversation.update.mock.calls.at(-1)![0];
+      expect(update.data.assistedBuyingContext.filters.maxPrice).toBe(3000); // budget survived the miss
+      conversation = { ...conversation, ...update.data, assistedBuyingContext: update.data.assistedBuyingContext };
+
+      // 2. "She likes fashion" -> "girlfriend"/"my"/"she"/"likes" are recipient/grammar filler, not attributes;
+      // "fashion" merges onto the still-remembered ₹3000 budget from turn 1
+      prisma.product.findMany.mockResolvedValueOnce([scarf]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "She likes fashion");
+      expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toEqual(
+        expect.arrayContaining([{ OR: expect.arrayContaining([{ name: { contains: "fashion", mode: "insensitive" } }]) }]),
+      );
+      update = prisma.conversation.update.mock.calls.at(-1)![0];
+      expect(update.data.assistedBuyingContext.filters.maxPrice).toBe(3000);
+      conversation = { ...conversation, ...update.data, assistedBuyingContext: update.data.assistedBuyingContext };
+
+      // 3. "She also likes accessories" -> accumulates onto fashion+gift+budget; exact AND across all fails,
+      // relaxes to a ranked partial match rather than a dead end
+      prisma.product.findMany.mockResolvedValueOnce([]); // exact AND(gift, fashion, accessories)
+      prisma.product.findMany.mockResolvedValueOnce([scarf, necklace, handbag, sunglasses]); // relaxed OR
+      await flow.handleFreeText("conv1", "biz1", conversation, "She also likes accessories");
+      update = prisma.conversation.update.mock.calls.at(-1)![0];
+      expect(update.data.assistedBuyingContext.filters.keywords).toEqual(expect.arrayContaining(["gift", "fashion", "accessories"]));
+      conversation = { ...conversation, ...update.data, assistedBuyingContext: update.data.assistedBuyingContext };
+
+      // 4. "Give me your top 3 options" -> the best 3 of what was just found, each with a reason grounded in
+      // the real budget/category — not a fresh (meaningless) search for "give"/"top"/"options"
+      const findManyCallsBeforeTopN = prisma.product.findMany.mock.calls.length;
+      prisma.product.findMany.mockResolvedValueOnce([scarf, necklace, handbag]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Give me your top 3 options");
+      expect(prisma.product.findMany.mock.calls.length).toBe(findManyCallsBeforeTopN + 1); // one lookup for the 3 picks, not a fresh keyword search
+      const topNMessage = conversations.sendMessage.mock.calls.at(-1)![2] as string;
+      expect(topNMessage).toContain("Silk Scarf");
+      expect(topNMessage).toContain("Rose Gold Necklace");
+      expect(topNMessage).toContain("Leather Handbag");
+      expect(topNMessage).toContain("budget"); // explains WHY, not just a bare list
+      expect(topNMessage).toContain("Accessories");
+      update = prisma.conversation.update.mock.calls.at(-1)![0];
+      conversation = { ...conversation, assistedBuyingContext: update.data.assistedBuyingContext };
+
+      // 5. "Which one would you personally recommend?" -> the inserted adverb ("personally") must not break
+      // RECOMMEND_PICK_RE; picks from the top-3 just shown (not the full earlier list) and explains why
+      prisma.product.findFirst.mockResolvedValueOnce(scarf); // reasoning lookup
+      prisma.product.findFirst.mockResolvedValueOnce({ ...scarf, variants: [{ id: "v1", price: 999, currency: "INR", inventory: 12, attributes: null }] }); // showProductDetail lookup
+      const findManyCallsBeforeRecommend = prisma.product.findMany.mock.calls.length;
+      await flow.handleFreeText("conv1", "biz1", conversation, "Which one would you personally recommend?");
+      expect(prisma.product.findMany.mock.calls.length).toBe(findManyCallsBeforeRecommend); // no fresh search
+      // the reasoning message is sent BEFORE showProductDetail's own follow-up prompt, so it's the second-to-last sendMessage call
+      const recommendMessage = conversations.sendMessage.mock.calls.at(-2)![2] as string;
+      expect(recommendMessage).toContain("Silk Scarf");
+      expect(recommendMessage).toContain("budget"); // grounded reasoning, not a silent pick
     });
   });
 });

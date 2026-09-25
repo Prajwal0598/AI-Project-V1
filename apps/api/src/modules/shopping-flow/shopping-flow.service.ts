@@ -25,9 +25,14 @@ const ORDINAL_WORDS: Record<string, number> = {
 const SEARCH_STOPWORDS = new Set([
   "show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some",
   "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good",
-  "what", "which", "products", "product", "items", "item",
+  "what", "which", "products", "product", "items", "item", "options",
   "on", "in", "would", "who", "someone", "but", "not", "too", "going", "recommend", "attending", "suitable", "loves",
   "preferably", "prefer", "ideally", "instead",
+  // pronouns/grammar/filler that show up heavily in multi-turn gift-recommendation chatter ("She ALSO likes
+  // accessories", "which one would you PERSONALLY recommend") plus gift-recipient words ("for MY GIRLFRIEND")
+  // that describe who the product is for, not an attribute of the product itself
+  "my", "her", "him", "she", "he", "also", "likes", "give", "your", "personally",
+  "girlfriend", "boyfriend", "wife", "husband", "mom", "mother", "dad", "father", "sister", "brother", "son", "daughter",
 ]);
 
 // messages asking what the store carries at all, rather than searching for something specific — must be
@@ -49,10 +54,16 @@ const OPTIONS_FOLLOWUP_RE = /\b(what colou?rs?|which colou?rs?|colou?r options|w
 const SIMILAR_RE = /\bsimilar\b/i;
 const CHEAPER_RE = /\b(cheaper|less expensive|lower price|budget|affordable)\b/i;
 
-// "Which one would you recommend?" — asks for a pick among whatever was just shown, not a fresh search;
-// deliberately requires "which one/option" (not just "what would you recommend", which is an open-ended
-// occasion-style request that should still run as a normal search — see Test 2's "going on vacation" case)
-const RECOMMEND_PICK_RE = /\bwhich (one|option) (would you|do you|should i) (recommend|choose|pick|go with)\b/i;
+// "Which one would you recommend?" / "Which one would you personally recommend?" — asks for a pick among
+// whatever was just shown, not a fresh search; deliberately requires "which one/option" (not just "what would
+// you recommend", which is an open-ended occasion-style request that should still run as a normal search — see
+// Test 2's "going on vacation" case). A short gap is allowed between the modal phrase and the verb so an
+// inserted adverb ("personally", "honestly") doesn't break the match.
+const RECOMMEND_PICK_RE = /\bwhich (one|option)\b.{0,15}\b(would you|do you|should i)\b.{0,15}\b(recommend|choose|pick|go with)\b/i;
+
+// "Give me your top 3 options" / "What are your top 3 picks?" — asks for the best N from whatever was just
+// found, with reasoning, not a fresh (nonsensical) search for the literal words "top"/"options"
+const TOP_N_RE = /\btop\s+(\d+|one|two|three|four|five)\b/i;
 
 // "Compare X and Y" / "What's the difference between X and Y?" — a fresh comparison request naming two
 // products; strips everything up to the trigger phrase, leaving "X and Y" to split and resolve by name
@@ -419,12 +430,60 @@ export class ShoppingFlowService {
     return true;
   }
 
+  /** Explains WHY a product fits the customer's accumulated ask — grounded only in facts we actually have
+   * (its real price vs. their stated budget, its real category vs. their stated interests), never an invented
+   * spec. Falls back to a neutral line when there's nothing concrete to cite. */
+  private explainFit(product: { category?: { name: string } | null }, variant: { price: number | string | { toString(): string }; currency: string }, filters: SearchFilters): string {
+    const reasons: string[] = [];
+    if (filters.maxPrice !== undefined) reasons.push(`fits within your ${fmtMoney(filters.maxPrice, variant.currency)} budget`);
+    const categoryName = product.category?.name;
+    const matchedKeywords = filters.keywords.filter((kw) => kw !== "gift" && categoryName?.toLowerCase().includes(kw));
+    if (categoryName && matchedKeywords.length) reasons.push(`it's ${categoryName}, matching what you said she's into`);
+    return reasons.length ? reasons.join(" and ") : `a popular pick at ${fmtMoney(variant.price, variant.currency)}`;
+  }
+
+  /** "Give me your top 3 options" — the best N from whatever was just found, each with a short reason grounded
+   * in the accumulated budget/interests, instead of just a bare re-listing (or a meaningless fresh search for
+   * the literal words "top"/"options"). Narrows lastResults to just these N, so a follow-up ("which one...")
+   * picks among the ones actually shown here. */
+  private async tryTopNRecommendations(conversationId: string, businessId: string, text: string, context: ShoppingSearchContext | null): Promise<boolean> {
+    const match = text.match(TOP_N_RE);
+    if (!match || !context?.lastResults?.length) return false;
+    const n = Math.max(1, wordToNumber(match[1]) ?? 3);
+    const picks = context.lastResults.slice(0, n);
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: picks.map((p) => p.productId) }, businessId },
+      include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 }, category: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    const lines = picks.map((pick, i) => {
+      const product = byId.get(pick.productId);
+      const variant = product?.variants[0];
+      if (!product || !variant) return `${i + 1}. *${pick.name}*`;
+      return `${i + 1}. *${product.name}* — ${fmtMoney(variant.price, variant.currency)} — ${this.explainFit(product, variant, context.filters)}`;
+    });
+    await this.conversations.sendMessage(conversationId, businessId, `🏆 My top ${picks.length} pick${picks.length === 1 ? "" : "s"}:\n${lines.join("\n")}`);
+
+    const narrowed: ShoppingSearchContext = { filters: context.filters, lastResults: picks };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { assistedBuyingContext: narrowed as unknown as Prisma.InputJsonValue } });
+    return true;
+  }
+
   /** "Which one would you recommend?" — picks from whatever was just shown (e.g. the similar-but-cheaper list)
-   * rather than running a fresh, meaningless search for the literal word "one". */
+   * rather than running a fresh, meaningless search for the literal word "one", and explains WHY that pick
+   * fits rather than silently just showing it. */
   private async tryRecommendationPick(conversationId: string, businessId: string, customerId: string, text: string, context: ShoppingSearchContext | null, activeProductId: string | null): Promise<boolean> {
     if (!RECOMMEND_PICK_RE.test(text.toLowerCase())) return false;
     if (context?.lastResults?.length) {
-      await this.showProductDetail(conversationId, businessId, context.lastResults[0].productId, customerId);
+      const top = context.lastResults[0];
+      const product = await this.prisma.product.findFirst({ where: { id: top.productId, businessId }, include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 }, category: true } });
+      const variant = product?.variants[0];
+      if (product && variant) {
+        await this.conversations.sendMessage(conversationId, businessId, `👍 I'd personally go with *${product.name}* — ${this.explainFit(product, variant, context.filters)}.`);
+      }
+      await this.showProductDetail(conversationId, businessId, top.productId, customerId);
       return true;
     }
     if (activeProductId) {
@@ -560,6 +619,7 @@ export class ShoppingFlowService {
     if (await this.tryViewCart(conversationId, businessId, customerId, text)) return;
 
     if (await this.tryComparisonFollowUp(conversationId, businessId, text, existingContext)) return;
+    if (await this.tryTopNRecommendations(conversationId, businessId, text, existingContext)) return;
     if (await this.tryRecommendationPick(conversationId, businessId, customerId, text, existingContext, activeProductId)) return;
     if (await this.tryProductDetailsByName(conversationId, businessId, customerId, text)) return;
     if (await this.tryCompareProducts(conversationId, businessId, text)) return;
@@ -617,6 +677,26 @@ export class ShoppingFlowService {
           return filters.keywords.filter((kw) => haystack.includes(kw)).length;
         };
         matches = relaxedMatches.sort((a, b) => keywordHits(b) - keywordHits(a));
+        isExactMatch = false;
+      }
+    }
+
+    // still nothing, but a budget was stated — a generic occasion word like "gift" alone isn't a real
+    // catalogue attribute, so failing to literally match it shouldn't dead-end and wipe out an otherwise
+    // useful budget constraint (e.g. "a gift under 3000" with no matching "gift" tag anywhere). Falls back to
+    // browsing everything within budget rather than "no products matched"; a genuine attribute miss with NO
+    // budget given (e.g. an unstocked colour) still correctly hard-fails below.
+    if (!matches.length && (filters.maxPrice !== undefined || filters.minPrice !== undefined)) {
+      const budgetOnly = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED" },
+        include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
+        take: 30,
+      });
+      let budgetMatches = budgetOnly.filter((p) => p.variants[0]);
+      if (filters.maxPrice !== undefined) budgetMatches = budgetMatches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
+      if (filters.minPrice !== undefined) budgetMatches = budgetMatches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
+      if (budgetMatches.length) {
+        matches = budgetMatches;
         isExactMatch = false;
       }
     }
