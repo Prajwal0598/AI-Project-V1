@@ -38,6 +38,9 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      # fails the build only on new critical advisories — high/moderate/low are tracked but don't block CI,
+      # since fixing every transitive one immediately isn't always possible without a breaking major bump
+      - run: pnpm audit --prod --audit-level=critical --ignore-registry-errors
       - run: pnpm db:generate
       - run: pnpm typecheck
       - run: pnpm test
