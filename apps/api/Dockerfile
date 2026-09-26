@@ -1,10 +1,10 @@
 # Multi-stage build for the NestJS API. Build context MUST be the monorepo root, e.g.:
 #   docker build -f apps/api/Dockerfile -t relay-api .
-FROM node:20-slim AS runtime-base
+FROM node:26-slim AS runtime-base
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-FROM node:20-slim AS base
+FROM node:26-slim AS base
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl python3 make g++ && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /app
