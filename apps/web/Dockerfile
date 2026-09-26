@@ -1,6 +1,6 @@
 # Multi-stage build for the Next.js web app. Build context MUST be the monorepo root, e.g.:
 #   docker build -f apps/web/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://api.example.com/api -t relay-web .
-FROM node:20-slim AS base
+FROM node:26-slim AS base
 RUN corepack enable
 WORKDIR /app
 
