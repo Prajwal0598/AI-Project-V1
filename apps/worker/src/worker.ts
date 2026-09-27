@@ -98,7 +98,7 @@ repeatPurchaseScanWorker.on("failed", (job, err) => {
 });
 
 // runs once daily at 09:00 server time — scans every opted-in business for customers statistically due to reorder
-repeatPurchaseScanQueue.add("scan", {}, { repeat: { pattern: process.env.REPEAT_PURCHASE_SCAN_CRON ?? "0 9 * * *" }, jobId: "repeat-purchase-scan-daily" }).catch((err) => {
+repeatPurchaseScanQueue.upsertJobScheduler("repeat-purchase-scan-daily", { pattern: process.env.REPEAT_PURCHASE_SCAN_CRON ?? "0 9 * * *" }, { name: "scan" }).catch((err) => {
   console.error("[repeat-purchase-scan] failed to schedule recurring job", err);
 });
 
@@ -118,7 +118,7 @@ unansweredConversationScanWorker.on("failed", (job, err) => {
 });
 
 // runs every 30 minutes — escalated conversations shouldn't sit unanswered for long
-unansweredConversationScanQueue.add("scan", {}, { repeat: { pattern: process.env.UNANSWERED_CONVERSATION_SCAN_CRON ?? "*/30 * * * *" }, jobId: "unanswered-conversation-scan-recurring" }).catch((err) => {
+unansweredConversationScanQueue.upsertJobScheduler("unanswered-conversation-scan-recurring", { pattern: process.env.UNANSWERED_CONVERSATION_SCAN_CRON ?? "*/30 * * * *" }, { name: "scan" }).catch((err) => {
   console.error("[unanswered-conversation-scan] failed to schedule recurring job", err);
 });
 
@@ -138,7 +138,7 @@ customerHealthScanWorker.on("failed", (job, err) => {
 });
 
 // runs once daily at 10:00 server time — win-back and high-value check-in nudges
-customerHealthScanQueue.add("scan", {}, { repeat: { pattern: process.env.CUSTOMER_HEALTH_SCAN_CRON ?? "0 10 * * *" }, jobId: "customer-health-scan-daily" }).catch((err) => {
+customerHealthScanQueue.upsertJobScheduler("customer-health-scan-daily", { pattern: process.env.CUSTOMER_HEALTH_SCAN_CRON ?? "0 10 * * *" }, { name: "scan" }).catch((err) => {
   console.error("[customer-health-scan] failed to schedule recurring job", err);
 });
 
@@ -160,7 +160,7 @@ databaseBackupWorker.on("failed", (job, err) => {
 // stopgap until Railway Pro's automatic backups/PITR are enabled (see jobs/database-backup.ts) — runs once
 // daily at 03:00 server time (low-traffic window), plus once immediately on startup so a fresh deploy isn't
 // left with zero backups for up to 24h waiting for the first scheduled run
-databaseBackupQueue.add("backup", {}, { repeat: { pattern: process.env.DATABASE_BACKUP_CRON ?? "0 3 * * *" }, jobId: "database-backup-daily" }).catch((err) => {
+databaseBackupQueue.upsertJobScheduler("database-backup-daily", { pattern: process.env.DATABASE_BACKUP_CRON ?? "0 3 * * *" }, { name: "backup" }).catch((err) => {
   console.error("[database-backup] failed to schedule recurring job", err);
 });
 databaseBackupQueue.add("backup-initial", {}).catch((err) => {
@@ -185,7 +185,7 @@ razorpayTokenRefreshWorker.on("failed", (job, err) => {
 // daily at 04:00 server time — refreshes any Razorpay OAuth connection within REFRESH_WINDOW_DAYS of its
 // access_token/refresh_token expiring (see jobs/razorpay-token-refresh.ts). Only relevant once Relay is an
 // approved Razorpay Technology Partner and at least one business has connected via OAuth.
-razorpayTokenRefreshQueue.add("refresh", {}, { repeat: { pattern: process.env.RAZORPAY_TOKEN_REFRESH_CRON ?? "0 4 * * *" }, jobId: "razorpay-token-refresh-daily" }).catch((err) => {
+razorpayTokenRefreshQueue.upsertJobScheduler("razorpay-token-refresh-daily", { pattern: process.env.RAZORPAY_TOKEN_REFRESH_CRON ?? "0 4 * * *" }, { name: "refresh" }).catch((err) => {
   console.error("[razorpay-token-refresh] failed to schedule recurring job", err);
 });
 
