@@ -9,6 +9,11 @@ updates:
       # patch/minor bumps land as one combined PR per week instead of dozens of individual ones
       minor-and-patch:
         update-types: ["minor", "patch"]
+    # major bumps (NestJS suite, Next.js, TypeScript, BullMQ, ioredis, openai, etc.) need coordinated,
+    # deliberate testing rather than a weekly drive-by merge — bump these on purpose instead
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -22,3 +27,7 @@ updates:
       - "/apps/worker"
     schedule:
       interval: "weekly"
+    # same reasoning as npm above — a Node major (e.g. 20 -> 26) deserves its own deliberate test pass
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
