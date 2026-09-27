@@ -49,6 +49,9 @@ export default defineRailway(() => {
       EMAIL_WEBHOOK_SECRET: preserve(),
       WHATSAPP_VERIFY_TOKEN: preserve(),
       INSTAGRAM_VERIFY_TOKEN: preserve(),
+      // Razorpay OAuth (Technology Partner) — only meaningful once Relay is an approved partner (see docs/app-overview.md)
+      RAZORPAY_OAUTH_CLIENT_ID: preserve(),
+      RAZORPAY_OAUTH_CLIENT_SECRET: preserve(),
       // set these to the real deployed domains after the first `apply` (avoids a circular
       // reference between api<->web at plan time) — see NEXT_PUBLIC_API_URL below on `web`
       WEB_ORIGIN: preserve(),
@@ -75,6 +78,9 @@ export default defineRailway(() => {
       OPENAI_API_KEY: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),
       SENTRY_DSN: preserve(),
+      RAZORPAY_OAUTH_CLIENT_ID: preserve(),
+      RAZORPAY_OAUTH_CLIENT_SECRET: preserve(),
+      RAZORPAY_TOKEN_REFRESH_CRON: preserve(),
     },
   });
 

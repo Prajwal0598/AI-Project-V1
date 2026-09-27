@@ -1,11 +1,20 @@
-import { createDecipheriv } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-// mirrors apps/api's crypto.helper.ts decrypt half — duplicated because the worker is a separate process
+// mirrors apps/api's crypto.helper.ts — duplicated because the worker is a separate process
 function getKey(): Buffer | null {
   const raw = process.env.CREDENTIALS_ENCRYPTION_KEY;
   if (!raw) return null;
   const key = Buffer.from(raw, "hex");
   return key.length === 32 ? key : null;
+}
+
+export function encryptSecret(plaintext: string): string {
+  const key = getKey();
+  if (!key) throw new Error("CREDENTIALS_ENCRYPTION_KEY is not configured (must be a 64-char hex string).");
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${ciphertext.toString("hex")}`;
 }
 
 export function decryptSecret(stored: string): string {

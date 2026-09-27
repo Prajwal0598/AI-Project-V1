@@ -24,6 +24,21 @@ interface PaymentLinkResult {
 export class RazorpayService {
   private readonly logger = new Logger(RazorpayService.name);
 
+  /** OAuth (Technology Partner) is preferred over manual Key ID/Secret when a business has connected via
+   * "Connect Razorpay" — same dual-path precedence as WhatsApp's Embedded Signup vs manual token entry. */
+  private resolveAuthHeader(business: Pick<Business, "razorpayKeyId" | "razorpayKeySecretEncrypted" | "razorpayAccessTokenEncrypted" | "razorpayConnectionStatus">): string | null {
+    if (business.razorpayConnectionStatus === "CONNECTED" && business.razorpayAccessTokenEncrypted) {
+      try {
+        return `Bearer ${decryptSecret(business.razorpayAccessTokenEncrypted)}`;
+      } catch (err) {
+        this.logger.error("Failed to decrypt Razorpay OAuth access token — falling back to Key ID/Secret", err instanceof Error ? err.stack : String(err));
+      }
+    }
+    const credentials = this.resolveCredentials(business);
+    if (!credentials) return null;
+    return `Basic ${Buffer.from(`${credentials.keyId}:${credentials.keySecret}`).toString("base64")}`;
+  }
+
   private resolveCredentials(business: Pick<Business, "razorpayKeyId" | "razorpayKeySecretEncrypted">): RazorpayCredentials | null {
     const keyId = business.razorpayKeyId?.trim() || process.env.RAZORPAY_KEY_ID?.trim();
     let keySecret: string | undefined;
@@ -54,12 +69,12 @@ export class RazorpayService {
    * isn't configured for this business, or if the Razorpay API call fails for any reason — never throws, so
    * the caller can fall back to the existing simulated payment flow instead of failing order creation. */
   async createPaymentLink(
-    business: Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "name">,
+    business: Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "razorpayAccessTokenEncrypted" | "razorpayConnectionStatus" | "name">,
     order: Pick<Order, "id" | "total" | "currency">,
     customer: { name: string; phone?: string | null },
   ): Promise<PaymentLinkResult | null> {
-    const credentials = this.resolveCredentials(business);
-    if (!credentials) return null;
+    const authHeader = this.resolveAuthHeader(business);
+    if (!authHeader) return null;
 
     // amount must be in the smallest currency unit (paise for INR) — total is a Decimal, round to avoid float drift
     const amountInSubunits = Math.round(Number(order.total) * 100);
@@ -68,7 +83,7 @@ export class RazorpayService {
       const res = await fetch("https://api.razorpay.com/v1/payment_links", {
         method: "POST",
         headers: {
-          Authorization: `Basic ${Buffer.from(`${credentials.keyId}:${credentials.keySecret}`).toString("base64")}`,
+          Authorization: authHeader,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({

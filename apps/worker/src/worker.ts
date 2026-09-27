@@ -16,6 +16,7 @@ import { processRepeatPurchaseScan } from "./jobs/repeat-purchase-scan";
 import { processUnansweredConversationScan } from "./jobs/unanswered-conversation-scan";
 import { processCustomerHealthScan } from "./jobs/customer-health-scan";
 import { processDatabaseBackup } from "./jobs/database-backup";
+import { processRazorpayTokenRefresh } from "./jobs/razorpay-token-refresh";
 import { initErrorReporting, captureException } from "./error-reporting";
 
 initErrorReporting();
@@ -166,8 +167,30 @@ databaseBackupQueue.add("backup-initial", {}).catch((err) => {
   console.error("[database-backup] failed to schedule initial job", err);
 });
 
+const razorpayTokenRefreshQueue = new Queue(QUEUES.RAZORPAY_TOKEN_REFRESH, { connection });
+const razorpayTokenRefreshWorker = new Worker(QUEUES.RAZORPAY_TOKEN_REFRESH, processRazorpayTokenRefresh, {
+  connection,
+  concurrency: 1,
+});
+
+razorpayTokenRefreshWorker.on("completed", (job, result) => {
+  console.log(`[razorpay-token-refresh] job ${job.id} completed`, result);
+});
+
+razorpayTokenRefreshWorker.on("failed", (job, err) => {
+  console.error(`[razorpay-token-refresh] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.RAZORPAY_TOKEN_REFRESH, jobId: job?.id });
+});
+
+// daily at 04:00 server time — refreshes any Razorpay OAuth connection within REFRESH_WINDOW_DAYS of its
+// access_token/refresh_token expiring (see jobs/razorpay-token-refresh.ts). Only relevant once Relay is an
+// approved Razorpay Technology Partner and at least one business has connected via OAuth.
+razorpayTokenRefreshQueue.add("refresh", {}, { repeat: { pattern: process.env.RAZORPAY_TOKEN_REFRESH_CRON ?? "0 4 * * *" }, jobId: "razorpay-token-refresh-daily" }).catch((err) => {
+  console.error("[razorpay-token-refresh] failed to schedule recurring job", err);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}, ${QUEUES.DATABASE_BACKUP}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}, ${QUEUES.DATABASE_BACKUP}, ${QUEUES.RAZORPAY_TOKEN_REFRESH}`);
 
 // lightweight health endpoint so Railway/an external uptime monitor can confirm the worker process is actually
 // alive and every BullMQ worker is running, not just that the container hasn't crashed
@@ -176,6 +199,7 @@ const allWorkers: Record<string, Worker> = {
   [QUEUES.ABANDONED_CART]: abandonedCartWorker, [QUEUES.REPEAT_PURCHASE_SCAN]: repeatPurchaseScanWorker,
   [QUEUES.UNANSWERED_CONVERSATION_SCAN]: unansweredConversationScanWorker, [QUEUES.CUSTOMER_HEALTH_SCAN]: customerHealthScanWorker,
   [QUEUES.DATABASE_BACKUP]: databaseBackupWorker,
+  [QUEUES.RAZORPAY_TOKEN_REFRESH]: razorpayTokenRefreshWorker,
 };
 const healthServer = createServer((req, res) => {
   if (req.url !== "/health") { res.writeHead(404); res.end(); return; }
@@ -202,6 +226,8 @@ process.on("SIGTERM", async () => {
   await customerHealthScanQueue.close();
   await databaseBackupWorker.close();
   await databaseBackupQueue.close();
+  await razorpayTokenRefreshWorker.close();
+  await razorpayTokenRefreshQueue.close();
   await connection.quit();
   process.exit(0);
 });

@@ -152,6 +152,15 @@ export interface WhatsAppConnectionStatusView {
   lastErrorMessage: string | null;
 }
 
+export type RazorpayConnectionStatus = "DISCONNECTED" | "CONNECTED" | "RETRY_REQUIRED";
+
+export interface RazorpayConnectionStatusView {
+  status: RazorpayConnectionStatus;
+  accountId: string | null;
+  connectedAt: string | null;
+  lastErrorMessage: string | null;
+}
+
 export interface BusinessStats {
   leads: number;
   customers: number;
@@ -652,4 +661,10 @@ export const whatsappEmbeddedSignup = {
   complete: (data: { code: string; wabaId: string; phoneNumberId: string }) =>
     request<WhatsAppConnectionStatusView>("/integrations/whatsapp/embedded-signup/complete", { method: "POST", body: JSON.stringify(data) }),
   disconnect: () => request<WhatsAppConnectionStatusView>("/integrations/whatsapp/disconnect", { method: "POST" }),
+};
+
+export const razorpayOAuth = {
+  getStatus: () => request<RazorpayConnectionStatusView>("/integrations/razorpay"),
+  getAuthorizeUrl: () => request<{ url: string }>("/integrations/razorpay/authorize-url"),
+  disconnect: () => request<RazorpayConnectionStatusView>("/integrations/razorpay/disconnect", { method: "POST" }),
 };

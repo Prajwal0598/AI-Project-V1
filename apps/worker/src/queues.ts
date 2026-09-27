@@ -7,6 +7,7 @@ export const QUEUES = {
   UNANSWERED_CONVERSATION_SCAN: "unanswered-conversation-scan",
   CUSTOMER_HEALTH_SCAN: "customer-health-scan",
   DATABASE_BACKUP: "database-backup",
+  RAZORPAY_TOKEN_REFRESH: "razorpay-token-refresh",
 } as const;
 
 export interface FollowUpJobData {

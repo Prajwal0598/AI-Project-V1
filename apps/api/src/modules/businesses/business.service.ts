@@ -11,7 +11,7 @@ export class BusinessService {
 
   // never return encrypted credential ciphertext to the client — only whether one is configured
   private sanitize(business: Business) {
-    const { whatsappAccessTokenEncrypted, instagramAccessTokenEncrypted, postmarkServerTokenEncrypted, razorpayKeySecretEncrypted, razorpayWebhookSecretEncrypted, ...rest } = business;
+    const { whatsappAccessTokenEncrypted, instagramAccessTokenEncrypted, postmarkServerTokenEncrypted, razorpayKeySecretEncrypted, razorpayWebhookSecretEncrypted, razorpayAccessTokenEncrypted, razorpayRefreshTokenEncrypted, ...rest } = business;
     return {
       ...rest,
       whatsappAccessTokenConfigured: !!whatsappAccessTokenEncrypted,

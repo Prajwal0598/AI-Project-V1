@@ -216,6 +216,16 @@ enum WhatsAppConnectionStatus {
   SETUP_REQUIRED
 }
 
+// connection lifecycle for Razorpay OAuth (Technology Partner) — mirrors WhatsAppConnectionStatus's shape.
+// Simpler than WhatsApp's since there's no separate phone-registration/webhook-subscription step: the token
+// exchange itself is the whole handshake, so this only ever moves DISCONNECTED -> CONNECTED -> (RETRY_REQUIRED
+// if a refresh ever fails, e.g. the merchant revoked access from their own Razorpay dashboard) -> DISCONNECTED.
+enum RazorpayConnectionStatus {
+  DISCONNECTED
+  CONNECTED
+  RETRY_REQUIRED
+}
+
 model Business {
   id                    String         @id @default(cuid())
   name                  String
@@ -255,6 +265,17 @@ model Business {
   razorpayKeyId                    String?
   razorpayKeySecretEncrypted        String?
   razorpayWebhookSecretEncrypted     String?
+  // Razorpay OAuth (Technology Partner) \u2014 populated by "Connect Razorpay" instead of the merchant pasting
+  // Key ID/Secret above; the manual fields above stay as a fallback for when OAuth isn't set up yet (same
+  // dual-path pattern as WhatsApp's Embedded Signup vs manual Phone Number ID/Access Token).
+  razorpayAccountId              String?   // acc_xxx \u2014 identifies which sub-merchant granted authorization
+  razorpayAccessTokenEncrypted   String?   // Bearer token, used instead of Key ID:Secret Basic Auth. Expires every 90 days.
+  razorpayRefreshTokenEncrypted  String?   // used to mint a new access_token before it expires. Expires every 180 days.
+  razorpayPublicToken            String?   // rzp_live_oauth_xxx \u2014 not secret, used client-side (Checkout) instead of key_id
+  razorpayTokenExpiresAt         DateTime?
+  razorpayConnectionStatus       RazorpayConnectionStatus @default(DISCONNECTED)
+  razorpayConnectedAt            DateTime?
+  razorpayLastErrorMessage       String?
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
   users         User[]

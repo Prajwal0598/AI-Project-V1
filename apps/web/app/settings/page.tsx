@@ -2,8 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import Script from "next/script";
 import { AppShell } from "../../components/app-shell";
-import { api, getBusinessId, whatsappEmbeddedSignup } from "../../lib/api";
-import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView } from "../../lib/api";
+import { api, getBusinessId, whatsappEmbeddedSignup, razorpayOAuth } from "../../lib/api";
+import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView, RazorpayConnectionStatusView } from "../../lib/api";
 
 declare global {
   interface Window {
@@ -54,6 +54,11 @@ export default function SettingsPage() {
   const [waConnectError, setWaConnectError] = useState("");
   const [showManualWhatsApp, setShowManualWhatsApp] = useState(false);
   const pendingSignupRef = useRef<{ wabaId: string; phoneNumberId: string } | null>(null);
+  const [rzStatus, setRzStatus] = useState<RazorpayConnectionStatusView | null>(null);
+  const [rzConnecting, setRzConnecting] = useState(false);
+  const [rzConnectError, setRzConnectError] = useState("");
+  const [rzConnectNotice, setRzConnectNotice] = useState("");
+  const [showManualRazorpay, setShowManualRazorpay] = useState(false);
 
   useEffect(() => {
     const bizId = getBusinessId();
@@ -78,6 +83,7 @@ export default function SettingsPage() {
     api.auth.me().then(setMe).catch(console.error);
     api.categories.list(bizId).then(setCategories).catch(console.error);
     whatsappEmbeddedSignup.getStatus().then(setWaStatus).catch(console.error);
+    razorpayOAuth.getStatus().then(setRzStatus).catch(console.error);
     loadTeam();
     loadRules();
   }, []);
@@ -134,6 +140,41 @@ export default function SettingsPage() {
     try {
       setWaStatus(await whatsappEmbeddedSignup.disconnect());
     } catch (err) { setWaConnectError(err instanceof Error ? err.message : "Could not disconnect WhatsApp."); }
+  }
+
+  // Razorpay OAuth is a plain server-redirect flow (unlike WhatsApp's in-page JS SDK popup) — after the
+  // merchant authorizes, Razorpay redirects to our backend, which redirects the browser back HERE with a
+  // ?razorpay=connected|error query param. Pick that up once on mount, show it, then strip it from the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("razorpay");
+    if (!result) return;
+    if (result === "connected") {
+      setRzConnectNotice("✓ Razorpay connected.");
+      razorpayOAuth.getStatus().then(setRzStatus).catch(console.error);
+    } else if (result === "error") {
+      setRzConnectError(params.get("message") || "Could not complete the Razorpay connection.");
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+
+  async function connectRazorpay() {
+    setRzConnectError(""); setRzConnectNotice("");
+    setRzConnecting(true);
+    try {
+      const { url } = await razorpayOAuth.getAuthorizeUrl();
+      window.location.href = url; // full navigation, not a popup — Razorpay's OAuth flow is a plain redirect
+    } catch (err) {
+      setRzConnectError(err instanceof Error ? err.message : "Could not start the Razorpay connection.");
+      setRzConnecting(false);
+    }
+  }
+
+  async function disconnectRazorpay() {
+    setRzConnectError(""); setRzConnectNotice("");
+    try {
+      setRzStatus(await razorpayOAuth.disconnect());
+    } catch (err) { setRzConnectError(err instanceof Error ? err.message : "Could not disconnect Razorpay."); }
   }
 
   function loadRules() {
@@ -311,26 +352,51 @@ export default function SettingsPage() {
     <section className="settings-section">
       <h2>Payments (Razorpay)</h2>
       <p>Lets customers pay online via UPI with a real Razorpay Payment Link. Without this configured, UPI orders use a simulated payment flow instead.</p>
-      <div style={{ maxWidth: 420, marginTop: 16 }}>
-        <div className="login-field">
-          <label>Key ID</label>
-          <input value={razorpayKeyId} onChange={e => setRazorpayKeyId(e.target.value)} placeholder="rzp_live_XXXXXXXXXXXXXX" />
+      {rzConnectNotice && <p style={{ color: "var(--green)", fontSize: 12, marginBottom: 8 }}>{rzConnectNotice}</p>}
+      {rzConnectError && <p style={{ color: "#b94940", fontSize: 12, marginBottom: 8 }}>{rzConnectError}</p>}
+      {rzStatus?.status === "CONNECTED" ? (
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <p style={{ color: "var(--green)", fontWeight: 600 }}>✓ Connected</p>
+          <p>Account: {rzStatus.accountId}</p>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={disconnectRazorpay}>Disconnect</button>
+          </div>
         </div>
-        <div className="login-field">
-          <label>Key secret {biz?.razorpayKeySecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
-          <input type="password" value={razorpayKeySecret} onChange={e => setRazorpayKeySecret(e.target.value)} placeholder={biz?.razorpayKeySecretConfigured ? "•••••••• (leave blank to keep)" : "From Razorpay Dashboard → API Keys"} />
+      ) : (
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <p>Connect your Razorpay account — you'll log in on Razorpay's own site and authorize Relay, without ever pasting API keys here.</p>
+          {rzStatus?.status === "RETRY_REQUIRED" && (
+            <p style={{ fontSize: 12, color: "var(--muted)" }}>Current status: retry required{rzStatus.lastErrorMessage ? ` — ${rzStatus.lastErrorMessage}` : ""}</p>
+          )}
+          <button className="primary-button" onClick={connectRazorpay} disabled={rzConnecting}>{rzConnecting ? "Redirecting…" : "Connect Razorpay"}</button>
         </div>
-        <div className="login-field">
-          <label>Webhook secret {biz?.razorpayWebhookSecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
-          <input type="password" value={razorpayWebhookSecret} onChange={e => setRazorpayWebhookSecret(e.target.value)} placeholder={biz?.razorpayWebhookSecretConfigured ? "•••••••• (leave blank to keep)" : "Set this same value when creating the webhook below"} />
+      )}
+      <button onClick={() => setShowManualRazorpay(v => !v)} style={{ marginTop: 16, fontSize: 12, textDecoration: "underline" }}>
+        {showManualRazorpay ? "Hide" : "Advanced: connect manually instead"}
+      </button>
+      {showManualRazorpay && (
+        <div style={{ maxWidth: 420, marginTop: 12 }}>
+          <p style={{ fontSize: 12, color: "var(--muted)" }}>Fallback for when Razorpay OAuth isn't available — paste credentials directly from the Razorpay Dashboard.</p>
+          <div className="login-field">
+            <label>Key ID</label>
+            <input value={razorpayKeyId} onChange={e => setRazorpayKeyId(e.target.value)} placeholder="rzp_live_XXXXXXXXXXXXXX" />
+          </div>
+          <div className="login-field">
+            <label>Key secret {biz?.razorpayKeySecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
+            <input type="password" value={razorpayKeySecret} onChange={e => setRazorpayKeySecret(e.target.value)} placeholder={biz?.razorpayKeySecretConfigured ? "•••••••• (leave blank to keep)" : "From Razorpay Dashboard → API Keys"} />
+          </div>
+          <div className="login-field">
+            <label>Webhook secret {biz?.razorpayWebhookSecretConfigured && <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ configured</span>}</label>
+            <input type="password" value={razorpayWebhookSecret} onChange={e => setRazorpayWebhookSecret(e.target.value)} placeholder={biz?.razorpayWebhookSecretConfigured ? "•••••••• (leave blank to keep)" : "Set this same value when creating the webhook below"} />
+          </div>
+          {biz && <div className="login-field">
+            <label>Webhook URL — paste this into Razorpay Dashboard → Settings → Webhooks</label>
+            <input readOnly value={biz.razorpayWebhookUrl} onFocus={e => e.target.select()} />
+          </div>}
+          <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Key secret and webhook secret are stored encrypted per-business. Falls back to <code>RAZORPAY_KEY_ID</code>/<code>RAZORPAY_KEY_SECRET</code>/<code>RAZORPAY_WEBHOOK_SECRET</code> in <code>.env</code> if left unset. Subscribe the webhook to the <code>payment_link.paid</code> event.</p>
+          <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
         </div>
-        {biz && <div className="login-field">
-          <label>Webhook URL — paste this into Razorpay Dashboard → Settings → Webhooks</label>
-          <input readOnly value={biz.razorpayWebhookUrl} onFocus={e => e.target.select()} />
-        </div>}
-        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Key secret and webhook secret are stored encrypted per-business. Falls back to <code>RAZORPAY_KEY_ID</code>/<code>RAZORPAY_KEY_SECRET</code>/<code>RAZORPAY_WEBHOOK_SECRET</code> in <code>.env</code> if left unset. Subscribe the webhook to the <code>payment_link.paid</code> event.</p>
-        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
-      </div>
+      )}
     </section>
 
     <section className="settings-section">

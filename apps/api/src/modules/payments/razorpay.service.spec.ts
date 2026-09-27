@@ -4,7 +4,7 @@ import type { Business, Order } from "@prisma/client";
 import { RazorpayService } from "./razorpay.service";
 import { encryptSecret } from "../../common/crypto.helper";
 
-type BusinessPick = Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "name">;
+type BusinessPick = Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "razorpayAccessTokenEncrypted" | "razorpayConnectionStatus" | "name">;
 
 describe("RazorpayService", () => {
   let service: RazorpayService;
@@ -53,22 +53,50 @@ describe("RazorpayService", () => {
   });
 
   describe("createPaymentLink", () => {
-    const business: BusinessPick = { id: "biz1", razorpayKeyId: "rzp_test_key", razorpayKeySecretEncrypted: null, name: "Prajwal Studio" };
+    const business: BusinessPick = { id: "biz1", razorpayKeyId: "rzp_test_key", razorpayKeySecretEncrypted: null, razorpayAccessTokenEncrypted: null, razorpayConnectionStatus: "DISCONNECTED", name: "Prajwal Studio" };
     const order: Pick<Order, "id" | "total" | "currency"> = { id: "order1", total: new Prisma.Decimal("2299.00"), currency: "INR" };
     const customer = { name: "Test Customer", phone: "+911234567890" };
 
     it("returns null (without calling fetch) when no credentials are configured", async () => {
       const fetchSpy = jest.spyOn(global, "fetch");
-      const unconfigured: BusinessPick = { id: "biz1", razorpayKeyId: null, razorpayKeySecretEncrypted: null, name: "No Razorpay" };
+      const unconfigured: BusinessPick = { id: "biz1", razorpayKeyId: null, razorpayKeySecretEncrypted: null, razorpayAccessTokenEncrypted: null, razorpayConnectionStatus: "DISCONNECTED", name: "No Razorpay" };
       const result = await service.createPaymentLink(unconfigured, order, customer);
       expect(result).toBeNull();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
+    it("prefers the OAuth access token (Bearer) over Key ID/Secret when connected", async () => {
+      const fetchSpy = jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "plink_oauth", short_url: "https://rzp.io/oauth" }),
+      } as Response);
+      const oauthBusiness: BusinessPick = { id: "biz1", razorpayKeyId: "rzp_test_key", razorpayKeySecretEncrypted: null, razorpayAccessTokenEncrypted: encryptSecret("oauth_access_token"), razorpayConnectionStatus: "CONNECTED", name: "OAuth Biz" };
+
+      const result = await service.createPaymentLink(oauthBusiness, order, customer);
+
+      expect(result).toEqual({ id: "plink_oauth", shortUrl: "https://rzp.io/oauth" });
+      const [, options] = fetchSpy.mock.calls[0];
+      expect((options?.headers as Record<string, string>).Authorization).toBe("Bearer oauth_access_token");
+    });
+
+    it("falls back to Key ID/Secret when connectionStatus isn't CONNECTED, even if a stale token is present", async () => {
+      const fetchSpy = jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "plink_fallback", short_url: "https://rzp.io/fallback" }),
+      } as Response);
+      process.env.RAZORPAY_KEY_SECRET = "env_secret";
+      const staleBusiness: BusinessPick = { id: "biz1", razorpayKeyId: "rzp_test_key", razorpayKeySecretEncrypted: null, razorpayAccessTokenEncrypted: encryptSecret("stale_token"), razorpayConnectionStatus: "RETRY_REQUIRED", name: "Stale Biz" };
+
+      await service.createPaymentLink(staleBusiness, order, customer);
+
+      const [, options] = fetchSpy.mock.calls[0];
+      expect((options?.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from("rzp_test_key:env_secret").toString("base64")}`);
+    });
+
     it("falls back to env credentials when the business hasn't configured its own key/secret", async () => {
       process.env.RAZORPAY_KEY_ID = "env_key_id";
       process.env.RAZORPAY_KEY_SECRET = "env_key_secret";
-      const noKeyBusiness: BusinessPick = { id: "biz1", razorpayKeyId: null, razorpayKeySecretEncrypted: null, name: "Env Fallback Biz" };
+      const noKeyBusiness: BusinessPick = { id: "biz1", razorpayKeyId: null, razorpayKeySecretEncrypted: null, razorpayAccessTokenEncrypted: null, razorpayConnectionStatus: "DISCONNECTED", name: "Env Fallback Biz" };
       jest.spyOn(global, "fetch").mockResolvedValue({
         ok: true,
         json: async () => ({ id: "plink_env", short_url: "https://rzp.io/env" }),
