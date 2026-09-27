@@ -6,6 +6,7 @@ import { CartService } from "../cart/cart.service";
 import { OrderService } from "../orders/order.service";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
+import { logAiAction } from "../../common/ai-action-log.helper";
 
 const MAX_LIST_ROWS = 10;
 
@@ -238,6 +239,11 @@ export class ShoppingFlowService {
     if (actionId.startsWith("cat_")) return this.showProducts(conversationId, businessId, actionId.slice(4));
     if (actionId.startsWith("prod_")) return this.showProductDetail(conversationId, businessId, actionId.slice(5), conversation.customerId);
     if (actionId.startsWith("variant_")) return this.askQuantity(conversationId, businessId, actionId.slice(8));
+    // Smart Reply Suggestion buttons (gated by Business.smartRepliesEnabled) — attached to AI/deterministic
+    // product cards; routed here exactly like every other button tap, so tapping one from an AI-driven
+    // conversation seamlessly hands off into this same deterministic cart/browsing machinery
+    if (actionId.startsWith("quickadd_")) return this.quickAddToCart(conversationId, businessId, conversation.customerId, actionId.slice(9));
+    if (actionId.startsWith("similar_")) return this.showSimilarProducts(conversationId, businessId, actionId.slice(8));
     if (actionId === "cart_checkout") return this.beginCheckout(conversationId, businessId, conversation.customerId);
     if (actionId === "cart_clear") return this.clearCart(conversationId, businessId, conversation.customerId);
     // "Keep Shopping" always returns to the top-level category list/full catalog, not the last-viewed
@@ -592,6 +598,52 @@ export class ShoppingFlowService {
     return true;
   }
 
+  /** Smart Reply "🛒 Add to Cart" button — one tap adds qty 1 of the tapped variant, skipping the "how many
+   * would you like?" text prompt that a normal `variant_<id>` tap still asks. Reuses mutateCartItem so the
+   * confirmation message, cart totals, and follow-up "add two more"/"make it 3" free-text corrections all
+   * behave identically to the existing AI free-text add-to-cart path — this is genuinely the same action, just
+   * reached via a tap instead of typed text. */
+  private async quickAddToCart(conversationId: string, businessId: string, customerId: string, variantId: string) {
+    const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true }, include: { product: true } });
+    if (!variant) {
+      await this.conversations.sendMessage(conversationId, businessId, "Sorry, that option is no longer available.");
+      return;
+    }
+    if (variant.inventory === 0) {
+      await this.conversations.sendMessage(conversationId, businessId, "😔 That option is currently out of stock.");
+      return;
+    }
+    await this.mutateCartItem(conversationId, businessId, customerId, { productId: variant.productId, variantId: variant.id, name: variant.product.name }, "add", 1);
+  }
+
+  /** Smart Reply "🔎 See Similar" button — other PUBLISHED products in the same category, excluding the
+   * product itself. Deliberately a plain same-category listing (no price-direction filter) rather than
+   * duplicating trySimilarButCheaper/tryMorePremium's free-text-triggered price-relative variants above. */
+  private async showSimilarProducts(conversationId: string, businessId: string, productId: string) {
+    const product = await this.prisma.product.findFirst({ where: { id: productId, businessId } });
+    if (!product?.categoryId) {
+      await this.conversations.sendMessage(conversationId, businessId, "😕 I don't have similar products to suggest for that item.");
+      return;
+    }
+
+    const alternatives = await this.prisma.product.findMany({
+      where: { businessId, status: "PUBLISHED", categoryId: product.categoryId, id: { not: productId } },
+      include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
+      take: MAX_LIST_ROWS,
+    });
+    const matches = alternatives.filter((p) => p.variants[0]);
+    if (!matches.length) {
+      await this.conversations.sendMessage(conversationId, businessId, `😕 I don't have anything else similar to *${product.name}* right now.`);
+      return;
+    }
+
+    await this.conversations.sendList(conversationId, businessId, `🔎 Similar to *${product.name}*:`, "View", [
+      { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(p.variants[0].price, p.variants[0].currency)}${p.variants[0].inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` })) },
+    ]);
+    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+  }
+
   /** "Add the Premium Cotton T-Shirt to my cart" (a NAMED product, implicit qty 1) / "I want 2 Premium Cotton
    * T-Shirts" (a NAMED product with an EXPLICIT quantity) / "Add two of them" / "Add another one" (a quantity
    * referring to whichever product was last added). All actually mutate the real cart — never just a
@@ -849,6 +901,29 @@ export class ShoppingFlowService {
     // (image delivery is fetched asynchronously by Meta, so a plain-text follow-up can render first)
     const followUp = isSingleVariant ? (first.inventory === 0 ? "\n\n😔 This item is currently out of stock." : "\n\n🔢 How many would you like? Reply with a number.") : "";
     const caption = `*${product.name}*${product.description ? `\n_${product.description}_` : ""}\n💰 ${fmtMoney(first.price, first.currency)}${followUp}`;
+
+    // Smart Reply Suggestion buttons (opt-in, single-variant only — a fast tap-to-choose alternative alongside
+    // the existing typed-quantity flow below, which still works unchanged if the customer types a number
+    // instead of tapping). Falls back to the plain image/text send if Meta rejects the interactive payload.
+    const business = isSingleVariant ? await this.prisma.business.findUnique({ where: { id: businessId }, select: { smartRepliesEnabled: true } }) : null;
+    if (business?.smartRepliesEnabled) {
+      const plainCaption = `*${product.name}*${product.description ? `\n_${product.description}_` : ""}\n💰 ${fmtMoney(first.price, first.currency)}`;
+      const buttons = first.inventory === 0
+        ? [{ id: `similar_${product.id}`, title: "🔎 See Similar" }]
+        : [{ id: `quickadd_${first.id}`, title: "🛒 Add to Cart" }, { id: `similar_${product.id}`, title: "🔎 See Similar" }];
+      try {
+        await this.conversations.sendButtons(conversationId, businessId, plainCaption, buttons, product.imageUrl ? toPublicImageUrl(product.imageUrl) : undefined);
+        await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "SMART_REPLY_SHOWN", result: "success", reason: `product detail: ${product.name}` });
+        await this.prisma.conversation.update({
+          where: { id: conversationId },
+          data: { shoppingState: first.inventory === 0 ? "VIEWING_PRODUCT" : "AWAITING_QUANTITY", activeProductId: productId, pendingVariantId: first.inventory === 0 ? null : first.id },
+        });
+        return;
+      } catch (error) {
+        this.logger.warn(`Smart Reply buttons failed for product ${productId}, falling back to text — ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     if (product.imageUrl) {
       await this.conversations.sendImage(conversationId, businessId, toPublicImageUrl(product.imageUrl), caption);
     } else {

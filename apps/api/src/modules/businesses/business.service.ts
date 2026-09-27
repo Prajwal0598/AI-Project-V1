@@ -127,6 +127,7 @@ export class BusinessService {
         ...(input.defaultRepeatPurchaseDays !== undefined && { defaultRepeatPurchaseDays: input.defaultRepeatPurchaseDays }),
         ...(input.proactiveSuggestionsEnabled !== undefined && { proactiveSuggestionsEnabled: input.proactiveSuggestionsEnabled }),
         ...(input.assistedBuyingEnabled !== undefined && { assistedBuyingEnabled: input.assistedBuyingEnabled }),
+        ...(input.smartRepliesEnabled !== undefined && { smartRepliesEnabled: input.smartRepliesEnabled }),
         ...(input.assistedBuyingMaxRecommendations !== undefined && { assistedBuyingMaxRecommendations: input.assistedBuyingMaxRecommendations }),
         ...(input.assistedBuyingExcludedCategoryIds !== undefined && { assistedBuyingExcludedCategoryIds: input.assistedBuyingExcludedCategoryIds }),
         ...(input.assistedBuyingRankingPreference !== undefined && { assistedBuyingRankingPreference: input.assistedBuyingRankingPreference }),

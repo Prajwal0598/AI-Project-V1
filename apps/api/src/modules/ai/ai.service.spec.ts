@@ -305,3 +305,61 @@ describe("AiService — prompt injection / AI safety", () => {
     expect(reply).not.toMatch(/https?:\/\//);
   });
 });
+
+describe("AiService — Smart Reply Suggestion buttons on product cards", () => {
+  const product = { id: "p1", name: "Blue Shirt", imageUrl: null, variants: [{ id: "v1", price: 799, currency: "INR", inventory: 10 }] };
+
+  const setUp = (smartRepliesEnabled: boolean) => {
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([]) };
+    const prisma: any = {
+      conversation: { findFirst: jest.fn().mockResolvedValue({
+        id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+        activeOrderId: null, customer: { firstName: "Alex", lastName: null },
+        business: { name: "Test Biz", assistedBuyingEnabled: false, smartRepliesEnabled, products: [product] },
+        messages: [{ direction: "INBOUND", content: "show me the blue shirt", sentAt: new Date(), metadata: null }],
+      }) },
+      aiActionLog: { create: jest.fn() },
+    };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn(), sendImage: jest.fn() };
+    const signals = { record: jest.fn(), countRecentSignals: jest.fn().mockResolvedValue(0) };
+    const opportunities = { supersede: jest.fn(), createWithAiMessage: jest.fn() };
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      signals as unknown as CustomerSignalService,
+      opportunities as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+    );
+    const replyPayload = {
+      reply: "Here's the Blue Shirt!", items: [], shippingAddress: null, paymentMethod: null, orderConfirmed: false,
+      cancelOrder: false, needsHumanReview: false, needsHumanReviewReason: null, showProductImages: ["Blue Shirt"],
+    };
+    (ai as unknown as { client: unknown }).client = { responses: { create: jest.fn().mockResolvedValue({ output_text: JSON.stringify(replyPayload) }) } };
+    return { ai, conversations };
+  };
+
+  it("sends a plain text card (unchanged behavior) when smartRepliesEnabled is false", async () => {
+    const { ai, conversations } = setUp(false);
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendButtons).not.toHaveBeenCalled();
+    expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt\nINR 799"));
+  });
+
+  it("attaches Add to Cart / See Similar buttons when smartRepliesEnabled is true", async () => {
+    const { ai, conversations } = setUp(true);
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt\nINR 799"), [
+      { id: "quickadd_v1", title: "🛒 Add to Cart" }, { id: "similar_p1", title: "🔎 See Similar" },
+    ], undefined);
+  });
+
+  it("falls back to the plain text card when Meta rejects the interactive send", async () => {
+    const { ai, conversations } = setUp(true);
+    conversations.sendButtons.mockRejectedValue(new Error("Meta rejected the interactive payload"));
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendButtons).toHaveBeenCalled();
+    expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt\nINR 799"));
+  });
+});

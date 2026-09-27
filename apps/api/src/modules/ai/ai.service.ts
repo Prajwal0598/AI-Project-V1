@@ -321,6 +321,21 @@ ${transcript || "No previous messages. Greet the customer and share the product 
       for (const product of toSend) {
         const variant = product.variants[0];
         const caption = `${product.name}\n${variant.currency} ${variant.price}`;
+        // Smart Reply Suggestion buttons (opt-in) — a tap-to-choose alternative to typing "add it"/naming the
+        // product; falls back to the existing plain image/text send if disabled or if Meta rejects the
+        // interactive payload, so this can never regress the AI flow's baseline behavior.
+        if (conversation.business.smartRepliesEnabled) {
+          try {
+            await this.conversations.sendButtons(conversationId, conversation.businessId, caption, [
+              { id: `quickadd_${variant.id}`, title: "🛒 Add to Cart" },
+              { id: `similar_${product.id}`, title: "🔎 See Similar" },
+            ], product.imageUrl ? toPublicImageUrl(product.imageUrl) : undefined);
+            await logAiAction(this.prisma, { businessId, customerId: conversation.customerId, conversationId, action: "SMART_REPLY_SHOWN", result: "success", reason: `product card: ${product.name}` });
+            continue;
+          } catch (error) {
+            this.logger.warn(`Smart Reply buttons failed for product "${product.name}", falling back to plain send — ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         try {
           if (product.imageUrl) {
             await this.conversations.sendImage(conversationId, conversation.businessId, toPublicImageUrl(product.imageUrl), caption);

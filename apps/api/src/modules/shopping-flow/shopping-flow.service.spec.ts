@@ -1017,3 +1017,153 @@ describe("ShoppingFlowService — state machine", () => {
     });
   });
 });
+
+describe("ShoppingFlowService — Smart Reply Suggestions", () => {
+  let prisma: any;
+  let conversations: { sendButtons: jest.Mock; sendList: jest.Mock; sendMessage: jest.Mock; sendImage: jest.Mock };
+  let cart: Record<string, jest.Mock>;
+  let orders: Record<string, jest.Mock>;
+  let signals: { record: jest.Mock };
+  let flow: ShoppingFlowService;
+
+  beforeEach(() => {
+    prisma = {
+      business: { findUnique: jest.fn() },
+      conversation: { findFirst: jest.fn(), update: jest.fn() },
+      product: { findMany: jest.fn(), findFirst: jest.fn() },
+      variant: { findFirst: jest.fn() },
+      aiActionLog: { create: jest.fn() },
+    };
+    conversations = { sendButtons: jest.fn(), sendList: jest.fn(), sendMessage: jest.fn(), sendImage: jest.fn() };
+    cart = { getOrCreateActive: jest.fn(), addItem: jest.fn(), totals: jest.fn() };
+    orders = {};
+    signals = { record: jest.fn() };
+    flow = new ShoppingFlowService(
+      prisma as unknown as PrismaService,
+      conversations as unknown as ConversationService,
+      cart as unknown as CartService,
+      orders as unknown as OrderService,
+      signals as unknown as CustomerSignalService,
+    );
+  });
+
+  describe("quickadd_<variantId>", () => {
+    it("adds quantity 1 via CartService and sends the same confirmation buttons as the free-text add path", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", productId: "p1", inventory: 5, product: { name: "Blue Shirt" } });
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
+      cart.addItem.mockResolvedValue({ items: [{ variantId: "v1", quantity: 1 }] });
+      cart.totals.mockReturnValue({ subtotal: 799, currency: "INR" });
+
+      await flow.handleInteractive("conv1", "biz1", "quickadd_v1");
+
+      expect(prisma.variant.findFirst).toHaveBeenCalledWith({ where: { id: "v1", businessId: "biz1", active: true }, include: { product: true } });
+      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 1);
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt"), [
+        { id: "nav_viewcart", title: "View Cart" }, { id: "cart_checkout", title: "Checkout" },
+      ]);
+    });
+
+    it("rejects a variant that doesn't belong to this business (tenant isolation)", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.variant.findFirst.mockResolvedValue(null); // the businessId filter in the query above excludes it
+      await flow.handleInteractive("conv1", "biz1", "quickadd_v1");
+      expect(cart.addItem).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("no longer available"));
+    });
+
+    it("refuses to add an out-of-stock variant", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", productId: "p1", inventory: 0, product: { name: "Blue Shirt" } });
+      await flow.handleInteractive("conv1", "biz1", "quickadd_v1");
+      expect(cart.addItem).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("out of stock"));
+    });
+  });
+
+  describe("similar_<productId>", () => {
+    it("lists other published products in the same category, excluding the product itself", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue({ id: "p1", categoryId: "cat1" });
+      prisma.product.findMany.mockResolvedValue([{ id: "p2", name: "Red Shirt", variants: [{ id: "v2", price: 899, currency: "INR", inventory: 5 }] }]);
+
+      await flow.handleInteractive("conv1", "biz1", "similar_p1");
+
+      expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ businessId: "biz1", status: "PUBLISHED", categoryId: "cat1", id: { not: "p1" } }),
+      }));
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Similar to"), "View", [
+        { rows: [{ id: "prod_p2", title: "Red Shirt", description: "INR 899" }] },
+      ]);
+    });
+
+    it("degrades gracefully (plain message, no throw) when the product has no category or nothing else matches", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue({ id: "p1", categoryId: null });
+      await flow.handleInteractive("conv1", "biz1", "similar_p1");
+      expect(conversations.sendList).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalled();
+    });
+  });
+
+  describe("showProductDetail — Smart Reply buttons gating", () => {
+    const singleVariantProduct = {
+      id: "p1", name: "Blue Shirt", description: null, imageUrl: null,
+      variants: [{ id: "v1", price: 799, currency: "INR", inventory: 5 }],
+    };
+
+    it("sends plain image/text (unchanged behavior) when smartRepliesEnabled is false", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue(singleVariantProduct);
+      prisma.business.findUnique.mockResolvedValue({ smartRepliesEnabled: false });
+      await flow.handleInteractive("conv1", "biz1", "prod_p1");
+      expect(conversations.sendButtons).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("How many would you like"));
+    });
+
+    it("attaches Add to Cart / See Similar buttons when smartRepliesEnabled is true", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue(singleVariantProduct);
+      prisma.business.findUnique.mockResolvedValue({ smartRepliesEnabled: true });
+      await flow.handleInteractive("conv1", "biz1", "prod_p1");
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt"), [
+        { id: "quickadd_v1", title: "🛒 Add to Cart" }, { id: "similar_p1", title: "🔎 See Similar" },
+      ], undefined);
+      expect(conversations.sendMessage).not.toHaveBeenCalled();
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: "p1", pendingVariantId: "v1" } });
+    });
+
+    it("offers only See Similar (no Add to Cart) for an out-of-stock product", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue({ ...singleVariantProduct, variants: [{ id: "v1", price: 799, currency: "INR", inventory: 0 }] });
+      prisma.business.findUnique.mockResolvedValue({ smartRepliesEnabled: true });
+      await flow.handleInteractive("conv1", "biz1", "prod_p1");
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.any(String), [{ id: "similar_p1", title: "🔎 See Similar" }], undefined);
+    });
+
+    it("falls back to plain text/image when Meta rejects the interactive send", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue(singleVariantProduct);
+      prisma.business.findUnique.mockResolvedValue({ smartRepliesEnabled: true });
+      conversations.sendButtons.mockRejectedValue(new Error("Meta rejected the interactive payload"));
+
+      await flow.handleInteractive("conv1", "biz1", "prod_p1");
+
+      expect(conversations.sendButtons).toHaveBeenCalled();
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("How many would you like"));
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: "p1", pendingVariantId: "v1" } });
+    });
+
+    it("never queries for the flag (and never attaches buttons) for a multi-variant product", async () => {
+      prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false });
+      prisma.product.findFirst.mockResolvedValue({
+        id: "p1", name: "Shirt", description: null, imageUrl: null,
+        variants: [{ id: "v1", price: 799, currency: "INR", inventory: 5, attributes: { size: "M" } }, { id: "v2", price: 799, currency: "INR", inventory: 5, attributes: { size: "L" } }],
+      });
+      await flow.handleInteractive("conv1", "biz1", "prod_p1");
+      expect(prisma.business.findUnique).not.toHaveBeenCalled();
+      expect(conversations.sendButtons).not.toHaveBeenCalled();
+      expect(conversations.sendList).toHaveBeenCalled(); // still shows the existing variant-selection list
+    });
+  });
+});

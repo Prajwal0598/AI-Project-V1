@@ -36,6 +36,7 @@ export default function SettingsPage() {
   const [assistedBuyingMaxRecommendations, setAssistedBuyingMaxRecommendations] = useState("");
   const [assistedBuyingRankingPreference, setAssistedBuyingRankingPreference] = useState<Business["assistedBuyingRankingPreference"]>("BEST_MATCH");
   const [assistedBuyingExcludedCategoryIds, setAssistedBuyingExcludedCategoryIds] = useState<string[]>([]);
+  const [smartRepliesEnabled, setSmartRepliesEnabled] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
   const [defaultRepeatPurchaseDays, setDefaultRepeatPurchaseDays] = useState("");
   const [rules, setRules] = useState<AutomationRule[]>([]);
@@ -77,6 +78,7 @@ export default function SettingsPage() {
       setAssistedBuyingMaxRecommendations(String(b.assistedBuyingMaxRecommendations ?? 5));
       setAssistedBuyingRankingPreference(b.assistedBuyingRankingPreference ?? "BEST_MATCH");
       setAssistedBuyingExcludedCategoryIds(b.assistedBuyingExcludedCategoryIds ?? []);
+      setSmartRepliesEnabled(b.smartRepliesEnabled);
       setDefaultRepeatPurchaseDays(String(b.defaultRepeatPurchaseDays ?? 30));
       setRazorpayKeyId(b.razorpayKeyId ?? "");
     }).catch(console.error);
@@ -234,6 +236,7 @@ export default function SettingsPage() {
         assistedBuyingMaxRecommendations: assistedBuyingMaxRecommendations.trim() ? Number(assistedBuyingMaxRecommendations) : undefined,
         assistedBuyingRankingPreference,
         assistedBuyingExcludedCategoryIds,
+        smartRepliesEnabled,
         defaultRepeatPurchaseDays: defaultRepeatPurchaseDays.trim() ? Number(defaultRepeatPurchaseDays) : undefined,
         ...(waAccessToken && { whatsappAccessToken: waAccessToken }),
         ...(igAccessToken && { instagramAccessToken: igAccessToken }),
@@ -510,6 +513,19 @@ export default function SettingsPage() {
             ))}
           </div>
         </div>}
+        <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2>WhatsApp Smart Replies</h2>
+      <p>Adds tap-to-choose buttons (🛒 Add to Cart, 🔎 See Similar) to product cards shown by the AI or the shopping menu, so customers can act with one tap instead of typing. Typing still works exactly as before either way.</p>
+      <div style={{ maxWidth: 420, marginTop: 16 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+          <input type="checkbox" checked={smartRepliesEnabled} onChange={e => setSmartRepliesEnabled(e.target.checked)} />
+          Enable Smart Reply Suggestions
+        </label>
+        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Off by default. Falls back to plain text/images automatically if WhatsApp rejects a button message.</p>
         <button className="primary-button" style={{ marginTop: 8 }} onClick={save} disabled={saving || !biz}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </section>

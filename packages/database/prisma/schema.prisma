@@ -246,6 +246,10 @@ model Business {
   assistedBuyingMaxRecommendations Int @default(5)
   assistedBuyingExcludedCategoryIds String[] @default([]) // categories Assisted Buying should never recommend from
   assistedBuyingRankingPreference AssistedBuyingRanking @default(BEST_MATCH)
+  // WhatsApp Smart Reply Suggestions (tap-to-choose buttons on AI/deterministic product cards: Add to Cart,
+  // See Similar) — off by default, same rollout pattern as proactiveSuggestionsEnabled/assistedBuyingEnabled.
+  // Fully additive: existing plain-text/list behavior is unchanged when this is false.
+  smartRepliesEnabled Boolean @default(false)
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
   whatsappAccessTokenEncrypted String?
   instagramAccessTokenEncrypted String?

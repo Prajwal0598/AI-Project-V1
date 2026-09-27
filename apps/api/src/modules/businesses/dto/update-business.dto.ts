@@ -62,6 +62,11 @@ export class UpdateBusinessDto {
   @IsBoolean()
   assistedBuyingEnabled?: boolean;
 
+  // master switch for WhatsApp Smart Reply Suggestion buttons (Add to Cart / See Similar on product cards) — off by default
+  @IsOptional()
+  @IsBoolean()
+  smartRepliesEnabled?: boolean;
+
   @IsOptional()
   @IsNumber()
   @Min(1)
