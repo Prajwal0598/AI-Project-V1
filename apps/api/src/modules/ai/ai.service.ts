@@ -1,5 +1,4 @@
 import { Injectable, Logger, NotFoundException, ServiceUnavailableException, BadRequestException } from "@nestjs/common";
-import OpenAI from "openai";
 import { MessageDirection, OrderStatus } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { OrderService } from "../orders/order.service";
@@ -13,6 +12,7 @@ import { CartService } from "../cart/cart.service";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { AssistedBuyingService } from "../assisted-buying/assisted-buying.service";
+import { AiModelRouterService } from "./ai-model-router.service";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -88,8 +88,6 @@ function formatOrderLine(order: { id: string; status: OrderStatus; fulfillmentSt
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
-  // client is initialised lazily so the API starts without OPENAI_API_KEY configured
-  private client: OpenAI | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -99,16 +97,8 @@ export class AiService {
     private readonly signals: CustomerSignalService,
     private readonly opportunities: OpportunityService,
     private readonly assistedBuying: AssistedBuyingService,
-  ) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (apiKey) this.client = new OpenAI({ apiKey });
-    else this.logger.warn("OPENAI_API_KEY is not set — AI draft endpoint will be unavailable.");
-  }
-
-  private getClient(): OpenAI {
-    if (!this.client) throw new ServiceUnavailableException("OPENAI_API_KEY is not configured on the API server.");
-    return this.client;
-  }
+    private readonly modelRouter: AiModelRouterService,
+  ) {}
 
   /** Generates a reply with the AI and sends it immediately via the conversation's channel — fully autonomous, no human approval step. */
   async generateAndSendReply(conversationId: string, businessId: string) {
@@ -230,15 +220,13 @@ ${transcript || "No previous messages. Greet the customer and share the product 
 
     const content = await (async () => {
       try {
-        const client = this.getClient();
-        const model = process.env.OPENAI_MODEL ?? "gpt-4o";
-        const response = await client.responses.create({
-          model, instructions, input, store: false,
-          text: { format: { type: "json_schema", name: "sales_reply", schema: REPLY_SCHEMA, strict: true } }
+        const generation = await this.modelRouter.generate({
+          conversationId, businessId, instructions, input,
+          schemaName: "sales_reply", schema: REPLY_SCHEMA,
+          complexityHint: { messageLength: latestInbound?.content.length ?? 0, assistedBuyingEnabled: conversation.business.assistedBuyingEnabled },
         });
 
-        const raw = response.output_text?.trim();
-        if (!raw) throw new ServiceUnavailableException("The AI service returned an empty reply.");
+        const raw = generation.text;
         const parsed = JSON.parse(raw) as {
           reply: string; items: { productName: string; quantity: number }[];
           shippingAddress: string | null; paymentMethod: string | null; orderConfirmed: boolean; cancelOrder: boolean;

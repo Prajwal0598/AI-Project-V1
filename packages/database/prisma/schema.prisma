@@ -294,6 +294,7 @@ model Business {
   orders        Order[]
   activity      ActivityEvent[]
   aiActionLogs  AiActionLog[]
+  aiModelInvocations AiModelInvocation[]
   inventoryAlerts   InventoryAlert[]
   stockAdjustments  StockAdjustment[]
   customerSignals   CustomerSignal[]
@@ -669,6 +670,31 @@ model AiActionLog {
   business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([businessId, createdAt])
+}
+
+// per-turn AI model-quality telemetry for the model upgrade/A-B experiment — deliberately separate from
+// AiActionLog (that's the customer-consequence audit trail; this is voluminous per-turn measurement data,
+// queried/aggregated very differently). Never stores prompt/reply content, only structured comparison metrics.
+model AiModelInvocation {
+  id             String   @id @default(cuid())
+  businessId     String
+  conversationId String?
+  experimentId   String?  // null when the experiment isn't enabled for this turn (plain control-only traffic)
+  variant        String   // "control" | "candidate"
+  tier           String   // "control" | "efficient" | "balanced" | "advanced"
+  modelId        String
+  fallbackUsed   Boolean  @default(false) // true when a candidate call failed and this row reflects the control retry
+  success        Boolean
+  latencyMs      Int
+  inputTokens    Int?
+  outputTokens   Int?
+  estimatedCost  Decimal? @db.Decimal(10, 6) // null (unknown) unless real per-token pricing is configured for this tier
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+  @@index([experimentId, variant])
 }
 
 // at most one ACTIVE alert per variant at a time (enforced in InventoryService, not the DB) — auto-resolved once restocked above threshold
