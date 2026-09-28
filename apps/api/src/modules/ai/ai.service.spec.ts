@@ -1,5 +1,5 @@
 import { ServiceUnavailableException } from "@nestjs/common";
-import { AiService, buildOrderKey, stripHallucinatedLinks } from "./ai.service";
+import { AiService, buildOrderKey, stripHallucinatedLinks, filterCatalogueByBudget } from "./ai.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { OrderService } from "../orders/order.service";
 import type { ConversationService } from "../conversations/conversation.service";
@@ -63,6 +63,37 @@ describe("stripHallucinatedLinks", () => {
     const reply = "Line one.\nhttps://bad-link.com/pay\nLine two.";
     const result = stripHallucinatedLinks(reply);
     expect(result).not.toMatch(/\n{3,}/);
+  });
+});
+
+describe("filterCatalogueByBudget", () => {
+  const shirt = { name: "White Classic Shirt", variants: [{ price: 1499 }] };
+  const saree = { name: "Women's Silk Saree", variants: [{ price: 3499 }] }; // the exact borderline over-budget product from the offline eval finding
+  const noVariant = { name: "Draft Product", variants: [] as { price: number }[] };
+
+  it("excludes a product whose price exceeds a budget stated in the customer's message", () => {
+    const result = filterCatalogueByBudget([shirt, saree], "I need something classy for a wedding under ₹3,000");
+    expect(result).toEqual([shirt]);
+    expect(result.map((p) => p.name)).not.toContain("Women's Silk Saree");
+  });
+
+  it("leaves the catalogue unchanged when no budget is stated (regression guard for existing behavior)", () => {
+    const result = filterCatalogueByBudget([shirt, saree], "I need something classy for a wedding");
+    expect(result).toEqual([shirt, saree]);
+  });
+
+  it("leaves the catalogue unchanged when there's no message yet (fresh conversation, no prior inbound)", () => {
+    expect(filterCatalogueByBudget([shirt, saree], undefined)).toEqual([shirt, saree]);
+  });
+
+  it("never excludes a product with no priced variant — nothing to compare, so it can't violate a budget", () => {
+    const result = filterCatalogueByBudget([saree, noVariant], "under ₹1000");
+    expect(result).toEqual([noVariant]);
+  });
+
+  it("keeps a product priced exactly AT the stated budget (inclusive boundary)", () => {
+    const atBudget = { name: "Exactly At Budget", variants: [{ price: 3000 }] };
+    expect(filterCatalogueByBudget([atBudget], "under ₹3,000")).toEqual([atBudget]);
   });
 });
 
@@ -329,6 +360,66 @@ describe("AiService — prompt injection / AI safety", () => {
   });
 });
 
+describe("AiService — grounding: unavailable attributes and unsupported policies must never be invented", () => {
+  const setUp = (messageText: string) => {
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([]) };
+    const prisma: any = {
+      conversation: { findFirst: jest.fn().mockResolvedValue({
+        id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+        activeOrderId: null, customer: { firstName: "Alex", lastName: null },
+        business: { name: "Test Biz", assistedBuyingEnabled: false, products: [] },
+        messages: [{ direction: "INBOUND", content: messageText, sentAt: new Date(), metadata: null }],
+      }) },
+      aiActionLog: { create: jest.fn() },
+    };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
+    let capturedInstructions = "";
+    const modelRouter = { generate: jest.fn(async (args: { instructions: string }) => {
+      capturedInstructions = args.instructions;
+      return {
+        text: JSON.stringify({
+          reply: "placeholder", items: [], shippingAddress: null, paymentMethod: null, orderConfirmed: false,
+          cancelOrder: false, needsHumanReview: false, needsHumanReviewReason: null, showProductImages: [],
+        }),
+        modelId: "gpt-4o", variant: "control", tier: "control", experimentId: null, fallbackUsed: false,
+      };
+    }) } as unknown as AiModelRouterService;
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+      modelRouter,
+    );
+    return { ai, getCapturedInstructions: () => capturedInstructions };
+  };
+
+  it("instructs the model to admit uncertainty rather than guess an unavailable product attribute", async () => {
+    const { ai, getCapturedInstructions } = setUp("Does this come in size L?");
+    await ai.generateAndSendReply("conv1", "biz1");
+    const instructions = getCapturedInstructions();
+    expect(instructions).toContain("say you don't have that specific detail rather than guessing or inferring it");
+    expect(instructions).toContain("never claim a product definitely does or doesn't have an attribute beyond what's shown");
+  });
+
+  it("instructs the model to admit unsupported return/refund/shipping/warranty policies rather than invent one", async () => {
+    const { ai, getCapturedInstructions } = setUp("What is your return policy?");
+    await ai.generateAndSendReply("conv1", "biz1");
+    const instructions = getCapturedInstructions();
+    expect(instructions).toContain("no return, refund, cancellation, shipping, or warranty policy information");
+    expect(instructions).toContain("say policy details aren't available to you right now rather than describing one");
+  });
+
+  it("preserves the existing pricing/stock/discount/link guardrail unchanged", async () => {
+    const { ai, getCapturedInstructions } = setUp("Anything");
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(getCapturedInstructions()).toContain("Never invent pricing, stock, discounts, or links — use only the catalogue below.");
+  });
+});
+
 describe("AiService — Smart Reply Suggestion buttons on product cards", () => {
   const product = { id: "p1", name: "Blue Shirt", imageUrl: null, variants: [{ id: "v1", price: 799, currency: "INR", inventory: 10 }] };
 
@@ -387,5 +478,80 @@ describe("AiService — Smart Reply Suggestion buttons on product cards", () => 
     await ai.generateAndSendReply("conv1", "biz1");
     expect(conversations.sendButtons).toHaveBeenCalled();
     expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt\nINR 799"));
+  });
+});
+
+describe("AiService — backend budget enforcement (candidate set never includes over-budget products)", () => {
+  // mirrors the real offline-eval finding: a thematically on-topic but over-budget item (the ₹3,499 saree)
+  // alongside genuinely in-budget items, for a "classy for a wedding under ₹3,000" style request.
+  const kurta = { id: "p_kurta", name: "Men's Festive Kurta", imageUrl: null, variants: [{ id: "v_kurta", price: 1899, currency: "INR", inventory: 20 }] };
+  const saree = { id: "p_saree", name: "Women's Silk Saree", imageUrl: null, variants: [{ id: "v_saree", price: 3499, currency: "INR", inventory: 10 }] };
+
+  const setUp = (messageText: string, products = [kurta, saree]) => {
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([]) };
+    const prisma: any = {
+      conversation: { findFirst: jest.fn().mockResolvedValue({
+        id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+        activeOrderId: null, customer: { firstName: "Alex", lastName: null },
+        business: { name: "Test Biz", assistedBuyingEnabled: false, products },
+        messages: [{ direction: "INBOUND", content: messageText, sentAt: new Date(), metadata: null }],
+      }) },
+      aiActionLog: { create: jest.fn() },
+    };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
+    let capturedInstructions = "";
+    const modelRouter = { generate: jest.fn(async (args: { instructions: string }) => {
+      capturedInstructions = args.instructions;
+      return {
+        text: JSON.stringify({
+          reply: "Here are some options!", items: [], shippingAddress: null, paymentMethod: null,
+          orderConfirmed: false, cancelOrder: false, needsHumanReview: false, needsHumanReviewReason: null, showProductImages: [],
+        }),
+        modelId: "gpt-4o", variant: "control", tier: "control", experimentId: null, fallbackUsed: false,
+      };
+    }) } as unknown as AiModelRouterService;
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+      modelRouter,
+    );
+    return { ai, getCapturedInstructions: () => capturedInstructions };
+  };
+
+  it("excludes an over-budget product from the candidate catalogue the model is given, when the customer states a budget", async () => {
+    const { ai, getCapturedInstructions } = setUp("I need something classy for a wedding under ₹3,000");
+    await ai.generateAndSendReply("conv1", "biz1");
+    const instructions = getCapturedInstructions();
+    expect(instructions).toContain("Men's Festive Kurta");
+    expect(instructions).not.toContain("Women's Silk Saree"); // over budget — must never reach the model's candidate set
+  });
+
+  it("first-turn budget request (no greeting) still enforces the filter — GREETING never overrides a specific first request", async () => {
+    // this IS the first inbound message (fresh conversation) — exactly the scenario that previously triggered
+    // an unconditional full-catalogue GREETING dump regardless of the stated budget
+    const { ai, getCapturedInstructions } = setUp("I need something classy for a wedding under ₹3,000");
+    await ai.generateAndSendReply("conv1", "biz1");
+    const instructions = getCapturedInstructions();
+    expect(instructions).not.toContain("Women's Silk Saree");
+    expect(instructions).toContain("skip this greeting dump"); // the clarified GREETING instruction is present
+  });
+
+  it("preserves existing behavior unchanged when no budget is stated — full catalogue still reaches the model", async () => {
+    const { ai, getCapturedInstructions } = setUp("I need something classy for a wedding");
+    await ai.generateAndSendReply("conv1", "biz1");
+    const instructions = getCapturedInstructions();
+    expect(instructions).toContain("Men's Festive Kurta");
+    expect(instructions).toContain("Women's Silk Saree"); // no budget stated — nothing to filter, unchanged behavior
+  });
+
+  it("the catalogue intro explicitly tells the model not to recommend anything outside the provided list", async () => {
+    const { ai, getCapturedInstructions } = setUp("I need a shirt");
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(getCapturedInstructions()).toContain("there is nothing outside this list you may recommend");
   });
 });

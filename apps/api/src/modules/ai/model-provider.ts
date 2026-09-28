@@ -13,7 +13,7 @@ export interface AiModelProvider {
     schemaName: string;
     schema: Record<string, unknown>;
     reasoningEffort?: string;
-  }): Promise<{ text: string; inputTokens?: number; outputTokens?: number }>;
+  }): Promise<{ text: string; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }>;
 }
 
 export class OpenAiResponsesProvider implements AiModelProvider {
@@ -26,7 +26,7 @@ export class OpenAiResponsesProvider implements AiModelProvider {
     schemaName: string;
     schema: Record<string, unknown>;
     reasoningEffort?: string;
-  }): Promise<{ text: string; inputTokens?: number; outputTokens?: number }> {
+  }): Promise<{ text: string; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }> {
     const response = await this.client.responses.create({
       model: params.modelId,
       instructions: params.instructions,
@@ -37,6 +37,9 @@ export class OpenAiResponsesProvider implements AiModelProvider {
     });
     const text = response.output_text?.trim();
     if (!text) throw new Error("Model returned an empty response.");
-    return { text, inputTokens: response.usage?.input_tokens, outputTokens: response.usage?.output_tokens };
+    return {
+      text, inputTokens: response.usage?.input_tokens, outputTokens: response.usage?.output_tokens,
+      cachedInputTokens: (response.usage as unknown as { input_tokens_details?: { cached_tokens?: number } })?.input_tokens_details?.cached_tokens,
+    };
   }
 }

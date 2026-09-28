@@ -10,5 +10,9 @@ coverage/
 *.log
 apps/api/uploads/
 
+# generated, timestamped run output from the offline AI model-comparison harness — the scripts themselves
+# are kept (reusable dev tooling), but each run's raw results/report are local-only artifacts
+apps/api/scripts/ai-model-eval/results/
+
 .cdk
 package-lock.json
