@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, ServiceUnavailableException, BadRequestException } from "@nestjs/common";
-import { MessageDirection, OrderStatus } from "@prisma/client";
+import { MessageDirection, OrderStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { OrderService } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
@@ -117,6 +117,23 @@ export function filterCatalogueByBudget<T extends { variants: { price: unknown }
   const budgetMax = normalized ? parseSearchQuery(normalized).maxPrice : undefined;
   if (budgetMax === undefined) return products;
   return products.filter((p) => !p.variants[0] || Number(p.variants[0].price) <= budgetMax);
+}
+
+// persisted-budget-aware variants, additive to the two functions above (which stay unchanged for existing
+// callers/tests that only care about "does THIS message alone state a budget"). Reuses Conversation
+// .assistedBuyingContext.filters.maxPrice — the SAME field/shape ShoppingFlowService already persists this
+// exact concept in — rather than a second conversation-state system; ShoppingFlowService's own existing
+// resets (entering MAIN_MENU/BROWSING_CATEGORIES etc.) already clear it, so no new clearing logic is added here.
+export function resolveEffectiveBudgetMax(latestCustomerMessage: string | undefined, persistedBudgetMax: number | undefined): number | undefined {
+  const normalized = latestCustomerMessage?.replace(/(\d),(\d)/g, "$1$2");
+  const parsedThisTurn = normalized ? parseSearchQuery(normalized).maxPrice : undefined;
+  // an explicit budget stated THIS turn always replaces the persisted one; silence on budget never clears it
+  return parsedThisTurn ?? persistedBudgetMax;
+}
+
+export function filterCatalogueByEffectiveBudget<T extends { variants: { price: unknown }[] }>(products: T[], effectiveBudgetMax: number | undefined): T[] {
+  if (effectiveBudgetMax === undefined) return products;
+  return products.filter((p) => !p.variants[0] || Number(p.variants[0].price) <= effectiveBudgetMax);
 }
 
 export function buildSalesInstructions(businessName: string, catalog: string, ordersContext: string): string {
@@ -258,7 +275,20 @@ export class AiService {
       const speaker = message.direction === MessageDirection.INBOUND ? "Customer" : "Business";
       return `${speaker}: ${message.content}`;
     }).join("\n");
-    const catalog = buildCatalogueText(filterCatalogueByBudget(conversation.business.products, latestInbound?.content));
+
+    // persistent budget context: reuses Conversation.assistedBuyingContext.filters.maxPrice (the same
+    // field/shape ShoppingFlowService already persists this exact concept in) so a budget stated in an
+    // earlier turn keeps being backend-enforced even on a later turn that doesn't restate it.
+    const existingContext = conversation.assistedBuyingContext as { filters?: { maxPrice?: number; [k: string]: unknown } } | null;
+    const persistedBudgetMax = existingContext?.filters?.maxPrice;
+    const effectiveBudgetMax = resolveEffectiveBudgetMax(latestInbound?.content, persistedBudgetMax);
+    if (effectiveBudgetMax !== undefined && effectiveBudgetMax !== persistedBudgetMax) {
+      await this.prisma.conversation.update({
+        where: { id: conversationId },
+        data: { assistedBuyingContext: { ...existingContext, filters: { ...existingContext?.filters, maxPrice: effectiveBudgetMax } } as unknown as Prisma.InputJsonValue },
+      });
+    }
+    const catalog = buildCatalogueText(filterCatalogueByEffectiveBudget(conversation.business.products, effectiveBudgetMax));
 
     // grounds status/cancellation questions in real data instead of letting the model guess — it has no tool-calling access to this
     const recentOrders = await this.orders.getRecentForCustomer(conversation.customerId, conversation.businessId, 3);

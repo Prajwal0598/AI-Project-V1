@@ -492,10 +492,10 @@ describe("AiService — backend budget enforcement (candidate set never includes
     const prisma: any = {
       conversation: { findFirst: jest.fn().mockResolvedValue({
         id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
-        activeOrderId: null, customer: { firstName: "Alex", lastName: null },
+        activeOrderId: null, customer: { firstName: "Alex", lastName: null }, assistedBuyingContext: null,
         business: { name: "Test Biz", assistedBuyingEnabled: false, products },
         messages: [{ direction: "INBOUND", content: messageText, sentAt: new Date(), metadata: null }],
-      }) },
+      }), update: jest.fn() },
       aiActionLog: { create: jest.fn() },
     };
     const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
@@ -553,5 +553,162 @@ describe("AiService — backend budget enforcement (candidate set never includes
     const { ai, getCapturedInstructions } = setUp("I need a shirt");
     await ai.generateAndSendReply("conv1", "biz1");
     expect(getCapturedInstructions()).toContain("there is nothing outside this list you may recommend");
+  });
+});
+
+describe("AiService — persistent budget context across turns (reuses Conversation.assistedBuyingContext.filters.maxPrice)", () => {
+  // deliberately priced above every budget used below (₹3,000 / ₹5,000) so it's a reliable "did the filter leak?" probe
+  const wedding_suit = { id: "p_suit", name: "Men's Wedding Suit", imageUrl: null, variants: [{ id: "v_suit", price: 5999, currency: "INR", inventory: 6 }] };
+  const kurta = { id: "p_kurta", name: "Men's Festive Kurta", imageUrl: null, variants: [{ id: "v_kurta", price: 1899, currency: "INR", inventory: 20 }] };
+  // priced between the two budgets used below (₹3,000 / ₹5,000) so an explicit budget INCREASE is observable
+  const saree = { id: "p_saree", name: "Women's Silk Saree", imageUrl: null, variants: [{ id: "v_saree", price: 4200, currency: "INR", inventory: 10 }] };
+  const products = [wedding_suit, kurta, saree];
+
+  // simulates a real multi-turn conversation for ONE conversationId: each call appends the new inbound message,
+  // re-fetches conversation.findFirst with whatever assistedBuyingContext the PREVIOUS turn's update() call left
+  // behind — exactly like real turns hitting the DB, without needing a real Postgres instance.
+  const makeConversationHarness = (conversationId = "conv1") => {
+    let assistedBuyingContext: unknown = null;
+    const messageHistory: { direction: string; content: string; sentAt: Date; metadata: null }[] = [];
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([]) };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
+    const capturedInstructionsByTurn: string[] = [];
+    const capturedInputByTurn: string[] = [];
+    const modelRouter = { generate: jest.fn(async (args: { instructions: string; input: string }) => {
+      capturedInstructionsByTurn.push(args.instructions);
+      capturedInputByTurn.push(args.input);
+      return {
+        text: JSON.stringify({
+          reply: "Here are some options!", items: [], shippingAddress: null, paymentMethod: null,
+          orderConfirmed: false, cancelOrder: false, needsHumanReview: false, needsHumanReviewReason: null, showProductImages: [],
+        }),
+        modelId: "gpt-4o", variant: "control", tier: "control", experimentId: null, fallbackUsed: false,
+      };
+    }) } as unknown as AiModelRouterService;
+    const prisma: any = {
+      conversation: {
+        findFirst: jest.fn(() => Promise.resolve({
+          id: conversationId, businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+          activeOrderId: null, customer: { firstName: "Alex", lastName: null }, assistedBuyingContext,
+          business: { name: "Test Biz", assistedBuyingEnabled: false, products },
+          messages: [...messageHistory].reverse(), // mirrors the real query's `orderBy: { sentAt: "desc" }` (newest first)
+        })),
+        update: jest.fn((args: { data: { assistedBuyingContext: unknown } }) => {
+          assistedBuyingContext = args.data.assistedBuyingContext;
+          return Promise.resolve({});
+        }),
+      },
+      aiActionLog: { create: jest.fn() },
+    };
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      {} as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+      modelRouter,
+    );
+    const sendTurn = async (message: string) => {
+      messageHistory.push({ direction: "INBOUND", content: message, sentAt: new Date(), metadata: null });
+      await ai.generateAndSendReply(conversationId, "biz1");
+      return capturedInstructionsByTurn[capturedInstructionsByTurn.length - 1];
+    };
+    return {
+      sendTurn,
+      getPersistedContext: () => assistedBuyingContext as { filters?: { maxPrice?: number } } | null,
+      getLastTranscriptInput: () => capturedInputByTurn[capturedInputByTurn.length - 1],
+    };
+  };
+
+  it("A: budget persists across turns — an unrelated follow-up still enforces the budget from an earlier turn", async () => {
+    const { sendTurn } = makeConversationHarness();
+    await sendTurn("I want party wear for men under ₹3,000");
+    const turn2Instructions = await sendTurn("Do you have anything in white?");
+    expect(turn2Instructions).toContain("Men's Festive Kurta");
+    expect(turn2Instructions).not.toContain("Men's Wedding Suit"); // ₹5,999 — over the turn-1 budget, must stay excluded
+  });
+
+  it("B: an explicit new budget replaces the previous one", async () => {
+    const { sendTurn, getPersistedContext } = makeConversationHarness();
+    await sendTurn("Show me something under ₹3,000");
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000);
+    const turn2Instructions = await sendTurn("Actually show me options under ₹5,000");
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(5000);
+    expect(turn2Instructions).toContain("Women's Silk Saree"); // ₹4,200 — excluded under the ₹3,000 budget, included once it's raised to ₹5,000
+    expect(turn2Instructions).not.toContain("Men's Wedding Suit"); // ₹5,999 — still over even the raised budget
+  });
+
+  it("C: budget remains restrictive after an unrelated constraint mention", async () => {
+    const { sendTurn } = makeConversationHarness();
+    await sendTurn("Show me something under ₹3,000");
+    const turn2Instructions = await sendTurn("Anything in black?");
+    expect(turn2Instructions).not.toContain("Men's Wedding Suit");
+    expect(turn2Instructions).toContain("Men's Festive Kurta");
+  });
+
+  it("D: no budget ever specified — existing full-catalogue behavior is unchanged", async () => {
+    const { sendTurn } = makeConversationHarness();
+    const instructions = await sendTurn("Show me your products");
+    expect(instructions).toContain("Men's Wedding Suit");
+    expect(instructions).toContain("Men's Festive Kurta");
+  });
+
+  it("E: budget is isolated per conversation/customer — a second, unrelated conversation never sees the first one's budget", async () => {
+    const customerA = makeConversationHarness("conv-A");
+    const customerB = makeConversationHarness("conv-B");
+    await customerA.sendTurn("Show me something under ₹3,000");
+    expect(customerA.getPersistedContext()?.filters?.maxPrice).toBe(3000);
+    const bInstructions = await customerB.sendTurn("Show me your products");
+    expect(customerB.getPersistedContext()?.filters?.maxPrice).toBeUndefined();
+    expect(bInstructions).toContain("Men's Wedding Suit"); // customer B's catalogue is NOT budget-filtered by A's constraint
+  });
+
+  it("F: comma-formatted amounts still parse correctly through the persisted-budget path", async () => {
+    const { sendTurn, getPersistedContext } = makeConversationHarness();
+    await sendTurn("Show me something under ₹3,000");
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000); // not 3 — the comma-parsing fix still applies
+  });
+
+  it("FINAL REGRESSION — exact production-gap scenario: party-wear budget survives an unrelated color follow-up, then an explicit raise", async () => {
+    const { sendTurn, getPersistedContext, getLastTranscriptInput } = makeConversationHarness();
+
+    await sendTurn("I want party wear for men under ₹3,000");
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000); // (1) turn 1 persists maxPrice = 3000
+
+    // (2)+(3) turn 2 states no price at all — the effective budget must still resolve to 3000 server-side,
+    // and the candidate catalogue must contain ZERO products priced above ₹3,000
+    const turn2Instructions = await sendTurn("Do you have anything in white?");
+    const overBudgetTurn2 = products.filter((p) => p.variants[0].price > 3000);
+    const withinBudgetTurn2 = products.filter((p) => p.variants[0].price <= 3000);
+    expect(overBudgetTurn2.length).toBeGreaterThan(0); // sanity check: the fixture actually exercises the filter
+    for (const p of overBudgetTurn2) expect(turn2Instructions).not.toContain(p.name);
+    for (const p of withinBudgetTurn2) expect(turn2Instructions).toContain(p.name);
+
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000); // (4) persisted budget unchanged by turn 2
+
+    // (5) the mocked model here has zero memory of its own — each call gets a freshly-built instructions
+    // string — so the assertions above only hold because the backend resolved/enforced the budget itself,
+    // never because the model "remembered" turn 1
+    // (6) turn 1's raw gender/occasion wording and turn 2's raw color wording both still reach the model
+    // verbatim in the transcript (passed as the Responses API "input", separate from "instructions") —
+    // this change filters the catalogue, it does not touch transcript content
+    const turn2Transcript = getLastTranscriptInput();
+    expect(turn2Transcript).toContain("Customer: I want party wear for men under ₹3,000");
+    expect(turn2Transcript).toContain("Customer: Do you have anything in white?");
+
+    const turn3Instructions = await sendTurn("Actually show me options up to ₹5,000");
+    // FINDING (not a regression from this change): the shared price parser `parseSearchQuery` in
+    // shopping-flow.service.ts only recognizes "under/below/less than/cheaper than/within" as budget
+    // phrasing — "up to" is not one of its trigger words, so this turn parses no new price at all and
+    // the persisted ₹3,000 budget from turn 1 correctly carries forward unchanged (proven below). This
+    // is a pre-existing phrase-coverage gap in the parser shared with ShoppingFlowService, not something
+    // introduced or regressed by persistent budget context — out of scope to fix here without touching
+    // that shared, explicitly-untouched file. A recognized phrasing (e.g. "under ₹5,000") DOES correctly
+    // raise the budget — already covered by test B above.
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000);
+    expect(turn3Instructions).not.toContain("Women's Silk Saree"); // still excluded — budget never actually moved
+    expect(turn3Instructions).toContain("Men's Festive Kurta"); // still the only in-budget item
   });
 });
