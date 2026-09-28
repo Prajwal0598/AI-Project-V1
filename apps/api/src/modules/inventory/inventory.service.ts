@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { InventoryAlertType, Prisma, StockAdjustmentReason } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { formatCustomerDisplayName } from "../../common/customer-name.helper";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 
@@ -107,7 +108,7 @@ export class InventoryService {
     const customerIds = await this.signals.recentlyInterestedCustomers(businessId, productId);
     for (const customerId of customerIds) {
       const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
-      const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+      const customerName = formatCustomerDisplayName(customer);
       await this.opportunities.createWithAiMessage({
         businessId, customerId, type: "BACK_IN_STOCK",
         reason: `Previously showed interest in ${product.name} while it was out of stock — now back in stock.`,

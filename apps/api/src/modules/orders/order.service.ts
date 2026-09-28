@@ -3,6 +3,7 @@ import { ActivityEventType, FulfillmentStatus, OrderStatus, Prisma } from "@pris
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
+import { formatCustomerDisplayName } from "../../common/customer-name.helper";
 import { CreateOrderDto, OrderItemInputDto } from "./dto/create-order.dto";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 import { InventoryService } from "../inventory/inventory.service";
@@ -353,7 +354,7 @@ export class OrderService {
   private async suggestCrossSellUpsell(businessId: string, customerId: string, items: { productId: string | null; name: string }[], customer: { firstName: string | null; lastName: string | null } | null, businessName: string) {
     const purchasedProductIds = new Set(items.map((i) => i.productId).filter((id): id is string => !!id));
     if (!purchasedProductIds.size) return;
-    const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+    const customerName = formatCustomerDisplayName(customer);
 
     for (const item of items) {
       if (!item.productId) continue;

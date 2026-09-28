@@ -322,19 +322,21 @@ describe("ShoppingFlowService — state machine", () => {
 
       await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "do you have a black bag");
 
+      // "black" is tracked as a separately-replaceable color slot (see extractReplaceableSlots) and appended
+      // after free keywords like "bag" — AND is commutative, so this doesn't change which products match
       const where = prisma.product.findMany.mock.calls[0][0].where;
       expect(where.AND).toEqual([
-        { OR: [
-          { name: { contains: "black", mode: "insensitive" } },
-          { description: { contains: "black", mode: "insensitive" } },
-          { brand: { contains: "black", mode: "insensitive" } },
-          { category: { name: { contains: "black", mode: "insensitive" } } },
-        ] },
         { OR: [
           { name: { contains: "bag", mode: "insensitive" } },
           { description: { contains: "bag", mode: "insensitive" } },
           { brand: { contains: "bag", mode: "insensitive" } },
           { category: { name: { contains: "bag", mode: "insensitive" } } },
+        ] },
+        { OR: [
+          { name: { contains: "black", mode: "insensitive" } },
+          { description: { contains: "black", mode: "insensitive" } },
+          { brand: { contains: "black", mode: "insensitive" } },
+          { category: { name: { contains: "black", mode: "insensitive" } } },
         ] },
       ]);
     });
@@ -345,8 +347,9 @@ describe("ShoppingFlowService — state machine", () => {
       await flow.handleFreeText("conv1", "biz1", { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1" }, "do you have any black shirts");
 
       // "shirts" (plural) still has to match via its singular-normalized variant against a name literally containing "Shirt"
+      // "black" is a separately-tracked color slot appended after free keywords, so "shirts" is AND[0] here
       const where = prisma.product.findMany.mock.calls[0][0].where;
-      const shirtClause = where.AND[1];
+      const shirtClause = where.AND[0];
       expect(shirtClause.OR).toEqual(expect.arrayContaining([{ name: { contains: "shirt", mode: "insensitive" } }]));
       expect(prisma.category.findMany).not.toHaveBeenCalled(); // no DB category lookup involved in matching at all anymore
     });
@@ -409,7 +412,7 @@ describe("ShoppingFlowService — state machine", () => {
       expect(handled).toBe(true);
       let where = prisma.product.findMany.mock.calls.at(-1)![0].where;
       expect(where.AND).toEqual([{ OR: expect.arrayContaining([{ category: { name: { contains: "fashion", mode: "insensitive" } } }]) }]);
-      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", expect.any(Array));
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("I found one option"), "View", expect.any(Array));
 
       // 5. "Show me shirts" -> matches the black shirt purely on its own name, regardless of category
       prisma.product.findMany.mockResolvedValueOnce([blackShirt]);
@@ -425,7 +428,7 @@ describe("ShoppingFlowService — state machine", () => {
       expect(handled).toBe(true);
       where = prisma.product.findMany.mock.calls.at(-1)![0].where;
       expect(where.AND).toHaveLength(2); // "black" AND "shirts" both independently required
-      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", [
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("I found one option"), "View", [
         { rows: [{ id: "prod_p1", title: "Black Premium Shirt", description: expect.stringContaining("1,799") }] },
       ]);
 
@@ -436,7 +439,7 @@ describe("ShoppingFlowService — state machine", () => {
       expect(handled).toBe(true);
       where = prisma.product.findMany.mock.calls.at(-1)![0].where;
       expect(where.AND).toBeUndefined(); // no keywords left at all once "something" is stripped
-      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", [
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("I found one option"), "View", [
         { rows: [{ id: "prod_p2", title: "Canvas Tote Bag", description: expect.stringContaining("899") }] },
       ]);
     });
@@ -490,7 +493,7 @@ describe("ShoppingFlowService — state machine", () => {
 
       expect(handled).toBe(true);
       expect(prisma.product.findMany).toHaveBeenCalledTimes(1); // no second (relaxed) query attempted
-      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", "😕 No products matched that search.", expect.any(Array));
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't find anything matching that"), expect.any(Array));
     });
 
     it("'I need something nice for a party' still matches directly (single real keyword, no relaxation needed)", async () => {
@@ -501,7 +504,7 @@ describe("ShoppingFlowService — state machine", () => {
 
       expect(handled).toBe(true);
       expect(prisma.product.findMany).toHaveBeenCalledTimes(1);
-      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Found 1 matching product"), "View", expect.any(Array));
+      expect(conversations.sendList).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("I found one option"), "View", expect.any(Array));
     });
   });
 
@@ -531,22 +534,25 @@ describe("ShoppingFlowService — state machine", () => {
       conversation = { ...conversation, assistedBuyingContext: lastContext() };
       expect((conversation.assistedBuyingContext as { filters: { keywords: string[] } }).filters.keywords).toEqual(["shirt", "casual"]);
 
-      // 3. "Preferably blue" -> "preferably" is filler (stripped), "blue" merges onto the accumulated keywords too
+      // 3. "Preferably blue" -> "preferably" is filler (stripped), "blue" is tracked as a separately-replaceable
+      // color slot (not accumulated into filters.keywords) but still applies to product retrieval
       prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
       await flow.handleFreeText("conv1", "biz1", conversation, "Preferably blue");
       expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toHaveLength(3); // "shirt" AND "casual" AND "blue"
       conversation = { ...conversation, assistedBuyingContext: lastContext() };
-      expect((conversation.assistedBuyingContext as { filters: { keywords: string[] } }).filters.keywords).toEqual(["shirt", "casual", "blue"]);
+      expect((conversation.assistedBuyingContext as { filters: { keywords: string[] }; color?: string }).filters.keywords).toEqual(["shirt", "casual"]);
+      expect((conversation.assistedBuyingContext as { color?: string }).color).toBe("blue");
 
-      // 4. "Under 1500" -> the price bound stacks ON TOP of the 3 accumulated keywords, not instead of them
+      // 4. "Under 1500" -> the price bound stacks ON TOP of the accumulated keywords/color, not instead of them
       prisma.product.findMany.mockResolvedValueOnce([shirt1, shirt2]);
       await flow.handleFreeText("conv1", "biz1", conversation, "Under 1500");
       expect(prisma.product.findMany.mock.calls.at(-1)![0].where.AND).toHaveLength(3); // this turn added no new keywords
       conversation = { ...conversation, assistedBuyingContext: lastContext() };
-      const ctx = conversation.assistedBuyingContext as { filters: { keywords: string[]; maxPrice?: number }; lastResults: { productId: string; name: string }[] };
-      expect(ctx.filters).toEqual({ keywords: ["shirt", "casual", "blue"], maxPrice: 1500, minPrice: undefined });
+      const ctx = conversation.assistedBuyingContext as { filters: { keywords: string[]; maxPrice?: number }; color?: string; lastResults: { productId: string; name: string }[] };
+      expect(ctx.filters).toEqual({ keywords: ["shirt", "casual"], maxPrice: 1500, minPrice: undefined });
+      expect(ctx.color).toBe("blue");
       expect(ctx.lastResults.map((r) => r.name)).toEqual(["Casual Blue Denim Shirt", "Blue Casual Linen Shirt"]);
-      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("Found 2 matching products"), "View", [
+      expect(conversations.sendList).toHaveBeenLastCalledWith("conv1", "biz1", expect.stringContaining("I found 2 options"), "View", [
         { rows: [
           { id: "prod_p1", title: "Casual Blue Denim Shirt", description: expect.stringContaining("1,299") },
           { id: "prod_p2", title: "Blue Casual Linen Shirt", description: expect.stringContaining("1,450") },
@@ -1164,6 +1170,153 @@ describe("ShoppingFlowService — Smart Reply Suggestions", () => {
       expect(prisma.business.findUnique).not.toHaveBeenCalled();
       expect(conversations.sendButtons).not.toHaveBeenCalled();
       expect(conversations.sendList).toHaveBeenCalled(); // still shows the existing variant-selection list
+    });
+  });
+});
+
+describe("ShoppingFlowService — persistent shopping context & intent interruption", () => {
+  let prisma: any;
+  let conversations: { sendButtons: jest.Mock; sendList: jest.Mock; sendMessage: jest.Mock; sendImage: jest.Mock };
+  let cart: Record<string, jest.Mock>;
+  let orders: Record<string, jest.Mock>;
+  let signals: { record: jest.Mock };
+  let flow: ShoppingFlowService;
+
+  beforeEach(() => {
+    prisma = {
+      business: { findUnique: jest.fn() },
+      conversation: { findFirst: jest.fn(), update: jest.fn() },
+      product: { findMany: jest.fn(), findFirst: jest.fn() },
+      variant: { findFirst: jest.fn() },
+    };
+    conversations = { sendButtons: jest.fn(), sendList: jest.fn(), sendMessage: jest.fn(), sendImage: jest.fn() };
+    cart = { getOrCreateActive: jest.fn(), addItem: jest.fn(), totals: jest.fn() };
+    orders = {};
+    signals = { record: jest.fn() };
+    flow = new ShoppingFlowService(
+      prisma as unknown as PrismaService,
+      conversations as unknown as ConversationService,
+      cart as unknown as CartService,
+      orders as unknown as OrderService,
+      signals as unknown as CustomerSignalService,
+    );
+  });
+
+  function lastContext() {
+    return prisma.conversation.update.mock.calls.at(-1)![0].data.assistedBuyingContext;
+  }
+
+  describe("gender/color persist across turns and replace (not accumulate) on explicit change", () => {
+    const dummyMatch = (id: string) => ({ id, name: `Dummy Product ${id}`, description: null, brand: null, imageUrl: null, category: null, variants: [{ id: `v-${id}`, price: 999, currency: "INR", inventory: 5 }] });
+
+    it("party wear -> men -> under 3000 -> white: all four constraints apply together (golden E2E context)", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", assistedBuyingContext: null };
+
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d1")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "party wear for men");
+      let ctx = lastContext() as { filters: { keywords: string[] }; gender?: string };
+      expect(ctx.gender).toBe("men");
+      expect(ctx.filters.keywords).toEqual(expect.arrayContaining(["party"]));
+      conversation = { ...conversation, assistedBuyingContext: ctx };
+
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d2")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Under 3000");
+      ctx = lastContext() as { filters: { keywords: string[]; maxPrice?: number }; gender?: string };
+      expect(ctx.gender).toBe("men"); // preserved from the earlier turn, not lost
+      expect((ctx.filters as { maxPrice?: number }).maxPrice).toBe(3000);
+      conversation = { ...conversation, assistedBuyingContext: ctx };
+
+      const whiteShirt = { id: "p1", name: "White Party Shirt", description: null, brand: null, imageUrl: null, category: null, variants: [{ id: "v1", price: 2499, currency: "INR", inventory: 5 }] };
+      prisma.product.findMany.mockResolvedValueOnce([whiteShirt]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "Do you have anything in white?");
+
+      const where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      // every accumulated constraint (party, wear, men, white) is independently AND-required
+      expect(where.AND).toHaveLength(4);
+      const allKeywordsQueried = where.AND.flatMap((c: { OR: { name?: { contains: string } }[] }) => c.OR.map((o) => o.name?.contains).filter(Boolean));
+      expect(allKeywordsQueried).toEqual(expect.arrayContaining(["party", "men", "white"]));
+      ctx = lastContext() as { filters: { keywords: string[]; maxPrice?: number }; gender?: string; color?: string };
+      expect(ctx.gender).toBe("men");
+      expect((ctx.filters as { maxPrice?: number }).maxPrice).toBe(3000);
+      expect((ctx as { color?: string }).color).toBe("white");
+    });
+
+    it("an explicit new color REPLACES the old one instead of AND-requiring both (which would then match nothing)", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", assistedBuyingContext: null };
+
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d1")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "something in white");
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+      expect((conversation.assistedBuyingContext as { color?: string }).color).toBe("white");
+
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d2")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "actually, black");
+
+      const where = prisma.product.findMany.mock.calls.at(-1)![0].where;
+      const colorClauses = where.AND.filter((c: { OR: { name?: { contains: string } }[] }) => c.OR.some((o) => o.name?.contains === "black" || o.name?.contains === "white"));
+      expect(colorClauses).toHaveLength(1); // only "black" is required now, not "black" AND "white"
+      const ctx = lastContext() as { color?: string };
+      expect(ctx.color).toBe("black");
+    });
+
+    it("an unrelated existing constraint (gender) remains active even when the new message only mentions color", async () => {
+      let conversation: { shoppingState: string; pendingVariantId: string | null; customerId: string; assistedBuyingContext?: unknown } =
+        { shoppingState: "MAIN_MENU", pendingVariantId: null, customerId: "cust1", assistedBuyingContext: null };
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d1")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "shoes for women");
+      conversation = { ...conversation, assistedBuyingContext: lastContext() };
+
+      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d2")]);
+      await flow.handleFreeText("conv1", "biz1", conversation, "in red");
+      const ctx = lastContext() as { gender?: string; color?: string };
+      expect(ctx.gender).toBe("women"); // untouched by a message that only mentions color
+      expect(ctx.color).toBe("red");
+    });
+  });
+
+  describe("AWAITING_QUANTITY intent interruption", () => {
+    it("a numeric reply still works exactly as before (regression)", async () => {
+      prisma.variant.findFirst.mockResolvedValue({ id: "v1", inventory: 5, product: { name: "Blue Shirt" } });
+      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
+      cart.addItem.mockResolvedValue({ items: [{ variantId: "v1", quantity: 2 }] });
+      cart.totals.mockReturnValue({ subtotal: 1598, currency: "INR" });
+
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "AWAITING_QUANTITY", pendingVariantId: "v1", customerId: "cust1" }, "2");
+
+      expect(handled).toBe(true);
+      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 2);
+    });
+
+    it("'For men' is recognized as a new shopping constraint, not an invalid quantity — abandons the prompt and searches instead", async () => {
+      prisma.product.findMany.mockResolvedValueOnce([]);
+      await flow.handleFreeText("conv1", "biz1", { shoppingState: "AWAITING_QUANTITY", pendingVariantId: "v1", customerId: "cust1", activeProductId: "p1", assistedBuyingContext: null }, "For men");
+      expect(cart.addItem).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).not.toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("valid quantity"));
+      expect(prisma.product.findMany).toHaveBeenCalled(); // fell through to search()
+    });
+
+    it("a genuinely invalid (non-interruption) reply gets the improved wording, not the old mechanical message", async () => {
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "AWAITING_QUANTITY", pendingVariantId: "v1", customerId: "cust1" }, "asdf");
+      expect(handled).toBe(true);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("if you meant something else"));
+      expect(prisma.product.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("COLLECTING_ADDRESS intent interruption", () => {
+    it("a plain address still works exactly as before (regression)", async () => {
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "COLLECTING_ADDRESS", pendingVariantId: null, customerId: "cust1" }, "221B Baker Street, London");
+      expect(handled).toBe(true);
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { pendingAddress: "221B Baker Street, London", shoppingState: "COLLECTING_PAYMENT" } });
+    });
+
+    it("a product question mid-address is never silently stored as the shipping address (safely handled, checkout state untouched)", async () => {
+      const handled = await flow.handleFreeText("conv1", "biz1", { shoppingState: "COLLECTING_ADDRESS", pendingVariantId: null, customerId: "cust1" }, "do you have this in white?");
+      expect(handled).toBe(true);
+      expect(prisma.conversation.update).not.toHaveBeenCalled(); // shoppingState/pendingAddress untouched
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("share your shipping address"));
     });
   });
 });

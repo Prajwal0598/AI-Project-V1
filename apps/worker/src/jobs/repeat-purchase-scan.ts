@@ -2,6 +2,7 @@ import type { Job } from "bullmq";
 import OpenAI from "openai";
 import { prisma } from "../prisma";
 import { sendChannelMessage } from "../channel-send";
+import { formatCustomerDisplayName } from "../customer-name.helper";
 import type { RepeatPurchaseScanJobData } from "../queues";
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -92,7 +93,7 @@ export async function processRepeatPurchaseScan(_job: Job<RepeatPurchaseScanJobD
       });
       if (existingOpportunity) continue;
 
-      const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+      const customerName = formatCustomerDisplayName(customer);
       const priceLabel = `INR ${group.unitPrice}`;
       const message = await draftMessage(customerName, business.name, group.name, priceLabel);
 

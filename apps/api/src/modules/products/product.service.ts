@@ -8,6 +8,7 @@ import { UpdateVariantDto } from "./dto/update-variant.dto";
 import { BulkUpdateProductsDto } from "./dto/bulk-update-products.dto";
 import { deleteProductImageFile } from "./image-storage";
 import { InventoryService } from "../inventory/inventory.service";
+import { formatCustomerDisplayName } from "../../common/customer-name.helper";
 import { OpportunityService } from "../opportunities/opportunity.service";
 
 const DEFAULT_INCLUDE = {
@@ -86,7 +87,7 @@ export class ProductService {
     });
     for (const { customerId } of interested) {
       const customer = await this.prisma.customer.findUnique({ where: { id: customerId }, select: { firstName: true, lastName: true } });
-      const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") || "there";
+      const customerName = formatCustomerDisplayName(customer);
       await this.opportunities.createWithAiMessage({
         businessId: business.id, customerId, type: "NEW_PRODUCT_MATCH",
         reason: "New arrival in a category they've previously shown interest in.",

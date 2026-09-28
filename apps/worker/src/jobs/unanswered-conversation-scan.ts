@@ -1,6 +1,7 @@
 import type { Job } from "bullmq";
 import { prisma } from "../prisma";
 import { sendChannelMessage } from "../channel-send";
+import { formatCustomerDisplayName } from "../customer-name.helper";
 import type { UnansweredConversationScanJobData } from "../queues";
 
 // how long an escalated conversation can sit with the customer's message unanswered before we nudge them
@@ -51,7 +52,7 @@ export async function processUnansweredConversationScan(_job: Job<UnansweredConv
       });
       if (existing) continue;
 
-      const customerName = [conversation.customer.firstName, conversation.customer.lastName].filter(Boolean).join(" ") || "there";
+      const customerName = formatCustomerDisplayName(conversation.customer);
       const message = FALLBACK(customerName);
       const confidence = 0.7;
       const scoreBase = 70 + Math.round(confidence * 20);

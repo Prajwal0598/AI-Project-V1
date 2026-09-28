@@ -101,3 +101,60 @@ describe("OpportunityService.send", () => {
     expect(conversations.sendImage).not.toHaveBeenCalled();
   });
 });
+
+describe("OpportunityService.create — active-conversation suppression", () => {
+  let prisma: any;
+  let conversations: { sendMessage: jest.Mock; sendButtons: jest.Mock; sendImage: jest.Mock };
+  let automationRules: { getFor: jest.Mock; countCreatedTodayForCustomer: jest.Mock; isWithinBusinessHours: jest.Mock };
+  let service: OpportunityService;
+
+  const baseInput = { businessId: "biz1", customerId: "cust1", type: "PRODUCT_ENQUIRY" as const, reason: "test", confidence: 0.9, message: "Hi!" };
+  const sentOpportunity = { id: "opp1", customerId: "cust1", relatedCartId: null, status: "NEW", type: "PRODUCT_ENQUIRY", suggestion: { message: "Hi!", editedMessage: null }, relatedProduct: null };
+
+  beforeEach(() => {
+    prisma = {
+      business: { findUnique: jest.fn().mockResolvedValue({ proactiveSuggestionsEnabled: true }) },
+      customer: { findUnique: jest.fn().mockResolvedValue({ proactiveMessagingOptOut: false, leadScore: null }) },
+      opportunity: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({ id: "opp1" }), findUnique: jest.fn().mockResolvedValue({ id: "opp1", status: "SENT" }) },
+      message: { findFirst: jest.fn() },
+      conversation: { findFirst: jest.fn().mockResolvedValue({ id: "conv1" }) },
+      suggestion: { update: jest.fn() },
+      aiActionLog: { create: jest.fn() },
+      $transaction: jest.fn((fn: any) => fn(prisma)),
+    };
+    conversations = { sendMessage: jest.fn(), sendButtons: jest.fn(), sendImage: jest.fn() };
+    automationRules = {
+      getFor: jest.fn().mockResolvedValue({ enabled: true, autoSend: true, minConfidenceForAutoSend: 0, frequencyCapPerCustomerPerDay: null, personalizedTiming: false, businessHoursStart: null, businessHoursEnd: null }),
+      countCreatedTodayForCustomer: jest.fn().mockResolvedValue(0),
+      isWithinBusinessHours: jest.fn().mockReturnValue(true),
+    };
+    service = new OpportunityService(
+      prisma as unknown as PrismaService,
+      conversations as unknown as ConversationService,
+      {} as unknown as SuggestionAiService,
+      automationRules as unknown as AutomationRuleService,
+    );
+  });
+
+  it("auto-sends normally when the customer hasn't messaged recently (regression)", async () => {
+    prisma.message.findFirst.mockResolvedValue({ direction: "INBOUND", sentAt: new Date(Date.now() - 60 * 60_000) }); // 1h ago
+    prisma.opportunity.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(sentOpportunity);
+    await service.create(baseInput);
+    expect(conversations.sendMessage).toHaveBeenCalled();
+  });
+
+  it("defers auto-send (but still creates the opportunity for manual review) when the customer messaged very recently", async () => {
+    prisma.message.findFirst.mockResolvedValue({ direction: "INBOUND", sentAt: new Date() }); // just now
+    const result = await service.create(baseInput);
+    expect(conversations.sendMessage).not.toHaveBeenCalled();
+    expect(conversations.sendButtons).not.toHaveBeenCalled();
+    expect(result).toEqual({ id: "opp1" });
+  });
+
+  it("does NOT defer when the customer's most recent message was OUTBOUND (e.g. our own last reply, not theirs)", async () => {
+    prisma.message.findFirst.mockResolvedValue({ direction: "OUTBOUND", sentAt: new Date() });
+    prisma.opportunity.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(sentOpportunity);
+    await service.create(baseInput);
+    expect(conversations.sendMessage).toHaveBeenCalled();
+  });
+});

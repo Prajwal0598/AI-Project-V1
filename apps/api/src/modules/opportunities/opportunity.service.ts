@@ -25,6 +25,10 @@ interface CreateOpportunityInput {
   estimatedValue?: number;
   confidence: number; // 0-1
   relatedProductId?: string;
+  // every product this ONE consolidated opportunity covers (spec: group related product interests into a
+  // single customer-level follow-up instead of one per product viewed) — relatedProductId above stays the
+  // primary/first product for dedup and the existing single-product "Add to Cart" send button
+  relatedProductIds?: string[];
   relatedCartId?: string;
   relatedPromotionId?: string;
   message: string;
@@ -114,6 +118,7 @@ export class OpportunityService {
         reason: input.reason,
         estimatedValue: input.estimatedValue,
         relatedProductId: input.relatedProductId,
+        relatedProductIds: input.relatedProductIds ?? [],
         relatedCartId: input.relatedCartId,
         relatedPromotionId: input.relatedPromotionId,
         suggestion: { create: { message: input.message } },
@@ -122,6 +127,12 @@ export class OpportunityService {
     });
 
     if (rule.autoSend && input.confidence >= rule.minConfidenceForAutoSend && (await this.isWithinSendWindow(rule, input.businessId, input.customerId))) {
+      if (await this.isConversationActive(input.businessId, input.customerId)) {
+        // the customer is actively mid-conversation right now — interrupting with a proactive nudge is exactly
+        // the spammy behavior this guards against; the Opportunity still exists for manual review/send later
+        await logAiAction(this.prisma, { businessId: input.businessId, customerId: input.customerId, action: "OPPORTUNITY_AUTO_SEND_DEFERRED", result: "deferred", reason: "customer is actively in conversation" });
+        return created;
+      }
       try {
         await this.send(created.id, input.businessId);
         await logAiAction(this.prisma, { businessId: input.businessId, customerId: input.customerId, action: "OPPORTUNITY_AUTO_SENT", result: "sent", reason: `${input.type} auto-send rule enabled` });
@@ -133,6 +144,23 @@ export class OpportunityService {
     }
 
     return created;
+  }
+
+  // sending a proactive nudge while the customer messaged us this recently would land mid-conversation —
+  // exactly the "spammy follow-up bot" behavior this guards against. Configurable since what counts as
+  // "actively chatting" is a product judgment call, not a fixed constant.
+  private static readonly ACTIVE_CONVERSATION_WINDOW_MS = Number(process.env.PROACTIVE_ACTIVE_WINDOW_MINUTES ?? 15) * 60_000;
+
+  /** True if the customer's most recent message (across any of their conversations) was INBOUND and within
+   * the active-conversation window — i.e. they're currently mid-conversation, not just recently active. */
+  private async isConversationActive(businessId: string, customerId: string): Promise<boolean> {
+    const latest = await this.prisma.message.findFirst({
+      where: { conversation: { businessId, customerId } },
+      orderBy: { sentAt: "desc" },
+      select: { direction: true, sentAt: true },
+    });
+    if (!latest || latest.direction !== "INBOUND") return false;
+    return Date.now() - latest.sentAt.getTime() < OpportunityService.ACTIVE_CONVERSATION_WINDOW_MS;
   }
 
   /** True if now is a good moment to auto-send: the customer's own inferred best-reply hour when the rule opts in and enough history exists, otherwise the business-hours window. */
@@ -277,8 +305,8 @@ export class OpportunityService {
   }
 
   /** Convenience wrapper for API-side callers (shopping-flow, ai.service, inventory, orders) — drafts the message via AI, then creates. */
-  async createWithAiMessage(input: Omit<CreateOpportunityInput, "message"> & { customerName: string; businessName: string; productName?: string; price?: string; basedOnProductName?: string }) {
-    const message = await this.suggestionAi.draftMessage({ type: input.type, customerName: input.customerName, businessName: input.businessName, productName: input.productName, price: input.price, basedOnProductName: input.basedOnProductName });
+  async createWithAiMessage(input: Omit<CreateOpportunityInput, "message"> & { customerName: string; businessName: string; productName?: string; productNames?: string[]; price?: string; basedOnProductName?: string }) {
+    const message = await this.suggestionAi.draftMessage({ type: input.type, customerName: input.customerName, businessName: input.businessName, productName: input.productName, productNames: input.productNames, price: input.price, basedOnProductName: input.basedOnProductName });
     return this.create({ ...input, message });
   }
 

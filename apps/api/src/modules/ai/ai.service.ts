@@ -6,6 +6,7 @@ import { OrderService } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
+import { formatCustomerDisplayName } from "../../common/customer-name.helper";
 import { captureException } from "../../common/error-reporting.helper";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CartService } from "../cart/cart.service";
@@ -347,24 +348,44 @@ ${transcript || "No previous messages. Greet the customer and share the product 
         }
       }
 
-      // no purchase resulted this turn — record interest, and (if the merchant has opted in) surface a follow-up opportunity
+      // no purchase resulted this turn — record interest, and (if the merchant has opted in) surface a follow-up
+      // opportunity. Signals are still recorded per-product (that history is what drives the HIGH_PURCHASE_INTENT
+      // escalation below), but the opportunities themselves are consolidated: one HIGH_PURCHASE_INTENT per
+      // strongly-signalled product (each independently a strong, specific buying signal worth its own nudge),
+      // plus at most ONE combined PRODUCT_ENQUIRY opportunity for everything else shown this turn — never one
+      // separate follow-up per product viewed.
       if (!orderCreated) {
-        const customerName = [conversation.customer.firstName, conversation.customer.lastName].filter(Boolean).join(" ") || "there";
+        const customerName = formatCustomerDisplayName(conversation.customer);
+        const enquiredProducts: typeof toSend = [];
         for (const product of toSend) {
-          const variant = product.variants[0];
           await this.signals.record(businessId, conversation.customerId, "PRODUCT_ENQUIRY", { productId: product.id });
-          // 3+ interactions with the same product inside 48h is a stronger signal than a one-off enquiry —
-          // escalate to HIGH_PURCHASE_INTENT instead of a plain PRODUCT_ENQUIRY (the per-type dedup means only one of these ever ends up active for this product)
           const recentSignalCount = await this.signals.countRecentSignals(businessId, conversation.customerId, product.id);
           const isHighIntent = recentSignalCount >= HIGH_PURCHASE_INTENT_THRESHOLD;
-          if (isHighIntent) await this.opportunities.supersede(businessId, conversation.customerId, "PRODUCT_ENQUIRY", product.id);
+          if (isHighIntent) {
+            const variant = product.variants[0];
+            await this.opportunities.supersede(businessId, conversation.customerId, "PRODUCT_ENQUIRY", product.id);
+            await this.opportunities.createWithAiMessage({
+              businessId, customerId: conversation.customerId, type: "HIGH_PURCHASE_INTENT",
+              reason: `Asked about or viewed ${product.name} ${recentSignalCount} times in the last 48h without purchasing.`,
+              estimatedValue: Number(variant.price), confidence: 0.85, relatedProductId: product.id,
+              customerName, businessName: conversation.business.name, productName: product.name, price: `${variant.currency} ${variant.price}`,
+            });
+          } else {
+            enquiredProducts.push(product);
+          }
+        }
+        if (enquiredProducts.length) {
+          const primary = enquiredProducts[0];
+          const primaryVariant = primary.variants[0];
           await this.opportunities.createWithAiMessage({
-            businessId, customerId: conversation.customerId, type: isHighIntent ? "HIGH_PURCHASE_INTENT" : "PRODUCT_ENQUIRY",
-            reason: isHighIntent
-              ? `Asked about or viewed ${product.name} ${recentSignalCount} times in the last 48h without purchasing.`
-              : `Asked about ${product.name} but hasn't purchased yet.`,
-            estimatedValue: Number(variant.price), confidence: isHighIntent ? 0.85 : 0.6, relatedProductId: product.id,
-            customerName, businessName: conversation.business.name, productName: product.name, price: `${variant.currency} ${variant.price}`,
+            businessId, customerId: conversation.customerId, type: "PRODUCT_ENQUIRY",
+            reason: enquiredProducts.length === 1
+              ? `Asked about ${primary.name} but hasn't purchased yet.`
+              : `Asked about ${enquiredProducts.length} products (${enquiredProducts.map((p) => p.name).join(", ")}) but hasn't purchased yet.`,
+            estimatedValue: Number(primaryVariant.price), confidence: 0.6, relatedProductId: primary.id,
+            relatedProductIds: enquiredProducts.map((p) => p.id),
+            customerName, businessName: conversation.business.name,
+            productName: primary.name, productNames: enquiredProducts.map((p) => p.name), price: `${primaryVariant.currency} ${primaryVariant.price}`,
           });
         }
       }

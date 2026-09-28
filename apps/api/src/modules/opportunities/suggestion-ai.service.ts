@@ -16,9 +16,20 @@ interface SuggestionContext {
   customerName: string;
   businessName: string;
   productName?: string;
+  // for a consolidated follow-up covering several products shown in one turn (PRODUCT_ENQUIRY/HIGH_PURCHASE_INTENT) —
+  // when set, takes precedence over the singular productName so one message can reference all of them together
+  // instead of sending a separate follow-up per product
+  productNames?: string[];
   price?: string;
   /** for CROSS_SELL/UPSELL: the product the customer just bought, which this suggestion is based on */
   basedOnProductName?: string;
+}
+
+// "X" / "X and Y" / "X, Y, and Z" — natural joining instead of a comma-separated dump
+function joinNaturally(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 @Injectable()
@@ -56,11 +67,14 @@ export class SuggestionAiService {
   }
 
   private buildPrompt(context: SuggestionContext): string {
+    const productLabel = context.productNames?.length ? joinNaturally(context.productNames) : context.productName;
     switch (context.type) {
       case "PRODUCT_ENQUIRY":
-        return `Customer name: ${context.customerName}\nThey asked about: ${context.productName}${context.price ? ` (${context.price})` : ""}\nThey haven't purchased yet. Write a friendly follow-up checking if they're still interested and offering help.`;
+        return context.productNames && context.productNames.length > 1
+          ? `Customer name: ${context.customerName}\nThey asked about several products but haven't purchased yet: ${productLabel}. Write a friendly, single follow-up checking if they're still interested in any of these and offering help — don't list prices, just reference them naturally.`
+          : `Customer name: ${context.customerName}\nThey asked about: ${productLabel}${context.price ? ` (${context.price})` : ""}\nThey haven't purchased yet. Write a friendly follow-up checking if they're still interested and offering help.`;
       case "HIGH_PURCHASE_INTENT":
-        return `Customer name: ${context.customerName}\nThey've asked about or viewed ${context.productName}${context.price ? ` (${context.price})` : ""} multiple times recently — strong signs they're close to buying but haven't yet. Write a helpful nudge offering to answer any remaining questions or help them complete the purchase.`;
+        return `Customer name: ${context.customerName}\nThey've asked about or viewed ${productLabel}${context.price ? ` (${context.price})` : ""} multiple times recently — strong signs they're close to buying but haven't yet. Write a helpful nudge offering to answer any remaining questions or help them complete the purchase.`;
       case "BACK_IN_STOCK":
         return `Customer name: ${context.customerName}\nThey previously showed interest in: ${context.productName}, which was out of stock.\nIt's back in stock now${context.price ? ` at ${context.price}` : ""}. Let them know.`;
       case "REPEAT_PURCHASE":
@@ -84,11 +98,14 @@ export class SuggestionAiService {
   }
 
   private fallbackMessage(context: SuggestionContext): string {
+    const productLabel = context.productNames?.length ? joinNaturally(context.productNames) : context.productName;
     switch (context.type) {
       case "PRODUCT_ENQUIRY":
-        return `Hi ${context.customerName}! Just checking in — are you still interested in ${context.productName}? Happy to help if you have any questions.`;
+        return context.productNames && context.productNames.length > 1
+          ? `Hi ${context.customerName}! Still deciding between ${productLabel}? Happy to help if you have any questions.`
+          : `Hi ${context.customerName}! Just checking in — are you still interested in ${productLabel}? Happy to help if you have any questions.`;
       case "HIGH_PURCHASE_INTENT":
-        return `Hi ${context.customerName}! Noticed you've been checking out ${context.productName} — happy to answer any questions if you're close to deciding!`;
+        return `Hi ${context.customerName}! Noticed you've been checking out ${productLabel} — happy to answer any questions if you're close to deciding!`;
       case "BACK_IN_STOCK":
         return `Hi ${context.customerName}! Good news — ${context.productName} is back in stock${context.price ? ` at ${context.price}` : ""}. Let us know if you'd like to grab one.`;
       case "REPEAT_PURCHASE":

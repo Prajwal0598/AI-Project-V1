@@ -125,6 +125,13 @@ const REMOVE_RE = /^\s*remove\s+(.+?)\s*(?:from (?:my )?cart)?[.!?]*\s*$/i;
 // already states the total, so both phrasings are handled the same way)
 const VIEW_CART_RE = /\b(what'?s? in my cart|show (?:me )?my cart|view (?:my )?cart|see my cart|how much (?:is|for) everything|what'?s? my (?:cart )?total|total (?:cost|price))\b/i;
 
+// "For men" / "Do you have this in white?" / "show me something else" — a customer changing their request
+// while Relay is mid-way through a deterministic prompt (quantity/address), not answering it. Checked before
+// blindly accepting raw text as that state's expected input, so the customer can naturally redirect instead
+// of getting stuck on "please enter a valid quantity" (or, worse, having a shopping question silently stored
+// as their shipping address).
+const INTENT_INTERRUPTION_RE = /\?|\b(something else|anything else|different one|instead|actually|change my mind|for (men|women|him|her|kids|boys|girls)|do you have|show me|what about|never ?mind)\b/i;
+
 interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
 
 // accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
@@ -134,9 +141,40 @@ interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string
 // against whatever was last shown
 interface ShoppingSearchContext {
   filters: SearchFilters;
+  // gender/color are tracked SEPARATELY from filters.keywords (which only ever accumulates) because these two
+  // are "hard, replaceable" constraints: "do you have this in white?" then later "actually, black" must REPLACE
+  // white with black, not AND-require both (which would then match nothing, ever) — see extractReplaceableSlots
+  gender?: string;
+  color?: string;
   lastResults: { productId: string; variantId: string; name: string }[];
   comparedProductIds?: string[];
   lastCartItem?: { productId: string; variantId: string; name: string };
+}
+
+// a later mention of one of these should REPLACE the earlier one in persisted context, not accumulate
+// alongside it — see extractReplaceableSlots. Deliberately a small, hand-picked list (not exhaustive) since a
+// false miss just falls back to ordinary keyword accumulation, which is safe, whereas a false hit would
+// silently drop a word from a genuine product-name/description match.
+const GENDER_WORDS: Record<string, string> = {
+  men: "men", man: "men", mens: "men", male: "men", boys: "men", boy: "men",
+  women: "women", woman: "women", womens: "women", female: "women", girls: "women", girl: "women",
+  unisex: "unisex", kids: "kids", kid: "kids", children: "kids",
+};
+const COLOR_WORDS = new Set([
+  "white", "black", "red", "blue", "green", "yellow", "pink", "purple", "orange", "brown",
+  "grey", "gray", "navy", "beige", "gold", "silver", "maroon", "cream", "tan", "olive", "turquoise", "magenta",
+]);
+
+function extractReplaceableSlots(keywords: string[]): { gender?: string; color?: string; rest: string[] } {
+  let gender: string | undefined;
+  let color: string | undefined;
+  const rest: string[] = [];
+  for (const kw of keywords) {
+    if (!gender && GENDER_WORDS[kw]) { gender = GENDER_WORDS[kw]; continue; }
+    if (!color && COLOR_WORDS.has(kw)) { color = kw; continue; }
+    rest.push(kw);
+  }
+  return { gender, color, rest };
 }
 
 /** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
@@ -757,20 +795,29 @@ export class ShoppingFlowService {
     const parsed = parseSearchQuery(text);
     // merge this turn's constraints onto whatever's already been gathered this conversation — a customer
     // refining a search across several messages ("I need a shirt" / "something casual" / "preferably blue" /
-    // "under 1500") means all four together, not four independent, mutually-forgetful searches
+    // "under 1500") means all four together, not four independent, mutually-forgetful searches. gender/color
+    // are REPLACEABLE slots (a later "actually, black" overwrites "white" rather than AND-requiring both, which
+    // would then match nothing ever) — free keywords keep accumulating as before.
     const priorFilters = existingContext?.filters;
+    const { gender: newGender, color: newColor, rest: newFreeKeywords } = extractReplaceableSlots(parsed.keywords);
+    const priorFreeKeywords = priorFilters ? extractReplaceableSlots(priorFilters.keywords).rest : [];
+    const gender = newGender ?? existingContext?.gender;
+    const color = newColor ?? existingContext?.color;
     const filters: SearchFilters = {
-      keywords: Array.from(new Set([...(priorFilters?.keywords ?? []), ...parsed.keywords])),
+      keywords: Array.from(new Set([...priorFreeKeywords, ...newFreeKeywords])),
       maxPrice: parsed.maxPrice ?? priorFilters?.maxPrice,
       minPrice: parsed.minPrice ?? priorFilters?.minPrice,
     };
+    // the actual query/ranking keyword list additionally includes the current gender/color slot values —
+    // kept separate from `filters.keywords` so a replaced slot value never lingers in the persisted context
+    const effectiveKeywords = [...filters.keywords, ...(gender ? [gender] : []), ...(color ? [color] : [])];
 
     const products = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
         // every keyword must independently match somewhere (AND across keywords) — a product matching only
         // "black" when "bag" was also required must not be returned
-        ...(filters.keywords.length ? { AND: keywordAndClauses(filters.keywords) } : {}),
+        ...(effectiveKeywords.length ? { AND: keywordAndClauses(effectiveKeywords) } : {}),
       },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
       take: 30,
@@ -786,9 +833,9 @@ export class ShoppingFlowService {
     // multiple keywords to begin with, so a genuine single-attribute miss (e.g. a color nobody stocks) still
     // correctly reports no match rather than surfacing unrelated products
     let isExactMatch = true;
-    if (!matches.length && filters.keywords.length > 1) {
+    if (!matches.length && effectiveKeywords.length > 1) {
       const relaxed = await this.prisma.product.findMany({
-        where: { businessId, status: "PUBLISHED", OR: keywordAndClauses(filters.keywords).flatMap((clause) => clause.OR) },
+        where: { businessId, status: "PUBLISHED", OR: keywordAndClauses(effectiveKeywords).flatMap((clause) => clause.OR) },
         include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 }, category: true },
         take: 30,
       });
@@ -798,7 +845,7 @@ export class ShoppingFlowService {
       if (relaxedMatches.length) {
         const keywordHits = (p: (typeof relaxedMatches)[number]) => {
           const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
-          return filters.keywords.filter((kw) => haystack.includes(kw)).length;
+          return effectiveKeywords.filter((kw) => haystack.includes(kw)).length;
         };
         matches = relaxedMatches.sort((a, b) => keywordHits(b) - keywordHits(a));
         isExactMatch = false;
@@ -827,7 +874,7 @@ export class ShoppingFlowService {
     matches = matches.slice(0, MAX_LIST_ROWS);
 
     if (!matches.length) {
-      await this.conversations.sendButtons(conversationId, businessId, "😕 No products matched that search.", [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      await this.conversations.sendButtons(conversationId, businessId, "Hmm, I couldn't find anything matching that — want to try a different search?", [{ id: "menu_shop", title: "🛍️ Shop" }]);
       // reset to IDLE (and drop the accumulated context) so a dead-end search doesn't strand the customer, or
       // silently keep filtering later turns by constraints that just proved to match nothing
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE", assistedBuyingContext: Prisma.JsonNull } });
@@ -835,15 +882,15 @@ export class ShoppingFlowService {
     }
 
     const header = isExactMatch
-      ? `🔍 Found ${matches.length} matching product${matches.length === 1 ? "" : "s"}:`
-      : `🔍 Nothing matched exactly, but here ${matches.length === 1 ? "is an option" : "are some options"} that might work:`;
+      ? (matches.length === 1 ? "Yes! I found one option that matches what you're looking for:" : `Yes! I found ${matches.length} options that match what you're looking for:`)
+      : `Nothing matched exactly, but here ${matches.length === 1 ? "is an option" : "are a few options"} that might work:`;
     await this.conversations.sendList(conversationId, businessId, header, "View", [
       { rows: matches.map((p) => {
         const v = p.variants[0];
         return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` };
       }) },
     ]);
-    const context: ShoppingSearchContext = { filters, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    const context: ShoppingSearchContext = { filters, gender, color, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
   }
 
@@ -962,13 +1009,21 @@ export class ShoppingFlowService {
     await this.conversations.sendMessage(conversationId, businessId, "🔢 How many would you like? Reply with a number.");
   }
 
-  private async receiveQuantity(conversationId: string, businessId: string, conversation: { pendingVariantId: string | null; customerId: string }, text: string) {
+  private async receiveQuantity(conversationId: string, businessId: string, conversation: { pendingVariantId: string | null; customerId: string; activeProductId?: string | null; assistedBuyingContext?: unknown }, text: string) {
     // a plain affirmative ("I'll take it", "yes", "sure") after being shown a single-variant product means
     // quantity 1 — customers confirming a purchase rarely type the number itself
     const isAffirmative = /^\s*(i'?ll take it|take it|i want it|yes|yeah|yep|sure|ok(ay)?|sounds good|perfect|great)\s*[!.]*\s*$/i.test(text);
     const quantity = isAffirmative ? 1 : parseInt(text.match(/\d+/)?.[0] ?? "", 10);
     if (!conversation.pendingVariantId || !Number.isFinite(quantity) || quantity < 1) {
-      await this.conversations.sendMessage(conversationId, businessId, "Please reply with a valid quantity, e.g. 2.");
+      // the customer changed their mind mid-prompt ("for men", "do you have this in white?") rather than
+      // answering it — abandon the quantity prompt and treat this as a new shopping request instead of
+      // repeatedly telling them to enter a number they were never going to enter
+      if (INTENT_INTERRUPTION_RE.test(text)) {
+        const context = conversation.assistedBuyingContext as unknown as ShoppingSearchContext | null;
+        await this.search(conversationId, businessId, conversation.customerId, text, context, conversation.activeProductId ?? null);
+        return;
+      }
+      await this.conversations.sendMessage(conversationId, businessId, "No problem — if you meant something else, just tell me what you're looking for and I'll adjust. Otherwise, how many would you like?");
       return;
     }
 
@@ -1028,6 +1083,14 @@ export class ShoppingFlowService {
   }
 
   private async receiveAddress(conversationId: string, businessId: string, text: string) {
+    // a shopping question/redirect mid-address ("do you have this in white?") must never be silently stored
+    // as the shipping address — checkout state stays exactly as-is (still COLLECTING_ADDRESS) so the very next
+    // reply is retried as the address, rather than routing through the full search pipeline here, which could
+    // change shoppingState and derail an order that's already this close to being placed
+    if (INTENT_INTERRUPTION_RE.test(text)) {
+      await this.conversations.sendMessage(conversationId, businessId, "I'll help with that once your order is placed! For now, could you share your shipping address so I can continue checkout? Or type \"cancel\" to stop and keep browsing.");
+      return;
+    }
     const address = text.trim();
     if (address.length < 8) {
       await this.conversations.sendMessage(conversationId, businessId, "Please share your complete shipping address so we can deliver your order 📦");

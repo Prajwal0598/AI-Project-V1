@@ -2,6 +2,7 @@ import type { Job } from "bullmq";
 import OpenAI from "openai";
 import { MessageDirection, ActivityEventType } from "@prisma/client";
 import { prisma } from "../prisma";
+import { formatCustomerDisplayName } from "../customer-name.helper";
 import type { FollowUpJobData } from "../queues";
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -30,7 +31,7 @@ export async function processFollowUp(job: Job<FollowUpJobData>) {
 
   if (!openai) return { skipped: "OPENAI_API_KEY not configured" };
 
-  const customerName = [conversation.customer.firstName, conversation.customer.lastName].filter(Boolean).join(" ") || "the customer";
+  const customerName = formatCustomerDisplayName(conversation.customer, "there");
   const lastInbound = [...conversation.messages].reverse().find(m => m.direction === MessageDirection.INBOUND);
   const catalog = conversation.business.products.length
     ? conversation.business.products.filter(p => p.variants[0]).map(p => `${p.name} — ${p.variants[0].currency} ${p.variants[0].price}`).join("\n")

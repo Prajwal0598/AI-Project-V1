@@ -2,6 +2,7 @@ import type { Job } from "bullmq";
 import OpenAI from "openai";
 import { prisma } from "../prisma";
 import { sendChannelMessage } from "../channel-send";
+import { formatCustomerDisplayName } from "../customer-name.helper";
 import type { CustomerHealthScanJobData } from "../queues";
 
 const HIGH_VALUE_QUIET_DAYS = 14; // a high-value customer quiet for this long is worth a proactive check-in
@@ -119,7 +120,7 @@ export async function processCustomerHealthScan(_job: Job<CustomerHealthScanJobD
       const lastActivity = [lastConversationAt, lastOrderAt].filter((d): d is Date => d != null).sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
       const daysQuiet = lastActivity ? (now - lastActivity.getTime()) / 86_400_000 : null;
       const wasPreviouslyActive = customer._count.orders > 0 || customer._count.conversations >= 2;
-      const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "there";
+      const customerName = formatCustomerDisplayName(customer);
       const leadScore = customer.leadScore?.score ?? 0;
 
       if (lowEngagementRule.enabled && wasPreviouslyActive && daysQuiet != null && daysQuiet >= business.defaultLowEngagementDays) {
