@@ -55,7 +55,11 @@ export class ConversationService {
     const [items, total] = await Promise.all([
       this.prisma.conversation.findMany({
         where,
-        include: { identity: { select: { identifier: true, displayName: true } }, messages: { orderBy: { sentAt: "desc" as const }, take: 1 } },
+        include: {
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+          identity: { select: { identifier: true, displayName: true } },
+          messages: { orderBy: { sentAt: "desc" as const }, take: 1 },
+        },
         orderBy: { lastMessageAt: "desc" },
         skip: (page - 1) * pageSize,
         take: pageSize,

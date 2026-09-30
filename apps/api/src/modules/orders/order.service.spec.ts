@@ -234,4 +234,14 @@ describe("OrderService", () => {
       expect(prisma.variant.updateMany).not.toHaveBeenCalled();
     });
   });
+
+  describe("listForCustomer", () => {
+    it("includes the customer relation — the Customer 360 profile renders it directly and crashes without it", async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+      await orders.listForCustomer("cust1", "biz1", 1, 20);
+      const [args] = prisma.order.findMany.mock.calls[0];
+      expect(args.include.customer).toBeDefined();
+      expect(args.include.customer.select).toMatchObject({ id: true, firstName: true, lastName: true, email: true });
+    });
+  });
 });
