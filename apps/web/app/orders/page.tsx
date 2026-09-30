@@ -1,5 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId } from "../../lib/api";
 import type { Order } from "../../lib/api";
@@ -43,14 +45,26 @@ function fmtDate(d: string) {
 }
 
 export default function OrdersPage() {
+  return <Suspense fallback={null}><OrdersPageInner /></Suspense>;
+}
+
+function OrdersPageInner() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const highlightId = useSearchParams().get("highlight");
+  const highlightRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const bizId = getBusinessId();
     if (!bizId) return;
     api.orders.list(bizId).then(setOrders).catch(console.error).finally(() => setLoading(false));
   }, []);
+
+  // scrolls to the linked order when arriving from a customer profile — there's no separate order-detail
+  // page/route to navigate to instead, so this table is the destination, just brought into view
+  useEffect(() => {
+    if (highlightId && highlightRef.current) highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightId, orders]);
 
   async function advance(order: Order) {
     const next = STATUS_NEXT[order.status];
@@ -85,9 +99,9 @@ export default function OrdersPage() {
       {loading && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
       {!loading && orders.length === 0 && <p style={{ padding: "16px", color: "var(--muted)", fontSize: 12 }}>No orders yet.</p>}
       {orders.map(o => (
-        <div className="table-row" key={o.id}>
+        <div className={`table-row ${o.id === highlightId ? "highlighted" : ""}`} key={o.id} ref={o.id === highlightId ? highlightRef : undefined}>
           <span style={{ fontFamily: "monospace", fontSize: 11, color: "var(--muted)" }}>#{o.id.slice(-8).toUpperCase()}</span>
-          <div className="person"><b>{custName(o.customer).slice(0, 2).toUpperCase()}</b><strong>{custName(o.customer)}</strong></div>
+          <Link href={`/customers/${o.customer.id}`} className="person" style={{ textDecoration: "none", color: "inherit" }}><b>{custName(o.customer).slice(0, 2).toUpperCase()}</b><strong>{custName(o.customer)}</strong></Link>
           <span><strong>{o.currency} {o.total}</strong></span>
           <span className="source-chip">{o.paymentMethod ?? "—"}</span>
           <span className={`stage-chip ${STATUS_COLOR[o.status]}`}>{o.status.replace("_", " ")}</span>

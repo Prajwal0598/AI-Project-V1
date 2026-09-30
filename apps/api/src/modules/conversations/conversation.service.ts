@@ -49,6 +49,22 @@ export class ConversationService {
     return conversation;
   }
 
+  /** Paginated conversation history for one customer — backs the Customer 360 profile's Conversations tab. */
+  async listForCustomer(customerId: string, businessId: string, page = 1, pageSize = 20) {
+    const where = { businessId, customerId };
+    const [items, total] = await Promise.all([
+      this.prisma.conversation.findMany({
+        where,
+        include: { identity: { select: { identifier: true, displayName: true } }, messages: { orderBy: { sentAt: "desc" as const }, take: 1 } },
+        orderBy: { lastMessageAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.conversation.count({ where }),
+    ]);
+    return { items, total, page, pageSize };
+  }
+
   async addMessage(conversationId: string, businessId: string, input: CreateMessageDto) {
     const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId } });
     if (!conversation) throw new NotFoundException("Conversation not found.");

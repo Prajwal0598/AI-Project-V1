@@ -88,6 +88,22 @@ export class OrderService {
     });
   }
 
+  /** Paginated full order history for one customer — backs the Customer 360 profile's Orders tab. */
+  async listForCustomer(customerId: string, businessId: string, page = 1, pageSize = 20) {
+    const where = { customerId, businessId };
+    const [items, total] = await Promise.all([
+      this.prisma.order.findMany({
+        where,
+        include: { items: true },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+    return { items, total, page, pageSize };
+  }
+
   async create(businessId: string, input: CreateOrderDto) {
     const customer = await this.prisma.customer.findFirst({ where: { id: input.customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");

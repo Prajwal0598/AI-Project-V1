@@ -142,9 +142,9 @@ export class BusinessService {
     return this.sanitize(updated);
   }
 
-  async activity(businessId: string, limit = 20) {
+  async activity(businessId: string, limit = 20, customerId?: string) {
     return this.prisma.activityEvent.findMany({
-      where: { businessId },
+      where: { businessId, ...(customerId ? { customerId } : {}) },
       orderBy: { createdAt: "desc" },
       take: limit,
       include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true } } },

@@ -8,6 +8,7 @@ import { api, getBusinessId, getToken, getRefreshToken, clearToken } from "../li
 const items = [
   ["Overview", "/", "O"],
   ["Leads", "/leads", "L"],
+  ["Customers", "/customers", "C"],
   ["Inbox", "/inbox", "I"],
   ["Suggestions", "/suggestions", "✦"],
   ["Products", "/products", "P"],

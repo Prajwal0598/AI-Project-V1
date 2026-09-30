@@ -187,6 +187,7 @@ export interface Order {
   paymentMethod: string | null;
   createdAt: string;
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null };
+  items?: { id: string; name: string; quantity: number; unitPrice: string }[];
 }
 
 export interface TeamUser {
@@ -245,9 +246,53 @@ export interface Customer {
   tags: string[];
   proactiveMessagingOptOut: boolean;
   leadScore: { score: number; reason: string | null } | null;
-  identities: { channel: string; identifier: string }[];
+  identities: { channel: string; identifier: string; isPrimary?: boolean }[];
   _count: { conversations: number; orders: number };
   updatedAt: string;
+  // present on /businesses/:id/customers (list) — aggregated server-side, not per-row queries
+  totalOrders?: number;
+  totalSpent?: number;
+  averageOrderValue?: number;
+  lastOrderAt?: string | null;
+  lastActivityAt?: string | null;
+  primaryChannel?: string | null;
+  status?: "ACTIVE" | "INACTIVE";
+}
+
+export interface Paginated<T> { items: T[]; total: number; page: number; pageSize: number }
+
+export interface CustomerInsight {
+  source: "OPPORTUNITY" | "SIGNAL" | "LEAD_SCORE";
+  type: string | null;
+  priority: "LOW" | "MEDIUM" | "HIGH" | null;
+  reason: string;
+  suggestedAction: string | null;
+  timestamp: string | null;
+  opportunityId: string | null;
+}
+
+export interface CustomerPreferences {
+  statedBudget: number | null;
+  frequentlyPurchased: { productId: string | null; name: string; quantity: number }[];
+  recentlyViewed: { productId: string; name: string; category: string | null; viewedAt: string }[];
+}
+
+export interface CustomerProfile extends Customer {
+  summary: { totalOrders: number; totalSpent: number; averageOrderValue: number; lastOrderAt: string | null; lastActivityAt: string | null };
+  firstInteractionAt: string;
+  lastInteractionAt: string;
+  primaryChannel: string | null;
+  status: "ACTIVE" | "INACTIVE";
+  insight: CustomerInsight | null;
+  preferences: CustomerPreferences;
+}
+
+export interface ActivityTimelineItem {
+  id: string;
+  kind: "EVENT" | "SIGNAL";
+  type: string;
+  summary: string;
+  createdAt: string;
 }
 
 export interface Variant {
@@ -551,6 +596,14 @@ export const api = {
   customers: {
     list: (businessId: string, search?: string) =>
       request<Customer[]>(`/businesses/${businessId}/customers${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+    get: (customerId: string) =>
+      request<CustomerProfile>(`/customers/${customerId}`),
+    getOrders: (customerId: string, page = 1, pageSize = 20) =>
+      request<Paginated<Order>>(`/customers/${customerId}/orders?page=${page}&pageSize=${pageSize}`),
+    getConversations: (customerId: string, page = 1, pageSize = 20) =>
+      request<Paginated<ConversationSummary>>(`/customers/${customerId}/conversations?page=${page}&pageSize=${pageSize}`),
+    getActivity: (customerId: string, page = 1, pageSize = 20) =>
+      request<Paginated<ActivityTimelineItem>>(`/customers/${customerId}/activity?page=${page}&pageSize=${pageSize}`),
     update: (customerId: string, data: Partial<{ proactiveMessagingOptOut: boolean }>) =>
       request<Customer>(`/customers/${customerId}`, { method: "PATCH", body: JSON.stringify(data) }),
   },

@@ -32,4 +32,14 @@ export class CustomerSignalService {
       where: { businessId, customerId, productId, type: { in: INTEREST_TYPES }, createdAt: { gte: since } },
     });
   }
+
+  /** This customer's own recent signals (viewed/enquired/back-in-stock-wanted) — backs the Customer 360 profile's insight/preferences/activity, no invented events. */
+  async recentForCustomer(businessId: string, customerId: string, limit = 20) {
+    return this.prisma.customerSignal.findMany({
+      where: { businessId, customerId },
+      include: { product: { select: { id: true, name: true, category: { select: { name: true } } } } },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+  }
 }

@@ -318,6 +318,15 @@ export class OpportunityService {
     });
   }
 
+  /** the single most relevant still-open opportunity for one customer — backs the Customer 360 "AI Insight" card, never a new LLM call. */
+  async latestActiveForCustomer(businessId: string, customerId: string) {
+    return this.prisma.opportunity.findFirst({
+      where: { businessId, customerId, status: { in: DEDUP_STATUSES } },
+      include: INCLUDE,
+      orderBy: [{ priority: "desc" }, { score: "desc" }, { createdAt: "desc" }],
+    });
+  }
+
   async summary(businessId: string) {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);

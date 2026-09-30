@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, resolveImageUrl } from "../../lib/api";
 import type { ConversationSummary, ConversationDetail, Message } from "../../lib/api";
@@ -21,6 +22,11 @@ function fmtTime(d: string) {
 const CHANNEL_BADGE: Record<string, string> = { WHATSAPP: "WA", INSTAGRAM: "IG", EMAIL: "✉", WEB: "W", MANUAL: "M" };
 
 export default function InboxPage() {
+  return <Suspense fallback={null}><InboxPageInner /></Suspense>;
+}
+
+function InboxPageInner() {
+  const deepLinkedConversationId = useSearchParams().get("conversationId");
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selected, setSelected] = useState<ConversationDetail | null>(null);
   const [input, setInput] = useState("");
@@ -29,6 +35,12 @@ export default function InboxPage() {
   const [aiReplying, setAiReplying] = useState(false);
   const [error, setError] = useState("");
   const streamRef = useRef<HTMLDivElement>(null);
+
+  // arriving from a customer profile ("Message" / a conversation row) opens that exact conversation directly
+  useEffect(() => {
+    if (!deepLinkedConversationId) return;
+    api.conversations.get(deepLinkedConversationId).then(setSelected).catch(() => setError("Couldn't open that conversation."));
+  }, [deepLinkedConversationId]);
 
   // auto-scroll to latest message
   useEffect(() => {

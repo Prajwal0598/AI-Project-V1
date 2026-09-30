@@ -27,6 +27,21 @@ export class CustomerController {
     return this.customers.get(customerId, user.businessId);
   }
 
+  @Get("customers/:customerId/orders")
+  getOrders(@Param("customerId") customerId: string, @GetUser() user: User, @Query("page") page?: string, @Query("pageSize") pageSize?: string) {
+    return this.customers.getOrders(customerId, user.businessId, page ? parseInt(page, 10) : undefined, pageSize ? parseInt(pageSize, 10) : undefined);
+  }
+
+  @Get("customers/:customerId/conversations")
+  getConversations(@Param("customerId") customerId: string, @GetUser() user: User, @Query("page") page?: string, @Query("pageSize") pageSize?: string) {
+    return this.customers.getConversations(customerId, user.businessId, page ? parseInt(page, 10) : undefined, pageSize ? parseInt(pageSize, 10) : undefined);
+  }
+
+  @Get("customers/:customerId/activity")
+  getActivity(@Param("customerId") customerId: string, @GetUser() user: User, @Query("page") page?: string, @Query("pageSize") pageSize?: string) {
+    return this.customers.getActivity(customerId, user.businessId, page ? parseInt(page, 10) : undefined, pageSize ? parseInt(pageSize, 10) : undefined);
+  }
+
   @Patch("customers/:customerId")
   update(@Param("customerId") customerId: string, @GetUser() user: User, @Body() input: UpdateCustomerDto) {
     return this.customers.update(customerId, user.businessId, input);
