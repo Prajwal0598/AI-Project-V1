@@ -3,6 +3,7 @@ import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
+import { EntitlementService } from "../billing/entitlement.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { parseEmailWebhook } from "./email-parser";
 
@@ -14,6 +15,7 @@ export class EmailWebhookService {
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
     private readonly ai: AiService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async ingest(body: unknown): Promise<void> {
@@ -28,6 +30,11 @@ export class EmailWebhookService {
     });
     if (!business) {
       this.logger.warn(`No business mapped to support email: ${msg.toAddress}`);
+      return;
+    }
+
+    if (!(await this.entitlements.canUseRelay(business.id))) {
+      this.logger.warn(`Business ${business.id} isn't entitled to use Relay (subscription inactive) — ignoring inbound email.`);
       return;
     }
 

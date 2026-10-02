@@ -25,10 +25,19 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
   const [ordersNeedingAction, setOrdersNeedingAction] = useState<number | null>(null);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [billingAlert, setBillingAlert] = useState<string | null>(null);
   useEffect(() => { if (!getToken()) router.replace("/login"); }, [router]);
 
   useEffect(() => {
     api.auth.me().then((me) => setIsPlatformAdmin(me.isPlatformAdmin)).catch(() => {});
+  }, []);
+
+  // non-blocking billing warning — never prevents using the rest of the dashboard, just surfaces that action is needed
+  useEffect(() => {
+    api.billing.subscription().then((sub) => {
+      if (sub?.status === "PAYMENT_FAILED") setBillingAlert("Your last Relay subscription payment failed — we're retrying automatically. Update your payment method to avoid interruption.");
+      else if (sub?.status === "PAST_DUE") setBillingAlert("Your Relay subscription payment is past due. Update your payment method soon to keep using Relay.");
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -66,7 +75,7 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
         <p style={{ margin: "0 0 6px" }}><strong>Contact Email:</strong> prajwalms0598@gmail.com</p>
         <p style={{ margin: 0 }}><strong>Contact Number:</strong> 7406608539</p>
       </div>}
-    </div></header><div className="screen-page"><div className="screen-heading"><div><p>Relay command center</p><h1>{title}</h1><span>{subtitle}</span></div>{action}</div>{children}</div></section>
+    </div></header><div className="screen-page">{billingAlert && <div className="billing-banner"><span>⚠ {billingAlert}</span><Link href="/settings">Manage billing →</Link></div>}<div className="screen-heading"><div><p>Relay command center</p><h1>{title}</h1><span>{subtitle}</span></div>{action}</div>{children}</div></section>
   </main>;
 }
 

@@ -207,11 +207,57 @@ export interface Me {
   isPlatformAdmin: boolean;
 }
 
+export type SubscriptionStatus = "TRIAL" | "ACTIVE" | "PAYMENT_FAILED" | "PAST_DUE" | "CANCELLED" | "EXPIRED" | "SUSPENDED";
+
+export interface SubscriptionPlan {
+  id: string;
+  code: string;
+  name: string;
+  amount: number; // paise
+  currency: string;
+  billingInterval: string;
+  trialDays: number;
+  isActive: boolean;
+}
+
+export interface Subscription {
+  id: string;
+  businessId: string;
+  status: SubscriptionStatus;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  trialStart: string | null;
+  trialEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  cancelledAt: string | null;
+  plan: SubscriptionPlan;
+}
+
+export interface BillingHistoryItem {
+  id: string;
+  eventType: string;
+  amount: number | null;
+  currency: string | null;
+  paymentStatus: string | null;
+  createdAt: string;
+}
+
 export interface PlatformOverview {
   merchants: number;
   orders: number;
   revenue: number;
   customers: number;
+  paidMRR: number;
+}
+
+export interface PlatformBusinessBilling {
+  plan: string;
+  status: SubscriptionStatus;
+  providerSubscriptionId: string | null;
+  trialEnd: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  lastBillingEvent: { type: string; at: string } | null;
 }
 
 export interface PlatformBusiness {
@@ -223,6 +269,7 @@ export interface PlatformBusiness {
   instagramConnected: boolean;
   orders: number;
   revenue: number;
+  billing: PlatformBusinessBilling | null;
 }
 
 export interface AiActionLog {
@@ -558,6 +605,14 @@ export const api = {
   platformAdmin: {
     overview: () => request<PlatformOverview>("/platform/overview"),
     businesses: () => request<PlatformBusiness[]>("/platform/businesses"),
+  },
+  billing: {
+    plans: () => request<SubscriptionPlan[]>("/billing/plans"),
+    subscription: () => request<Subscription | null>("/billing/subscription"),
+    checkout: () => request<{ subscriptionId: string; razorpayKeyId: string | undefined }>("/billing/checkout", { method: "POST" }),
+    cancel: () => request<Subscription>("/billing/cancel", { method: "POST" }),
+    resume: () => request<Subscription>("/billing/resume", { method: "POST" }),
+    history: (page = 1, pageSize = 20) => request<Paginated<BillingHistoryItem>>(`/billing/history?page=${page}&pageSize=${pageSize}`),
   },
   businesses: {
     list: () => request<Business[]>("/businesses"),

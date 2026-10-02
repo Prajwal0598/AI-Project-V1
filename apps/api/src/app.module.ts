@@ -22,11 +22,12 @@ import { PromotionModule } from "./modules/promotions/promotion.module";
 import { PlatformAdminModule } from "./modules/platform-admin/platform-admin.module";
 import { WhatsAppEmbeddedSignupModule } from "./modules/integrations/whatsapp-embedded-signup/whatsapp-embedded-signup.module";
 import { RazorpayOAuthModule } from "./modules/integrations/razorpay-oauth/razorpay-oauth.module";
+import { BillingModule } from "./modules/billing/billing.module";
 
 @Module({
   imports: [
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]), // default: 100 req/min per IP across the API
-    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, ImportModule, WebhooksModule, QueueModule, InventoryModule, OpportunityModule, ProductRelationModule, PromotionModule, PlatformAdminModule, WhatsAppEmbeddedSignupModule, RazorpayOAuthModule,
+    DatabaseModule, AuthModule, BusinessModule, CustomerModule, ConversationModule, AiModule, ProductModule, OrderModule, UserModule, ImportModule, WebhooksModule, QueueModule, InventoryModule, OpportunityModule, ProductRelationModule, PromotionModule, PlatformAdminModule, WhatsAppEmbeddedSignupModule, RazorpayOAuthModule, BillingModule,
   ],
   controllers: [HealthController],
   providers: [

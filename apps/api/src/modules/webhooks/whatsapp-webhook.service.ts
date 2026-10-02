@@ -4,6 +4,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
 import { ShoppingFlowService } from "../shopping-flow/shopping-flow.service";
+import { EntitlementService } from "../billing/entitlement.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { captureException } from "../../common/error-reporting.helper";
 import { parseWhatsAppWebhook, ParsedWhatsAppMessage } from "./whatsapp-parser";
@@ -21,6 +22,7 @@ export class WhatsAppWebhookService {
     private readonly queues: QueueService,
     private readonly ai: AiService,
     private readonly shoppingFlow: ShoppingFlowService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async ingest(body: unknown): Promise<void> {
@@ -41,6 +43,11 @@ export class WhatsAppWebhookService {
     });
     if (!business) {
       this.logger.warn(`No business mapped to WhatsApp phone number ID: ${msg.phoneNumberId}`);
+      return;
+    }
+
+    if (!(await this.entitlements.canUseRelay(business.id))) {
+      this.logger.warn(`Business ${business.id} isn't entitled to use Relay (subscription inactive) — ignoring inbound WhatsApp message.`);
       return;
     }
 

@@ -17,6 +17,7 @@ import { processUnansweredConversationScan } from "./jobs/unanswered-conversatio
 import { processCustomerHealthScan } from "./jobs/customer-health-scan";
 import { processDatabaseBackup } from "./jobs/database-backup";
 import { processRazorpayTokenRefresh } from "./jobs/razorpay-token-refresh";
+import { processBillingSweep } from "./jobs/billing-sweep";
 import { initErrorReporting, captureException } from "./error-reporting";
 
 initErrorReporting();
@@ -189,8 +190,28 @@ razorpayTokenRefreshQueue.upsertJobScheduler("razorpay-token-refresh-daily", { p
   console.error("[razorpay-token-refresh] failed to schedule recurring job", err);
 });
 
+const billingSweepQueue = new Queue(QUEUES.BILLING_SWEEP, { connection });
+const billingSweepWorker = new Worker(QUEUES.BILLING_SWEEP, processBillingSweep, {
+  connection,
+  concurrency: 1,
+});
+
+billingSweepWorker.on("completed", (job, result) => {
+  console.log(`[billing-sweep] job ${job.id} completed`, result);
+});
+
+billingSweepWorker.on("failed", (job, err) => {
+  console.error(`[billing-sweep] job ${job?.id} failed`, err.message);
+  captureException(err, { queue: QUEUES.BILLING_SWEEP, jobId: job?.id });
+});
+
+// daily at 05:00 server time — finalizes deferred subscription cancellations and expires stale trials (see jobs/billing-sweep.ts)
+billingSweepQueue.upsertJobScheduler("billing-sweep-daily", { pattern: process.env.BILLING_SWEEP_CRON ?? "0 5 * * *" }, { name: "sweep" }).catch((err) => {
+  console.error("[billing-sweep] failed to schedule recurring job", err);
+});
+
 console.log(`[worker] started — connected to Redis at ${redisUrl}`);
-console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}, ${QUEUES.DATABASE_BACKUP}, ${QUEUES.RAZORPAY_TOKEN_REFRESH}`);
+console.log(`[worker] processing queues: ${QUEUES.FOLLOW_UP}, ${QUEUES.ORDER_PROGRESS}, ${QUEUES.ORDER_EXPIRY}, ${QUEUES.ABANDONED_CART}, ${QUEUES.REPEAT_PURCHASE_SCAN}, ${QUEUES.UNANSWERED_CONVERSATION_SCAN}, ${QUEUES.CUSTOMER_HEALTH_SCAN}, ${QUEUES.DATABASE_BACKUP}, ${QUEUES.RAZORPAY_TOKEN_REFRESH}, ${QUEUES.BILLING_SWEEP}`);
 
 // lightweight health endpoint so Railway/an external uptime monitor can confirm the worker process is actually
 // alive and every BullMQ worker is running, not just that the container hasn't crashed
@@ -200,6 +221,7 @@ const allWorkers: Record<string, Worker> = {
   [QUEUES.UNANSWERED_CONVERSATION_SCAN]: unansweredConversationScanWorker, [QUEUES.CUSTOMER_HEALTH_SCAN]: customerHealthScanWorker,
   [QUEUES.DATABASE_BACKUP]: databaseBackupWorker,
   [QUEUES.RAZORPAY_TOKEN_REFRESH]: razorpayTokenRefreshWorker,
+  [QUEUES.BILLING_SWEEP]: billingSweepWorker,
 };
 const healthServer = createServer((req, res) => {
   if (req.url !== "/health") { res.writeHead(404); res.end(); return; }
@@ -228,6 +250,8 @@ process.on("SIGTERM", async () => {
   await databaseBackupQueue.close();
   await razorpayTokenRefreshWorker.close();
   await razorpayTokenRefreshQueue.close();
+  await billingSweepWorker.close();
+  await billingSweepQueue.close();
   await connection.quit();
   process.exit(0);
 });

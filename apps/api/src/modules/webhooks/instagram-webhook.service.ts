@@ -3,6 +3,7 @@ import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
+import { EntitlementService } from "../billing/entitlement.service";
 import { recalculateLeadScore } from "../../common/lead-score.helper";
 import { parseInstagramWebhook, ParsedInstagramMessage } from "./instagram-parser";
 
@@ -14,6 +15,7 @@ export class InstagramWebhookService {
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
     private readonly ai: AiService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async ingest(body: unknown): Promise<void> {
@@ -33,6 +35,11 @@ export class InstagramWebhookService {
     });
     if (!business) {
       this.logger.warn(`No business mapped to Instagram page ID: ${msg.pageId}`);
+      return;
+    }
+
+    if (!(await this.entitlements.canUseRelay(business.id))) {
+      this.logger.warn(`Business ${business.id} isn't entitled to use Relay (subscription inactive) — ignoring inbound Instagram message.`);
       return;
     }
 

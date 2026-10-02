@@ -47,6 +47,7 @@ export default function PlatformAdminPage() {
       <article className="metric-card"><p>Total orders</p><h2>{overview.orders}</h2></article>
       <article className="metric-card revenue"><p>Total revenue (paid orders)</p><h2>{fmtRevenue(overview.revenue)}</h2></article>
       <article className="metric-card"><p>Customers</p><h2>{overview.customers}</h2></article>
+      <article className="metric-card"><p>Relay Paid MRR</p><h2>{fmtRevenue(overview.paidMRR)}</h2></article>
     </div>}
 
     {!loading && <div style={{ marginTop: 20, overflowX: "auto" }}>
@@ -60,6 +61,7 @@ export default function PlatformAdminPage() {
             <th style={{ padding: 6 }}>Instagram</th>
             <th style={{ padding: 6 }}>Orders</th>
             <th style={{ padding: 6 }}>Revenue</th>
+            <th style={{ padding: 6 }}>Relay billing</th>
           </tr>
         </thead>
         <tbody>
@@ -72,6 +74,12 @@ export default function PlatformAdminPage() {
               <td style={{ padding: 6 }}>{b.instagramConnected ? "✓" : "—"}</td>
               <td style={{ padding: 6 }}>{b.orders}</td>
               <td style={{ padding: 6 }}>{fmtRevenue(b.revenue)}</td>
+              <td style={{ padding: 6 }}>
+                {b.billing ? <>
+                  {b.billing.plan} · {b.billing.status}{b.billing.cancelAtPeriodEnd ? " (cancelling)" : ""}
+                  {b.billing.trialEnd && b.billing.status === "TRIAL" && <> · trial ends {new Date(b.billing.trialEnd).toLocaleDateString()}</>}
+                </> : "No subscription"}
+              </td>
             </tr>
           ))}
         </tbody>

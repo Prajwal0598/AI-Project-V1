@@ -8,6 +8,7 @@ export const QUEUES = {
   CUSTOMER_HEALTH_SCAN: "customer-health-scan",
   DATABASE_BACKUP: "database-backup",
   RAZORPAY_TOKEN_REFRESH: "razorpay-token-refresh",
+  BILLING_SWEEP: "billing-sweep",
 } as const;
 
 export interface FollowUpJobData {
@@ -48,3 +49,4 @@ export interface AbandonedCartJobData {
 export type RepeatPurchaseScanJobData = Record<string, never>;
 export type UnansweredConversationScanJobData = Record<string, never>;
 export type CustomerHealthScanJobData = Record<string, never>;
+export type BillingSweepJobData = Record<string, never>;

@@ -3,13 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import Script from "next/script";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, whatsappEmbeddedSignup, razorpayOAuth } from "../../lib/api";
-import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView, RazorpayConnectionStatusView } from "../../lib/api";
+import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView, RazorpayConnectionStatusView, Subscription, BillingHistoryItem } from "../../lib/api";
 
 declare global {
   interface Window {
     FB?: { init: (opts: Record<string, unknown>) => void; login: (cb: (res: { authResponse?: { code?: string } }) => void, opts: Record<string, unknown>) => void };
     fbAsyncInit?: () => void;
+    Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
   }
+}
+
+function fmtPaise(amount: number, currency: string) {
+  return `${currency} ${(amount / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+}
+function fmtBillingDate(d: string | null) {
+  return d ? new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
 }
 
 const META_APP_ID = process.env.NEXT_PUBLIC_META_APP_ID;
@@ -60,6 +68,10 @@ export default function SettingsPage() {
   const [rzConnectError, setRzConnectError] = useState("");
   const [rzConnectNotice, setRzConnectNotice] = useState("");
   const [showManualRazorpay, setShowManualRazorpay] = useState(false);
+  const [subscription, setSubscription] = useState<Subscription | null>(null);
+  const [billingHistory, setBillingHistory] = useState<BillingHistoryItem[]>([]);
+  const [billingError, setBillingError] = useState("");
+  const [checkingOut, setCheckingOut] = useState(false);
 
   useEffect(() => {
     const bizId = getBusinessId();
@@ -200,6 +212,50 @@ export default function SettingsPage() {
     api.users.list(bizId).then(setTeam).catch(console.error);
   }
 
+  function loadBilling() {
+    api.billing.subscription().then(setSubscription).catch(console.error);
+    api.billing.history().then(r => setBillingHistory(r.items)).catch(console.error);
+  }
+  useEffect(loadBilling, []);
+
+  // Razorpay Checkout opens with the subscription_id our backend already created — success here only means
+  // the authorisation payment was submitted, NOT that the subscription is active; only the webhook does that
+  // (see modules/billing/billing-webhook.service.ts), so we just refresh and let the real state catch up.
+  async function startCheckout() {
+    setBillingError(""); setCheckingOut(true);
+    try {
+      const { subscriptionId, razorpayKeyId } = await api.billing.checkout();
+      if (!window.Razorpay || !razorpayKeyId) {
+        setBillingError("Razorpay Checkout isn't available right now — please try again in a moment.");
+        return;
+      }
+      const checkout = new window.Razorpay({
+        key: razorpayKeyId,
+        subscription_id: subscriptionId,
+        name: "Relay",
+        description: "Relay Pro subscription",
+        theme: { color: "#7760d4" },
+        handler: () => loadBilling(),
+        modal: { ondismiss: () => loadBilling() },
+      });
+      checkout.open();
+    } catch (err) {
+      setBillingError(err instanceof Error ? err.message : "Could not start checkout.");
+    } finally {
+      setCheckingOut(false);
+    }
+  }
+
+  async function cancelSubscription() {
+    setBillingError("");
+    try { setSubscription(await api.billing.cancel()); } catch (err) { setBillingError(err instanceof Error ? err.message : "Could not cancel the subscription."); }
+  }
+
+  async function resumeSubscription() {
+    setBillingError("");
+    try { setSubscription(await api.billing.resume()); } catch (err) { setBillingError(err instanceof Error ? err.message : "Could not resume the subscription."); }
+  }
+
   async function invite() {
     const bizId = getBusinessId();
     if (!bizId) return;
@@ -264,7 +320,56 @@ export default function SettingsPage() {
         }}
       />
     )}
+    <Script src="https://checkout.razorpay.com/v1/checkout.js" strategy="afterInteractive" />
     {saveError && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{saveError} <button onClick={() => setSaveError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
+    <section className="settings-section">
+      <h2>Billing</h2>
+      <p>Relay's own subscription — separate from your customers' payments to you.</p>
+      {billingError && <p style={{ color: "#b94940", fontSize: 12, marginBottom: 8 }}>{billingError}</p>}
+      {subscription ? (
+        <div style={{ maxWidth: 480, marginTop: 8 }}>
+          <p><strong>{subscription.plan.name}</strong> — {fmtPaise(subscription.plan.amount, subscription.plan.currency)}/{subscription.plan.billingInterval}</p>
+          <p className="source-chip" style={{ display: "inline-block" }}>
+            {subscription.status === "ACTIVE" && "● Active"}
+            {subscription.status === "TRIAL" && `● Trial — ends ${fmtBillingDate(subscription.trialEnd)}`}
+            {subscription.status === "PAYMENT_FAILED" && "● Payment failed — retrying"}
+            {subscription.status === "PAST_DUE" && "● Past due — action needed"}
+            {subscription.status === "CANCELLED" && `● Cancelling — access ends ${fmtBillingDate(subscription.currentPeriodEnd)}`}
+            {(subscription.status === "EXPIRED" || subscription.status === "SUSPENDED") && "● Inactive"}
+          </p>
+          {(subscription.status === "ACTIVE" || subscription.status === "TRIAL") && !subscription.cancelAtPeriodEnd && (
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>Next billing date: {fmtBillingDate(subscription.currentPeriodEnd)}</p>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            {(subscription.status === "PAYMENT_FAILED" || subscription.status === "PAST_DUE") && (
+              <button className="primary-button" onClick={startCheckout} disabled={checkingOut}>{checkingOut ? "Opening…" : "Update payment method"}</button>
+            )}
+            {subscription.cancelAtPeriodEnd
+              ? <button className="primary-button" onClick={resumeSubscription}>Resume Subscription</button>
+              : (subscription.status === "ACTIVE" || subscription.status === "TRIAL") && <button onClick={cancelSubscription}>Cancel Subscription</button>}
+          </div>
+          {billingHistory.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <h3 style={{ fontSize: 13, margin: "0 0 8px" }}>Billing history</h3>
+              {billingHistory.map(h => (
+                <div key={h.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "6px 0", borderTop: "1px solid var(--line)" }}>
+                  <span>{fmtBillingDate(h.createdAt)}</span>
+                  <span>{subscription.plan.name}</span>
+                  <span>{h.amount != null && h.currency ? fmtPaise(h.amount, h.currency) : "—"}</span>
+                  <span className="source-chip">{h.paymentStatus ?? h.eventType}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <p>Start your free trial to activate Relay's AI assistant for your customers.</p>
+          <button className="primary-button" onClick={startCheckout} disabled={checkingOut}>{checkingOut ? "Opening…" : "Start free trial"}</button>
+        </div>
+      )}
+    </section>
+
     <section className="settings-section">
       <h2>Business profile</h2>
       <p>This information is used by the AI agent to personalise replies.</p>

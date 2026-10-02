@@ -179,9 +179,9 @@ enum ShoppingState {
 // how Assisted Buying orders candidates within a single recommendation set, merchant-configurable
 enum AssistedBuyingRanking {
   BEST_MATCH // keyword/budget-proximity relevance (default)
-  VALUE      // cheapest first
-  PREMIUM    // priciest first
-  NEWEST     // most recently added first
+  VALUE // cheapest first
+  PREMIUM // priciest first
+  NEWEST // most recently added first
 }
 
 // how a conversation ultimately resolved — for CRM/revenue reporting
@@ -227,98 +227,99 @@ enum RazorpayConnectionStatus {
 }
 
 model Business {
-  id                    String         @id @default(cuid())
-  name                  String
-  industry              String?
-  website               String?
-  timezone              String         @default("Asia/Kolkata")
-  whatsappPhoneNumberId String?        @unique
-  instagramPageId       String?        @unique
-  supportEmail          String?        @unique
-  autonomyMaxOrderValue Decimal?       @db.Decimal(12, 2) // orders above this total require human approval before payment/fulfillment proceeds; null = no cap
-  defaultLowStockThreshold Int         @default(5) // used by any variant without its own lowStockThreshold override
-  proactiveSuggestionsEnabled Boolean  @default(false) // master switch — off by default so existing businesses see no behavior change until they opt in
-  defaultRepeatPurchaseDays   Int      @default(30) // fallback reorder window used when a customer has only bought a product once (not enough history to average an interval)
-  defaultLowEngagementDays    Int      @default(45) // a previously-active customer with no activity for this long is eligible for a LOW_ENGAGEMENT win-back nudge
-  highValueLeadScoreThreshold Int      @default(70) // LeadScore.score at/above this marks a customer eligible for HIGH_VALUE_CUSTOMER nudges
+  id                                String                   @id @default(cuid())
+  name                              String
+  industry                          String?
+  website                           String?
+  timezone                          String                   @default("Asia/Kolkata")
+  whatsappPhoneNumberId             String?                  @unique
+  instagramPageId                   String?                  @unique
+  supportEmail                      String?                  @unique
+  autonomyMaxOrderValue             Decimal?                 @db.Decimal(12, 2) // orders above this total require human approval before payment/fulfillment proceeds; null = no cap
+  defaultLowStockThreshold          Int                      @default(5) // used by any variant without its own lowStockThreshold override
+  proactiveSuggestionsEnabled       Boolean                  @default(false) // master switch — off by default so existing businesses see no behavior change until they opt in
+  defaultRepeatPurchaseDays         Int                      @default(30) // fallback reorder window used when a customer has only bought a product once (not enough history to average an interval)
+  defaultLowEngagementDays          Int                      @default(45) // a previously-active customer with no activity for this long is eligible for a LOW_ENGAGEMENT win-back nudge
+  highValueLeadScoreThreshold       Int                      @default(70) // LeadScore.score at/above this marks a customer eligible for HIGH_VALUE_CUSTOMER nudges
   // natural-language product discovery/recommendation in the free-text AI flow — off by default, same rollout pattern as proactiveSuggestionsEnabled
-  assistedBuyingEnabled Boolean @default(false)
-  assistedBuyingMaxRecommendations Int @default(5)
-  assistedBuyingExcludedCategoryIds String[] @default([]) // categories Assisted Buying should never recommend from
-  assistedBuyingRankingPreference AssistedBuyingRanking @default(BEST_MATCH)
+  assistedBuyingEnabled             Boolean                  @default(false)
+  assistedBuyingMaxRecommendations  Int                      @default(5)
+  assistedBuyingExcludedCategoryIds String[]                 @default([]) // categories Assisted Buying should never recommend from
+  assistedBuyingRankingPreference   AssistedBuyingRanking    @default(BEST_MATCH)
   // WhatsApp Smart Reply Suggestions (tap-to-choose buttons on AI/deterministic product cards: Add to Cart,
   // See Similar) — off by default, same rollout pattern as proactiveSuggestionsEnabled/assistedBuyingEnabled.
   // Fully additive: existing plain-text/list behavior is unchanged when this is false.
-  smartRepliesEnabled Boolean @default(false)
+  smartRepliesEnabled               Boolean                  @default(false)
   // per-merchant channel credentials, encrypted at rest (AES-256-GCM) — falls back to the shared .env tokens when null (single-demo-business setup)
-  whatsappAccessTokenEncrypted String?
-  instagramAccessTokenEncrypted String?
-  postmarkServerTokenEncrypted   String?
+  whatsappAccessTokenEncrypted      String?
+  instagramAccessTokenEncrypted     String?
+  postmarkServerTokenEncrypted      String?
   // Meta WhatsApp Embedded Signup — populated by the onboarding flow instead of the merchant pasting them manually;
   // whatsappPhoneNumberId/whatsappAccessTokenEncrypted above are reused (same fields, same encryption) for either path
-  metaBusinessId               String?  // Meta Business Manager portfolio ID
-  whatsappBusinessAccountId    String?  // WABA ID
-  whatsappDisplayPhoneNumber   String?  // human-readable number (e.g. "+91 XXXXX XXXXX") shown on the Connected card
-  whatsappConnectionStatus     WhatsAppConnectionStatus @default(DISCONNECTED)
-  whatsappConnectedAt          DateTime?
-  whatsappLastValidatedAt      DateTime?
-  whatsappLastErrorCode        String?
-  whatsappLastErrorMessage     String?
+  metaBusinessId                    String? // Meta Business Manager portfolio ID
+  whatsappBusinessAccountId         String? // WABA ID
+  whatsappDisplayPhoneNumber        String? // human-readable number (e.g. "+91 XXXXX XXXXX") shown on the Connected card
+  whatsappConnectionStatus          WhatsAppConnectionStatus @default(DISCONNECTED)
+  whatsappConnectedAt               DateTime?
+  whatsappLastValidatedAt           DateTime?
+  whatsappLastErrorCode             String?
+  whatsappLastErrorMessage          String?
   // Razorpay: keyId is not sensitive (safe to store plain, needed to resolve which secret to decrypt), but the
   // key secret and webhook secret are encrypted the same way as the channel tokens above
-  razorpayKeyId                    String?
+  razorpayKeyId                     String?
   razorpayKeySecretEncrypted        String?
-  razorpayWebhookSecretEncrypted     String?
+  razorpayWebhookSecretEncrypted    String?
   // Razorpay OAuth (Technology Partner) \u2014 populated by "Connect Razorpay" instead of the merchant pasting
   // Key ID/Secret above; the manual fields above stay as a fallback for when OAuth isn't set up yet (same
   // dual-path pattern as WhatsApp's Embedded Signup vs manual Phone Number ID/Access Token).
-  razorpayAccountId              String?   // acc_xxx \u2014 identifies which sub-merchant granted authorization
-  razorpayAccessTokenEncrypted   String?   // Bearer token, used instead of Key ID:Secret Basic Auth. Expires every 90 days.
-  razorpayRefreshTokenEncrypted  String?   // used to mint a new access_token before it expires. Expires every 180 days.
-  razorpayPublicToken            String?   // rzp_live_oauth_xxx \u2014 not secret, used client-side (Checkout) instead of key_id
-  razorpayTokenExpiresAt         DateTime?
-  razorpayConnectionStatus       RazorpayConnectionStatus @default(DISCONNECTED)
-  razorpayConnectedAt            DateTime?
-  razorpayLastErrorMessage       String?
-  createdAt             DateTime       @default(now())
-  updatedAt             DateTime       @updatedAt
-  users         User[]
-  customers     Customer[]
-  identities    Identity[]
-  conversations Conversation[]
-  products      Product[]
-  variants      Variant[]
-  categories    Category[]
-  carts         Cart[]
-  importJobs    ImportJob[]
-  orders        Order[]
-  activity      ActivityEvent[]
-  aiActionLogs  AiActionLog[]
-  aiModelInvocations AiModelInvocation[]
-  inventoryAlerts   InventoryAlert[]
-  stockAdjustments  StockAdjustment[]
-  customerSignals   CustomerSignal[]
-  opportunities     Opportunity[]
-  automationRules   AutomationRule[]
-  productRelations  ProductRelation[]
-  promotions        Promotion[]
+  razorpayAccountId                 String? // acc_xxx \u2014 identifies which sub-merchant granted authorization
+  razorpayAccessTokenEncrypted      String? // Bearer token, used instead of Key ID:Secret Basic Auth. Expires every 90 days.
+  razorpayRefreshTokenEncrypted     String? // used to mint a new access_token before it expires. Expires every 180 days.
+  razorpayPublicToken               String? // rzp_live_oauth_xxx \u2014 not secret, used client-side (Checkout) instead of key_id
+  razorpayTokenExpiresAt            DateTime?
+  razorpayConnectionStatus          RazorpayConnectionStatus @default(DISCONNECTED)
+  razorpayConnectedAt               DateTime?
+  razorpayLastErrorMessage          String?
+  createdAt                         DateTime                 @default(now())
+  updatedAt                         DateTime                 @updatedAt
+  users                             User[]
+  customers                         Customer[]
+  identities                        Identity[]
+  conversations                     Conversation[]
+  products                          Product[]
+  variants                          Variant[]
+  categories                        Category[]
+  carts                             Cart[]
+  importJobs                        ImportJob[]
+  orders                            Order[]
+  activity                          ActivityEvent[]
+  aiActionLogs                      AiActionLog[]
+  aiModelInvocations                AiModelInvocation[]
+  inventoryAlerts                   InventoryAlert[]
+  stockAdjustments                  StockAdjustment[]
+  customerSignals                   CustomerSignal[]
+  opportunities                     Opportunity[]
+  automationRules                   AutomationRule[]
+  productRelations                  ProductRelation[]
+  promotions                        Promotion[]
+  subscription                      Subscription?
 }
 
 model User {
-  id           String   @id @default(cuid())
-  businessId   String
-  email        String   @unique
-  name         String?
-  passwordHash String?
-  role         UserRole @default(OWNER)
+  id                  String         @id @default(cuid())
+  businessId          String
+  email               String         @unique
+  name                String?
+  passwordHash        String?
+  role                UserRole       @default(OWNER)
   // grants access to the cross-business /platform admin endpoints (order/revenue totals, merchant list) —
   // unrelated to the per-business UserRole; almost never true, set manually for internal platform-operator accounts
-  isPlatformAdmin Boolean @default(false)
-  failedLoginAttempts Int      @default(0)
+  isPlatformAdmin     Boolean        @default(false)
+  failedLoginAttempts Int            @default(0)
   lockedUntil         DateTime? // account is locked (login rejected) while this is set and in the future
-  createdAt    DateTime @default(now())
-  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  refreshTokens RefreshToken[]
+  createdAt           DateTime       @default(now())
+  business            Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  refreshTokens       RefreshToken[]
 }
 
 // opaque, rotated-on-use refresh tokens — lets a session survive access-token expiry without a full re-login.
@@ -337,44 +338,44 @@ model RefreshToken {
 }
 
 model Customer {
-  id            String         @id @default(cuid())
-  businessId    String
-  firstName     String?
-  lastName      String?
-  email         String?
-  phone         String?
-  type          CustomerType   @default(LEAD)
-  tags          String[]       @default([])
-  proactiveMessagingOptOut Boolean @default(false) // customer opted out of proactive/unsolicited AI outreach (still gets normal replies)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  identities    Identity[]
-  conversations Conversation[]
-  leadScore     LeadScore?
-  orders        Order[]
-  carts         Cart[]
-  activity      ActivityEvent[]
-  signals       CustomerSignal[]
-  opportunities Opportunity[]
+  id                       String           @id @default(cuid())
+  businessId               String
+  firstName                String?
+  lastName                 String?
+  email                    String?
+  phone                    String?
+  type                     CustomerType     @default(LEAD)
+  tags                     String[]         @default([])
+  proactiveMessagingOptOut Boolean          @default(false) // customer opted out of proactive/unsolicited AI outreach (still gets normal replies)
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
+  business                 Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  identities               Identity[]
+  conversations            Conversation[]
+  leadScore                LeadScore?
+  orders                   Order[]
+  carts                    Cart[]
+  activity                 ActivityEvent[]
+  signals                  CustomerSignal[]
+  opportunities            Opportunity[]
 
-  @@index([businessId, updatedAt])
   @@unique([businessId, email])
+  @@index([businessId, updatedAt])
   @@index([businessId, phone])
 }
 
 model Identity {
-  id          String   @id @default(cuid())
-  businessId  String
-  customerId  String
-  channel     Channel
-  identifier  String
-  displayName String?
-  isPrimary   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  id            String         @id @default(cuid())
+  businessId    String
+  customerId    String
+  channel       Channel
+  identifier    String
+  displayName   String?
+  isPrimary     Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
   @@unique([businessId, channel, identifier])
@@ -382,37 +383,37 @@ model Identity {
 }
 
 model Conversation {
-  id            String             @id @default(cuid())
-  businessId    String
-  customerId    String
-  identityId    String?
-  channel       Channel
-  title         String?
-  status        ConversationStatus @default(OPEN)
-  lastMessageAt DateTime?
-  lastOrderKey  String?            // fingerprint of the last items+address+payment combo that was actually ordered — blocks re-placing the same order on a repeat/duplicate AI trigger
-  activeOrderId String?            // the order this conversation can still amend/cancel (cleared once it's no longer PENDING_PAYMENT)
-  escalated        Boolean         @default(false) // true once the AI has paused itself/been paused for human handoff
-  escalationReason String?
-  outcome          ConversationOutcome @default(OPEN)
+  id                    String              @id @default(cuid())
+  businessId            String
+  customerId            String
+  identityId            String?
+  channel               Channel
+  title                 String?
+  status                ConversationStatus  @default(OPEN)
+  lastMessageAt         DateTime?
+  lastOrderKey          String? // fingerprint of the last items+address+payment combo that was actually ordered — blocks re-placing the same order on a repeat/duplicate AI trigger
+  activeOrderId         String? // the order this conversation can still amend/cancel (cleared once it's no longer PENDING_PAYMENT)
+  escalated             Boolean             @default(false) // true once the AI has paused itself/been paused for human handoff
+  escalationReason      String?
+  outcome               ConversationOutcome @default(OPEN)
   // deterministic WhatsApp shopping flow (button/list taps) — separate from the free-text AI flow above
-  shoppingState    ShoppingState   @default(IDLE)
-  activeCategoryId String?         // category currently being browsed (BROWSING_PRODUCTS)
-  activeProductId  String?         // product currently being viewed (VIEWING_PRODUCT / AWAITING_QUANTITY)
-  pendingVariantId String?         // variant chosen while awaiting a quantity reply
-  pendingAddress   String?         // shipping address collected mid-checkout, before payment method is chosen
-  pendingPaymentMethod String?     // "UPI" | "COD" | "CARD" chosen mid-checkout, before final order confirmation
+  shoppingState         ShoppingState       @default(IDLE)
+  activeCategoryId      String? // category currently being browsed (BROWSING_PRODUCTS)
+  activeProductId       String? // product currently being viewed (VIEWING_PRODUCT / AWAITING_QUANTITY)
+  pendingVariantId      String? // variant chosen while awaiting a quantity reply
+  pendingAddress        String? // shipping address collected mid-checkout, before payment method is chosen
+  pendingPaymentMethod  String? // "UPI" | "COD" | "CARD" chosen mid-checkout, before final order confirmation
   // most recent Assisted Buying recommendation set shown in the free-text AI flow — lets "add the first one"/"the
   // blue one" resolve against it; shape: { recommendations: [{ productId, variantId, name }] }. Cleared once stale.
   assistedBuyingContext Json?
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-  business      Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer      Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  identity      Identity?          @relation(fields: [identityId], references: [id], onDelete: SetNull)
-  messages      Message[]
-  orders        Order[]
-  carts         Cart[]
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  business              Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer              Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  identity              Identity?           @relation(fields: [identityId], references: [id], onDelete: SetNull)
+  messages              Message[]
+  orders                Order[]
+  carts                 Cart[]
 
   @@index([businessId, status, lastMessageAt])
   @@index([customerId, lastMessageAt])
@@ -424,7 +425,7 @@ model Message {
   direction         MessageDirection
   content           String
   providerMessageId String?          @unique
-  metadata          Json?            // { source, responseId, state, model } for AI drafts
+  metadata          Json? // { source, responseId, state, model } for AI drafts
   // sentAt: when the message was sent (caller-supplied for historical imports); createdAt: DB insert time
   sentAt            DateTime         @default(now())
   createdAt         DateTime         @default(now())
@@ -434,36 +435,36 @@ model Message {
 }
 
 model LeadScore {
-  id         String   @id @default(cuid())
-  customerId String   @unique
-  score      Int      @default(0)
-  reason     String?
+  id           String   @id @default(cuid())
+  customerId   String   @unique
+  score        Int      @default(0)
+  reason       String?
   calculatedAt DateTime @default(now())
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 }
 
 model Product {
-  id          String        @id @default(cuid())
-  businessId  String
-  categoryId  String?
-  name        String
-  description String?
-  brand       String?
-  imageUrl    String?
-  status      ProductStatus @default(PUBLISHED)
-  source      ProductSource @default(MANUAL)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  business    Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  category    Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  variants    Variant[]
-  orderItems  OrderItem[]
-  inventoryAlerts   InventoryAlert[]
-  stockAdjustments  StockAdjustment[]
-  customerSignals   CustomerSignal[]
-  opportunities     Opportunity[]
-  relationsFrom     ProductRelation[] @relation("ProductRelationsFrom")
-  relationsTo       ProductRelation[] @relation("ProductRelationsTo")
+  id               String            @id @default(cuid())
+  businessId       String
+  categoryId       String?
+  name             String
+  description      String?
+  brand            String?
+  imageUrl         String?
+  status           ProductStatus     @default(PUBLISHED)
+  source           ProductSource     @default(MANUAL)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category         Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants         Variant[]
+  orderItems       OrderItem[]
+  inventoryAlerts  InventoryAlert[]
+  stockAdjustments StockAdjustment[]
+  customerSignals  CustomerSignal[]
+  opportunities    Opportunity[]
+  relationsFrom    ProductRelation[] @relation("ProductRelationsFrom")
+  relationsTo      ProductRelation[] @relation("ProductRelationsTo")
 
   @@index([businessId, status])
   @@index([categoryId])
@@ -471,14 +472,14 @@ model Product {
 
 // merchant-defined product grouping for category-first WhatsApp browsing (supports one level of subcategory via parentId)
 model Category {
-  id         String   @id @default(cuid())
+  id         String     @id @default(cuid())
   businessId String
   name       String
   parentId   String?
-  sortOrder  Int      @default(0)
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  sortOrder  Int        @default(0)
+  active     Boolean    @default(true)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
   business   Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
   parent     Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: SetNull)
   children   Category[] @relation("CategoryChildren")
@@ -490,51 +491,51 @@ model Category {
 
 // a sellable unit — every Product has at least one (the "default" variant for products without size/color options)
 model Variant {
-  id             String   @id @default(cuid())
-  businessId     String
-  productId      String
-  sku            String?
-  barcode        String?
-  attributes     Json?    // e.g. { "size": "M", "color": "Red" } — null for single-variant products
-  price          Decimal  @db.Decimal(12, 2)
-  currency       String   @default("INR")
-  compareAtPrice Decimal? @db.Decimal(12, 2)
-  costPrice      Decimal? @db.Decimal(12, 2)
-  inventory      Int?
-  lowStockThreshold Int?  // overrides Business.defaultLowStockThreshold for this specific variant; null = use the business default
-  weight         Decimal? @db.Decimal(10, 3) // kg — captured now for future courier integration
-  length         Decimal? @db.Decimal(10, 2) // cm
-  width          Decimal? @db.Decimal(10, 2)
-  height         Decimal? @db.Decimal(10, 2)
-  active         Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  orderItems     OrderItem[]
-  cartItems      CartItem[]
+  id                String            @id @default(cuid())
+  businessId        String
+  productId         String
+  sku               String?
+  barcode           String?
+  attributes        Json? // e.g. { "size": "M", "color": "Red" } — null for single-variant products
+  price             Decimal           @db.Decimal(12, 2)
+  currency          String            @default("INR")
+  compareAtPrice    Decimal?          @db.Decimal(12, 2)
+  costPrice         Decimal?          @db.Decimal(12, 2)
+  inventory         Int?
+  lowStockThreshold Int? // overrides Business.defaultLowStockThreshold for this specific variant; null = use the business default
+  weight            Decimal?          @db.Decimal(10, 3) // kg — captured now for future courier integration
+  length            Decimal?          @db.Decimal(10, 2) // cm
+  width             Decimal?          @db.Decimal(10, 2)
+  height            Decimal?          @db.Decimal(10, 2)
+  active            Boolean           @default(true)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  business          Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product           Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  orderItems        OrderItem[]
+  cartItems         CartItem[]
   inventoryAlerts   InventoryAlert[]
   stockAdjustments  StockAdjustment[]
   customerSignals   CustomerSignal[]
 
+  @@unique([businessId, sku])
   @@index([businessId, active])
   @@index([productId])
-  @@unique([businessId, sku])
 }
 
 // carts driving the WhatsApp interactive shopping flow through to checkout — a conversation can have many
 // over time (one per shopping session), but at most one ACTIVE cart per conversation (enforced in CartService)
 model Cart {
-  id             String     @id @default(cuid())
+  id             String        @id @default(cuid())
   businessId     String
   conversationId String
   customerId     String
-  status         CartStatus @default(ACTIVE)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  status         CartStatus    @default(ACTIVE)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  business       Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   items          CartItem[]
   opportunities  Opportunity[]
 
@@ -549,8 +550,8 @@ model CartItem {
   quantity  Int
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  variant   Variant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant   Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@unique([cartId, variantId])
 }
@@ -560,13 +561,13 @@ model ImportJob {
   id            String       @id @default(cuid())
   businessId    String
   filename      String
-  sourceType    String       // "CSV" | "XLSX"
+  sourceType    String // "CSV" | "XLSX"
   status        ImportStatus @default(PENDING)
   rowsDetected  Int          @default(0)
   rowsReady     Int          @default(0)
   rowsWarning   Int          @default(0)
   rowsError     Int          @default(0)
-  columnMapping Json?        // detected source-header -> canonical-field mapping, shown/confirmed on the review screen
+  columnMapping Json? // detected source-header -> canonical-field mapping, shown/confirmed on the review screen
   createdById   String?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
@@ -578,48 +579,48 @@ model ImportJob {
 
 // one source row (e.g. one CSV line) within an ImportJob, tracked from raw data through to commit
 model ImportRow {
-  id               String          @id @default(cuid())
-  importJobId      String
-  rowNumber        Int
-  rawData          Json            // original source fields, verbatim
-  normalizedData   Json?           // mapped onto the canonical product schema
-  status           ImportRowStatus @default(READY)
-  validationErrors Json?           // string[]
-  matchedProductId String?         // set when an existing SKU match was found
-  action           String?         // "CREATE" | "UPDATE" | "SKIP" — merchant's resolution for this row, defaults based on validation
-  committedProductId String?       // set once this row has been committed to a real Product
-  aiSuggestions    Json?           // { category?: { value, confidence }, description?: { value, confidence } } — proposed, unconfirmed until the merchant accepts one into normalizedData
-  createdAt        DateTime        @default(now())
-  importJob        ImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  id                 String          @id @default(cuid())
+  importJobId        String
+  rowNumber          Int
+  rawData            Json // original source fields, verbatim
+  normalizedData     Json? // mapped onto the canonical product schema
+  status             ImportRowStatus @default(READY)
+  validationErrors   Json? // string[]
+  matchedProductId   String? // set when an existing SKU match was found
+  action             String? // "CREATE" | "UPDATE" | "SKIP" — merchant's resolution for this row, defaults based on validation
+  committedProductId String? // set once this row has been committed to a real Product
+  aiSuggestions      Json? // { category?: { value, confidence }, description?: { value, confidence } } — proposed, unconfirmed until the merchant accepts one into normalizedData
+  createdAt          DateTime        @default(now())
+  importJob          ImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
 
   @@index([importJobId, status])
 }
 
 model Order {
-  id          String      @id @default(cuid())
-  businessId  String
-  customerId  String
-  conversationId String?  // the conversation this order originated from, so the worker can notify the customer when payment clears
-  status      OrderStatus @default(DRAFT)
-  fulfillmentStatus FulfillmentStatus @default(NOT_STARTED)
-  subtotal    Decimal     @db.Decimal(12, 2)
-  shippingFee Decimal     @default(0) @db.Decimal(12, 2)
-  total       Decimal     @db.Decimal(12, 2)
-  currency    String      @default("INR")
-  shippingAddress Json?
-  paymentMethod   String?
+  id                     String              @id @default(cuid())
+  businessId             String
+  customerId             String
+  conversationId         String? // the conversation this order originated from, so the worker can notify the customer when payment clears
+  status                 OrderStatus         @default(DRAFT)
+  fulfillmentStatus      FulfillmentStatus   @default(NOT_STARTED)
+  subtotal               Decimal             @db.Decimal(12, 2)
+  shippingFee            Decimal             @default(0) @db.Decimal(12, 2)
+  total                  Decimal             @db.Decimal(12, 2)
+  currency               String              @default("INR")
+  shippingAddress        Json?
+  paymentMethod          String?
   // real Razorpay Payment Link backing a UPI order (null if Razorpay isn't configured for this business, or
   // for COD orders) — the webhook uses razorpayPaymentLinkId to find the order to mark paid
-  razorpayPaymentLinkId  String? @unique
+  razorpayPaymentLinkId  String?             @unique
   razorpayPaymentLinkUrl String?
   razorpayPaymentId      String? // captured Razorpay payment id, set once the webhook confirms payment
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  items       OrderItem[]
-  opportunityOutcome OpportunityOutcome?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  business               Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer               Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation           Conversation?       @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  items                  OrderItem[]
+  opportunityOutcome     OpportunityOutcome?
 
   @@index([businessId, status, createdAt])
   @@index([customerId, createdAt])
@@ -642,15 +643,15 @@ model OrderItem {
 }
 
 model ActivityEvent {
-  id          String            @id @default(cuid())
-  businessId  String
-  customerId  String?
-  type        ActivityEventType
-  summary     String
-  metadata    Json?
-  createdAt   DateTime          @default(now())
-  business    Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer    Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  id         String            @id @default(cuid())
+  businessId String
+  customerId String?
+  type       ActivityEventType
+  summary    String
+  metadata   Json?
+  createdAt  DateTime          @default(now())
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer   Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@index([businessId, createdAt])
 }
@@ -679,9 +680,9 @@ model AiModelInvocation {
   id             String   @id @default(cuid())
   businessId     String
   conversationId String?
-  experimentId   String?  // null when the experiment isn't enabled for this turn (plain control-only traffic)
-  variant        String   // "control" | "candidate"
-  tier           String   // "control" | "efficient" | "balanced" | "advanced"
+  experimentId   String? // null when the experiment isn't enabled for this turn (plain control-only traffic)
+  variant        String // "control" | "candidate"
+  tier           String // "control" | "efficient" | "balanced" | "advanced"
   modelId        String
   fallbackUsed   Boolean  @default(false) // true when a candidate call failed and this row reflects the control retry
   success        Boolean
@@ -723,12 +724,12 @@ model StockAdjustment {
   businessId        String
   productId         String
   variantId         String
-  delta             Int                   // positive = stock increased, negative = decreased
+  delta             Int // positive = stock increased, negative = decreased
   previousInventory Int?
   newInventory      Int?
   reason            StockAdjustmentReason
   note              String?
-  createdById       String?               // set for MANUAL_EDIT; null for system-driven reasons
+  createdById       String? // set for MANUAL_EDIT; null for system-driven reasons
   createdAt         DateTime              @default(now())
   business          Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   product           Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -760,32 +761,32 @@ model CustomerSignal {
 
 // a detected sales opportunity — surfaced in the merchant's Suggestions inbox for review/send/dismiss/snooze
 model Opportunity {
-  id              String              @id @default(cuid())
-  businessId      String
-  customerId      String
-  type            OpportunityType
-  priority        OpportunityPriority @default(MEDIUM)
-  score           Int                 @default(0) // 0-100, deterministic — drives sort order and priority
-  confidence      Float               @default(0.5) // 0-1, how sure the engine is this is a real opportunity
-  reason          String              // deterministic, grounded explanation — never AI-generated, so it's always auditable
-  estimatedValue  Decimal?            @db.Decimal(12, 2)
-  status          OpportunityStatus   @default(NEW)
-  relatedProductId String?
+  id                 String              @id @default(cuid())
+  businessId         String
+  customerId         String
+  type               OpportunityType
+  priority           OpportunityPriority @default(MEDIUM)
+  score              Int                 @default(0) // 0-100, deterministic — drives sort order and priority
+  confidence         Float               @default(0.5) // 0-1, how sure the engine is this is a real opportunity
+  reason             String // deterministic, grounded explanation — never AI-generated, so it's always auditable
+  estimatedValue     Decimal?            @db.Decimal(12, 2)
+  status             OpportunityStatus   @default(NEW)
+  relatedProductId   String?
   // every product a single consolidated opportunity covers (e.g. "still deciding between these 3?") —
   // relatedProductId above stays the primary/first product for dedup and the existing Add-to-Cart send button
-  relatedProductIds String[]          @default([])
-  relatedCartId    String?
-  relatedPromotionId String?          // which broadcast Promotion this PROMOTION-type opportunity came from — without this, two different promotions to the same customer would dedup against each other (they share no relatedProductId/relatedCartId to differentiate)
-  snoozedUntil    DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  business        Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  relatedProduct  Product?            @relation(fields: [relatedProductId], references: [id], onDelete: SetNull)
-  relatedCart     Cart?               @relation(fields: [relatedCartId], references: [id], onDelete: SetNull)
-  relatedPromotion Promotion?         @relation(fields: [relatedPromotionId], references: [id], onDelete: SetNull)
-  suggestion      Suggestion?
-  outcome         OpportunityOutcome?
+  relatedProductIds  String[]            @default([])
+  relatedCartId      String?
+  relatedPromotionId String? // which broadcast Promotion this PROMOTION-type opportunity came from — without this, two different promotions to the same customer would dedup against each other (they share no relatedProductId/relatedCartId to differentiate)
+  snoozedUntil       DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  business           Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer           Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  relatedProduct     Product?            @relation(fields: [relatedProductId], references: [id], onDelete: SetNull)
+  relatedCart        Cart?               @relation(fields: [relatedCartId], references: [id], onDelete: SetNull)
+  relatedPromotion   Promotion?          @relation(fields: [relatedPromotionId], references: [id], onDelete: SetNull)
+  suggestion         Suggestion?
+  outcome            OpportunityOutcome?
 
   @@index([businessId, status, priority])
   @@index([businessId, customerId, type])
@@ -796,8 +797,8 @@ model Opportunity {
 model Suggestion {
   id            String      @id @default(cuid())
   opportunityId String      @unique
-  message       String      // the AI-drafted (or templated) customer-facing message
-  editedMessage String?     // merchant's edit, if any — sent in place of `message` when present
+  message       String // the AI-drafted (or templated) customer-facing message
+  editedMessage String? // merchant's edit, if any — sent in place of `message` when present
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
@@ -824,9 +825,9 @@ model AutomationRule {
   opportunityType               OpportunityType
   enabled                       Boolean         @default(true)
   autoSend                      Boolean         @default(false) // false = approval-first (the doc's default for every type except order/status updates)
-  businessHoursStart            Int?            // hour 0-23 local to Business.timezone; null = no restriction
-  businessHoursEnd              Int?            // hour 0-23; auto-send only fires within [start, end)
-  frequencyCapPerCustomerPerDay Int?             // max NEW opportunities of any type created for one customer per day; null = no cap
+  businessHoursStart            Int? // hour 0-23 local to Business.timezone; null = no restriction
+  businessHoursEnd              Int? // hour 0-23; auto-send only fires within [start, end)
+  frequencyCapPerCustomerPerDay Int? // max NEW opportunities of any type created for one customer per day; null = no cap
   minConfidenceForAutoSend      Float           @default(0) // below this, auto-send is skipped even if enabled — falls back to manual review (doc: "Low-confidence suggestion -> Manual review")
   personalizedTiming            Boolean         @default(false) // when true, auto-send targets each customer's own inferred best-reply hour instead of the static business-hours window (falls back to businessHours if not enough history)
   createdAt                     DateTime        @default(now())
@@ -842,8 +843,8 @@ model AutomationRule {
 model ProductRelation {
   id               String              @id @default(cuid())
   businessId       String
-  productId        String              // the product the customer just bought
-  relatedProductId String              // the product to suggest
+  productId        String // the product the customer just bought
+  relatedProductId String // the product to suggest
   type             ProductRelationType
   createdAt        DateTime            @default(now())
   business         Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -858,20 +859,92 @@ model ProductRelation {
 // type. Deliberately NOT AI-drafted (unlike every other Suggestion message): a promo often carries specific
 // terms/codes the merchant wrote themselves, so the exact text is sent as-is, never touched by the model.
 model Promotion {
-  id                 String                 @id @default(cuid())
-  businessId         String
-  title              String
-  message            String                 // sent verbatim as the Suggestion message for every targeted customer
-  discountDescription String?               // display-only label, e.g. "20% off" — no real coupon/code enforcement (matches the rest of this project's simulated-payment philosophy)
-  imageUrl           String?                // banner image (uploaded) or a copied product photo — sent as an image+caption instead of plain text when set
-  targetSegment      PromotionTargetSegment
-  categoryId         String?                // required when targetSegment = CATEGORY_BUYERS
-  broadcastedAt      DateTime?
-  broadcastCount     Int                    @default(0)
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  business           Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  opportunities      Opportunity[]
+  id                  String                 @id @default(cuid())
+  businessId          String
+  title               String
+  message             String // sent verbatim as the Suggestion message for every targeted customer
+  discountDescription String? // display-only label, e.g. "20% off" — no real coupon/code enforcement (matches the rest of this project's simulated-payment philosophy)
+  imageUrl            String? // banner image (uploaded) or a copied product photo — sent as an image+caption instead of plain text when set
+  targetSegment       PromotionTargetSegment
+  categoryId          String? // required when targetSegment = CATEGORY_BUYERS
+  broadcastedAt       DateTime?
+  broadcastCount      Int                    @default(0)
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  business            Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  opportunities       Opportunity[]
 
   @@index([businessId, createdAt])
+}
+
+// Relay's own internal subscription lifecycle state — mapped from real Razorpay subscription statuses/events
+// by the billing webhook/provider adapter (see apps/api/src/modules/billing). Never set directly by a client.
+enum SubscriptionStatus {
+  TRIAL // trial period active
+  ACTIVE // paid subscription active
+  PAYMENT_FAILED // a charge failed; recovery is still possible (Razorpay "pending", retrying)
+  PAST_DUE // retries exhausted (Razorpay "halted") — grace period before suspension
+  CANCELLED // cancellation scheduled (cancelAtPeriodEnd) or completed
+  EXPIRED // trial ran out without converting, or billing cycles ran out
+  SUSPENDED // no active entitlement — paid functionality restricted
+}
+
+// merchant-to-Relay SaaS billing plan — deliberately separate from Product/Variant (customer-to-merchant
+// catalogue pricing) and from the per-business Razorpay credentials on Business (customer order payments).
+// V1 ships exactly one plan (RELAY_PRO); the model supports more without a schema change later.
+model SubscriptionPlan {
+  id              String         @id @default(cuid())
+  code            String         @unique // e.g. "RELAY_PRO" — stable identifier, used in code/env, never the display name
+  name            String
+  amount          Int // smallest currency unit (paise for INR) — 299900 = ₹2,999.00
+  currency        String         @default("INR")
+  billingInterval String         @default("monthly")
+  trialDays       Int            @default(0)
+  razorpayPlanId  String?        @unique // set once the matching Razorpay Plan is created (lazily, on first checkout)
+  features        Json?
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  subscriptions   Subscription[]
+}
+
+// one merchant-to-Relay subscription per Business (1:1) — completely separate from Order/payment records,
+// which track customer-to-merchant commerce. Source of truth for billing is Razorpay; this is Relay's synced view.
+model Subscription {
+  id                     String             @id @default(cuid())
+  businessId             String             @unique
+  planId                 String
+  provider               String             @default("razorpay")
+  providerCustomerId     String?
+  providerSubscriptionId String?            @unique
+  status                 SubscriptionStatus @default(TRIAL)
+  currentPeriodStart     DateTime?
+  currentPeriodEnd       DateTime?
+  trialStart             DateTime?
+  trialEnd               DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  cancelledAt            DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  business               Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  plan                   SubscriptionPlan   @relation(fields: [planId], references: [id])
+
+  @@index([status])
+  @@index([currentPeriodEnd])
+}
+
+// raw, idempotent ledger of every Razorpay billing webhook received (keyed on their event id) — doubles as
+// the billing audit trail surfaced in platform admin ("last billing event"), so no separate audit service exists.
+model BillingEvent {
+  id              String    @id @default(cuid())
+  provider        String    @default("razorpay")
+  providerEventId String    @unique
+  businessId      String?
+  eventType       String
+  payload         Json
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([businessId])
+  @@index([eventType])
 }

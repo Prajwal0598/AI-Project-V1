@@ -12,9 +12,10 @@ import { AiModule } from "../ai/ai.module";
 import { ShoppingFlowModule } from "../shopping-flow/shopping-flow.module";
 import { OrderModule } from "../orders/order.module";
 import { PaymentsModule } from "../payments/payments.module";
+import { BillingModule } from "../billing/billing.module";
 
 @Module({
-  imports: [QueueModule, AiModule, ShoppingFlowModule, OrderModule, PaymentsModule],
+  imports: [QueueModule, AiModule, ShoppingFlowModule, OrderModule, PaymentsModule, BillingModule],
   controllers: [WhatsAppWebhookController, InstagramWebhookController, EmailWebhookController, RazorpayWebhookController],
   providers: [WhatsAppWebhookService, InstagramWebhookService, EmailWebhookService, RazorpayWebhookService],
 })

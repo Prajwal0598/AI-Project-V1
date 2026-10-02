@@ -3,6 +3,7 @@ import type { PrismaService } from "../../database/prisma.service";
 import type { QueueService } from "../../queue/queue.service";
 import type { AiService } from "../ai/ai.service";
 import type { ShoppingFlowService } from "../shopping-flow/shopping-flow.service";
+import type { EntitlementService } from "../billing/entitlement.service";
 import type { ParsedWhatsAppMessage } from "./whatsapp-parser";
 
 function baseMsg(overrides: Partial<ParsedWhatsAppMessage> = {}): ParsedWhatsAppMessage {
@@ -17,6 +18,7 @@ describe("WhatsAppWebhookService — routing", () => {
   let queues: { scheduleFollowUp: jest.Mock };
   let ai: { generateAndSendReply: jest.Mock };
   let shoppingFlow: { handleInteractive: jest.Mock; sendMainMenu: jest.Mock; handleFreeText: jest.Mock };
+  let entitlements: { canUseRelay: jest.Mock };
   let service: WhatsAppWebhookService;
 
   const business = { id: "biz1", whatsappPhoneNumberId: "PHONE123" };
@@ -37,11 +39,13 @@ describe("WhatsAppWebhookService — routing", () => {
     queues = { scheduleFollowUp: jest.fn() };
     ai = { generateAndSendReply: jest.fn() };
     shoppingFlow = { handleInteractive: jest.fn(), sendMainMenu: jest.fn(), handleFreeText: jest.fn() };
+    entitlements = { canUseRelay: jest.fn().mockResolvedValue(true) };
     service = new WhatsAppWebhookService(
       prisma as unknown as PrismaService,
       queues as unknown as QueueService,
       ai as unknown as AiService,
       shoppingFlow as unknown as ShoppingFlowService,
+      entitlements as unknown as EntitlementService,
     );
   });
 
