@@ -3,8 +3,13 @@ import { Injectable, Logger } from "@nestjs/common";
 interface CreatePlanResult { id: string }
 interface CreateSubscriptionResult { id: string; shortUrl: string | null }
 
-// Relay bills ITS OWN merchants from Relay's own Razorpay account — completely separate credentials from any
-// per-business Razorpay account used for customer-to-merchant order payments (see modules/payments/razorpay.service.ts).
+// Relay bills ITS OWN merchants from Relay's own Razorpay account — completely separate webhook/secret/data model
+// from any per-business Razorpay account used for customer-to-merchant order payments (see
+// modules/payments/razorpay.service.ts). Credentials are read via RELAY_BILLING_RAZORPAY_KEY_ID/SECRET (not the
+// per-business RAZORPAY_KEY_ID/SECRET fallback) specifically so this can point at a dedicated RelayShift
+// Razorpay account later (see docs/app-overview.md "Payments") without touching any code here — today, during
+// the single-merchant bootstrap stage, these are deliberately set to the same physical Razorpay test account
+// already connected for that one merchant's own customer payments.
 const RAZORPAY_API = "https://api.razorpay.com/v1";
 // an indefinite monthly SaaS subscription has no natural end — Razorpay requires either total_count or end_at,
 // so this is a large-but-finite bound (100 years of monthly cycles) rather than inventing an "unlimited" option
@@ -17,16 +22,20 @@ const INDEFINITE_MONTHLY_TOTAL_COUNT = 1200;
 export class RazorpayBillingProvider {
   private readonly logger = new Logger(RazorpayBillingProvider.name);
 
+  private keyId(): string | undefined {
+    return process.env.RELAY_BILLING_RAZORPAY_KEY_ID?.trim();
+  }
+
   private authHeader(): string {
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    if (!keyId || !keySecret) throw new Error("RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not configured — Relay's own billing account credentials are required.");
+    const keyId = this.keyId();
+    const keySecret = process.env.RELAY_BILLING_RAZORPAY_KEY_SECRET?.trim();
+    if (!keyId || !keySecret) throw new Error("RELAY_BILLING_RAZORPAY_KEY_ID / RELAY_BILLING_RAZORPAY_KEY_SECRET are not configured — Relay's own billing account credentials are required.");
     return `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`;
   }
 
   /** The public key ID (safe to send to the browser) the frontend needs to open Razorpay Checkout for a subscription. */
   getPublicKeyId(): string | undefined {
-    return process.env.RAZORPAY_KEY_ID?.trim();
+    return this.keyId();
   }
 
   private async request<T>(path: string, method: "GET" | "POST", body?: Record<string, unknown>): Promise<T> {

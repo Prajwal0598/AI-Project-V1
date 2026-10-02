@@ -80,6 +80,29 @@ Free-text conversations go through OpenAI's Responses API with a **strict JSON s
 - `RazorpayWebhookService` marks orders PAID on real payment confirmation, which kicks off the (simulated) fulfillment pipeline via the worker.
 - **Fulfillment is currently simulated**: once PAID, `worker`'s order-progress jobs auto-advance `fulfillmentStatus` through PACKED → SHIPPED → OUT_FOR_DELIVERY → DELIVERED on a timer — there's no real courier/shipping integration wired up yet (packages/integrations/shipping exists but isn't the live path).
 
+### 5.1 Relay's own billing (merchant → Relay, separate from customer → merchant payments above)
+
+Relay Pro (₹2,999/month, 7-day trial) is Relay's own SaaS subscription, billed via Razorpay Subscriptions —
+architecturally separate from the per-business Razorpay payments above at every layer: own module
+(`modules/billing/`), own webhook route (`/webhooks/razorpay/billing`), own webhook secret
+(`RAZORPAY_BILLING_WEBHOOK_SECRET`), own tables (`SubscriptionPlan`/`Subscription`/`BillingEvent`), and its own
+credential pair (`RELAY_BILLING_RAZORPAY_KEY_ID`/`SECRET`, read only by `RazorpayBillingProvider` and the
+worker's `billing-sweep` job — never `RAZORPAY_KEY_ID`/`SECRET`, which is the per-business fallback above).
+`EntitlementService.canUseRelay()` gates only the AI auto-reply capability on each channel webhook — a lapsed
+subscription never blocks dashboard/Settings access.
+
+**Current state (single-merchant bootstrap):** `RELAY_BILLING_RAZORPAY_KEY_ID`/`SECRET` are set to the SAME
+physical Razorpay test account already connected for Prajwal Studio's own customer payments — a deliberate,
+temporary choice while Relay has exactly one merchant, made possible because the credential pair is already
+its own dedicated config rather than reusing `RAZORPAY_KEY_ID`/`SECRET` literally.
+
+**Planned migration (before onboarding other merchants):** move to two genuinely separate Razorpay accounts —
+Account A, owned by RelayShift Technologies Pvt Ltd, handling only `merchant → Relay` subscription billing;
+Account B (and beyond), one per merchant, handling only `customer → merchant` order payments. Since the
+credential pair is already isolated, this migration is purely an env var change (`RELAY_BILLING_RAZORPAY_KEY_ID`/
+`SECRET` + `RAZORPAY_BILLING_WEBHOOK_SECRET` pointed at the new account) — no changes needed to
+`modules/billing/` or `jobs/billing-sweep.ts`.
+
 ## 6. Proactive AI Suggestions (the "Opportunities" system)
 
 Off by default (`proactiveSuggestionsEnabled`). When on, various triggers (inbound signals, and worker-scheduled scans) create an `Opportunity` + AI-drafted `Suggestion` for: abandoned cart, product enquiry, back-in-stock, high purchase intent, repeat purchase, cross-sell, upsell, new-product-match, unanswered conversation, low engagement, high-value customer, promotion. Each opportunity gets a **deterministic** 0–100 score (base-by-type + value/confidence/lead-score bonuses) and priority (LOW/MEDIUM/HIGH) — scoring is intentionally never AI-derived, so it's fully auditable.

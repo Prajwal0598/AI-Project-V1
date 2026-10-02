@@ -6,8 +6,8 @@ describe("RazorpayBillingProvider", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    process.env.RAZORPAY_KEY_ID = "rzp_test_key";
-    process.env.RAZORPAY_KEY_SECRET = "test_secret";
+    process.env.RELAY_BILLING_RAZORPAY_KEY_ID = "rzp_test_key";
+    process.env.RELAY_BILLING_RAZORPAY_KEY_SECRET = "test_secret";
     provider = new RazorpayBillingProvider();
   });
 
@@ -74,8 +74,8 @@ describe("RazorpayBillingProvider", () => {
   });
 
   it("throws if Relay's own Razorpay credentials aren't configured", async () => {
-    delete process.env.RAZORPAY_KEY_ID;
-    delete process.env.RAZORPAY_KEY_SECRET;
+    delete process.env.RELAY_BILLING_RAZORPAY_KEY_ID;
+    delete process.env.RELAY_BILLING_RAZORPAY_KEY_SECRET;
     global.fetch = jest.fn() as unknown as typeof fetch;
     await expect(provider.createPlan({ name: "x", amount: 100, currency: "INR", billingInterval: "monthly" })).rejects.toThrow();
   });

@@ -5,9 +5,11 @@ import { captureException } from "../error-reporting";
 const RAZORPAY_API = "https://api.razorpay.com/v1";
 
 async function cancelRazorpaySubscription(providerSubscriptionId: string): Promise<void> {
-  const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-  const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-  if (!keyId || !keySecret) throw new Error("RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not configured");
+  // same RELAY_BILLING_RAZORPAY_KEY_ID/SECRET credential pair as RazorpayBillingProvider — see that file's
+  // comment for why this is a dedicated env var pair rather than the per-business RAZORPAY_KEY_ID/SECRET fallback
+  const keyId = process.env.RELAY_BILLING_RAZORPAY_KEY_ID?.trim();
+  const keySecret = process.env.RELAY_BILLING_RAZORPAY_KEY_SECRET?.trim();
+  if (!keyId || !keySecret) throw new Error("RELAY_BILLING_RAZORPAY_KEY_ID / RELAY_BILLING_RAZORPAY_KEY_SECRET are not configured");
   const auth = `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`;
   const res = await fetch(`${RAZORPAY_API}/subscriptions/${providerSubscriptionId}/cancel`, {
     method: "POST",
