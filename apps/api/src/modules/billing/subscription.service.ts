@@ -91,7 +91,7 @@ export class SubscriptionService implements OnModuleInit {
     if (!subscription) throw new NotFoundException("No subscription found for this business.");
     if (!LIVE_STATUSES.includes(subscription.status)) throw new BadRequestException(`Subscription is ${subscription.status.toLowerCase()} and cannot be cancelled.`);
     if (subscription.cancelAtPeriodEnd) throw new ConflictException("Cancellation is already scheduled.");
-    return this.prisma.subscription.update({ where: { businessId }, data: { cancelAtPeriodEnd: true } });
+    return this.prisma.subscription.update({ where: { businessId }, data: { cancelAtPeriodEnd: true }, include: { plan: true } });
   }
 
   async resume(businessId: string) {
@@ -99,7 +99,7 @@ export class SubscriptionService implements OnModuleInit {
     if (!subscription) throw new NotFoundException("No subscription found for this business.");
     if (!subscription.cancelAtPeriodEnd) throw new BadRequestException("This subscription isn't scheduled for cancellation.");
     if (subscription.currentPeriodEnd && subscription.currentPeriodEnd <= new Date()) throw new BadRequestException("This subscription's final period has already ended and cannot be resumed.");
-    return this.prisma.subscription.update({ where: { businessId }, data: { cancelAtPeriodEnd: false } });
+    return this.prisma.subscription.update({ where: { businessId }, data: { cancelAtPeriodEnd: false }, include: { plan: true } });
   }
 
   /** Billing history derived straight from the BillingEvent ledger — no separate audit table. */

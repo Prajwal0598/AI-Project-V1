@@ -80,7 +80,7 @@ describe("SubscriptionService", () => {
     it("cancel() sets cancelAtPeriodEnd without calling Razorpay directly", async () => {
       prisma.subscription.findUnique.mockResolvedValue({ status: "ACTIVE", cancelAtPeriodEnd: false });
       await subscriptions.cancel("biz1");
-      expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { businessId: "biz1" }, data: { cancelAtPeriodEnd: true } });
+      expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { businessId: "biz1" }, data: { cancelAtPeriodEnd: true }, include: { plan: true } });
       expect(razorpay.cancelSubscription).not.toHaveBeenCalled();
     });
 
@@ -102,7 +102,7 @@ describe("SubscriptionService", () => {
     it("resume() clears cancelAtPeriodEnd before the period has ended", async () => {
       prisma.subscription.findUnique.mockResolvedValue({ cancelAtPeriodEnd: true, currentPeriodEnd: new Date(Date.now() + 86400000) });
       await subscriptions.resume("biz1");
-      expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { businessId: "biz1" }, data: { cancelAtPeriodEnd: false } });
+      expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { businessId: "biz1" }, data: { cancelAtPeriodEnd: false }, include: { plan: true } });
     });
 
     it("resume() rejects once the final period has already ended", async () => {
