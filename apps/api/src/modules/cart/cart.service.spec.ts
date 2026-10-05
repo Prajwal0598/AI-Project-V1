@@ -3,6 +3,7 @@ import { CartService } from "./cart.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { OrderService } from "../orders/order.service";
 import type { QueueService } from "../../queue/queue.service";
+import type { OpportunityService } from "../opportunities/opportunity.service";
 
 describe("CartService.addItem — stock validation", () => {
   let prisma: any;
@@ -16,7 +17,7 @@ describe("CartService.addItem — stock validation", () => {
       cartItem: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn() },
     };
     queues = { scheduleAbandonedCartFollowUp: jest.fn(), cancelAbandonedCartFollowUp: jest.fn() };
-    cartService = new CartService(prisma as unknown as PrismaService, {} as unknown as OrderService, queues as unknown as QueueService);
+    cartService = new CartService(prisma as unknown as PrismaService, {} as unknown as OrderService, queues as unknown as QueueService, {} as unknown as OpportunityService);
   });
 
   it("throws if the cart doesn't exist", async () => {
@@ -82,7 +83,7 @@ describe("CartService.updateItemQuantity", () => {
       cartItem: { deleteMany: jest.fn(), updateMany: jest.fn() },
     };
     queues = { scheduleAbandonedCartFollowUp: jest.fn(), cancelAbandonedCartFollowUp: jest.fn() };
-    cartService = new CartService(prisma as unknown as PrismaService, {} as unknown as OrderService, queues as unknown as QueueService);
+    cartService = new CartService(prisma as unknown as PrismaService, {} as unknown as OrderService, queues as unknown as QueueService, {} as unknown as OpportunityService);
   });
 
   it("removes the item entirely when quantity is set to 0 or below", async () => {

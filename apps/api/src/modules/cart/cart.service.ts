@@ -4,6 +4,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { OrderService } from "../orders/order.service";
 import type { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { QueueService } from "../../queue/queue.service";
+import { OpportunityService } from "../opportunities/opportunity.service";
 
 const CART_INCLUDE = { items: { include: { variant: { include: { product: true } } } } };
 // an order can still be amended (items replaced) up until it's paid — mirrors ai.service.ts's AMENDABLE_STATUSES
@@ -15,6 +16,7 @@ export class CartService {
     private readonly prisma: PrismaService,
     private readonly orders: OrderService,
     private readonly queues: QueueService,
+    private readonly opportunities: OpportunityService,
   ) {}
 
   /** Returns the conversation's active cart, creating a fresh one if none exists (or the last one was checked out). */
@@ -128,6 +130,7 @@ export class CartService {
         });
 
     await this.prisma.cart.update({ where: { id: cartId }, data: { status: CartStatus.CHECKED_OUT } });
+    await this.opportunities.expireForCheckedOutCart(businessId, cartId);
     await this.queues.cancelAbandonedCartFollowUp(cartId);
     return order;
   }

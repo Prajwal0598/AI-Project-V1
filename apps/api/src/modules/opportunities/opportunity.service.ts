@@ -456,4 +456,16 @@ export class OpportunityService {
       await tx.opportunity.update({ where: { id: candidate.id }, data: { status: "CONVERTED" } });
     });
   }
+
+  /** A cart checkout makes any still-unsent nudge about THIS cart stale — without this, a never-sent
+   * ABANDONED_CART opportunity keeps winning as the Customer 360 "AI Insight" and clutters the Suggestions
+   * inbox even after the customer already bought the items on their own. Never CONVERTED: that status implies
+   * the opportunity was actually sent (see summary()'s funnel math) — SENT ones are already handled by
+   * attachOrderOutcome above. */
+  async expireForCheckedOutCart(businessId: string, cartId: string) {
+    await this.prisma.opportunity.updateMany({
+      where: { businessId, relatedCartId: cartId, type: "ABANDONED_CART", status: { in: ["NEW", "SNOOZED"] } },
+      data: { status: "EXPIRED" },
+    });
+  }
 }

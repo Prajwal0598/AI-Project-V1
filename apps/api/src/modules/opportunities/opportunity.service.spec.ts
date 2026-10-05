@@ -158,3 +158,26 @@ describe("OpportunityService.create — active-conversation suppression", () => 
     expect(conversations.sendMessage).toHaveBeenCalled();
   });
 });
+
+describe("OpportunityService.expireForCheckedOutCart", () => {
+  let prisma: { opportunity: { updateMany: jest.Mock } };
+  let service: OpportunityService;
+
+  beforeEach(() => {
+    prisma = { opportunity: { updateMany: jest.fn() } };
+    service = new OpportunityService(
+      prisma as unknown as PrismaService,
+      {} as unknown as ConversationService,
+      {} as unknown as SuggestionAiService,
+      {} as unknown as AutomationRuleService,
+    );
+  });
+
+  it("expires a never-sent ABANDONED_CART opportunity for the checked-out cart, so it stops masking fresher Customer 360 insight data", async () => {
+    await service.expireForCheckedOutCart("biz1", "cart1");
+    expect(prisma.opportunity.updateMany).toHaveBeenCalledWith({
+      where: { businessId: "biz1", relatedCartId: "cart1", type: "ABANDONED_CART", status: { in: ["NEW", "SNOOZED"] } },
+      data: { status: "EXPIRED" },
+    });
+  });
+});
