@@ -330,6 +330,7 @@ export interface CustomerProfile extends Customer {
   lastInteractionAt: string;
   primaryChannel: string | null;
   status: "ACTIVE" | "INACTIVE";
+  lastShippingAddress: string | null;
   insight: CustomerInsight | null;
   preferences: CustomerPreferences;
 }

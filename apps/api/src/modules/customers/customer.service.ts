@@ -140,17 +140,21 @@ export class CustomerService {
     });
     if (!customer) throw new NotFoundException("Customer not found.");
 
-    const [orderRows, latestOpportunity, recentSignals, recentActivity, budgetConversations, topProductRows] = await Promise.all([
+    const [orderRows, latestOpportunity, recentSignals, recentActivity, budgetConversations, topProductRows, latestAddressOrder] = await Promise.all([
       this.prisma.order.groupBy({ by: ["status"], where: { customerId, businessId }, _sum: { total: true }, _count: { _all: true }, _max: { createdAt: true } }),
       this.opportunities.latestActiveForCustomer(businessId, customerId),
       this.customerSignals.recentForCustomer(businessId, customerId, 10),
       this.business.activity(businessId, 1, customerId),
       this.prisma.conversation.findMany({ where: { customerId, businessId, assistedBuyingContext: { not: Prisma.DbNull } }, select: { assistedBuyingContext: true, updatedAt: true }, orderBy: { updatedAt: "desc" }, take: 5 }),
       this.prisma.orderItem.groupBy({ by: ["productId", "name"], where: { productId: { not: null }, order: { customerId, businessId } }, _sum: { quantity: true }, orderBy: { _sum: { quantity: "desc" } }, take: 5 }),
+      // there's no standalone Customer.address field — the merchant-facing address is whatever they last
+      // actually shipped an order to, taken verbatim from Order.shippingAddress, never a separately-typed field
+      this.prisma.order.findFirst({ where: { customerId, businessId, shippingAddress: { not: Prisma.DbNull } }, orderBy: { createdAt: "desc" }, select: { shippingAddress: true } }),
     ]);
 
     const summary = buildOrderSummary(orderRows.map((r) => ({ ...r, customerId })) as OrderAggRow[]);
     const lastActivityAt = recentActivity[0]?.createdAt ?? null;
+    const lastShippingAddress = (latestAddressOrder?.shippingAddress as { address?: string } | null)?.address ?? null;
 
     // customer-STATED budget: the latest maxPrice they actually typed, taken verbatim from persisted conversation context — never inferred
     let statedBudget: number | null = null;
@@ -168,6 +172,7 @@ export class CustomerService {
       lastInteractionAt: lastActivityAt ?? customer.updatedAt,
       primaryChannel: primaryChannelOf(customer.identities),
       status: isActive(lastActivityAt) ? "ACTIVE" : "INACTIVE",
+      lastShippingAddress,
       insight,
       preferences: {
         statedBudget,

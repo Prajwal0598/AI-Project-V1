@@ -21,7 +21,7 @@ describe("CustomerService", () => {
     prisma = {
       business: { findUnique: jest.fn().mockResolvedValue({ id: "biz1" }) },
       customer: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
-      order: { groupBy: jest.fn().mockResolvedValue([]) },
+      order: { groupBy: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
       orderItem: { groupBy: jest.fn().mockResolvedValue([]) },
       activityEvent: { groupBy: jest.fn().mockResolvedValue([]) },
       conversation: { findMany: jest.fn().mockResolvedValue([]) },
@@ -143,6 +143,22 @@ describe("CustomerService", () => {
 
       const result = await customers.get("c1", "biz1");
       expect(result.preferences.statedBudget).toBe(3000);
+    });
+
+    it("surfaces the address from the customer's most recent order — there's no standalone Customer.address field", async () => {
+      prisma.customer.findFirst.mockResolvedValue({ id: "c1", businessId: "biz1", identities: [], leadScore: null });
+      prisma.order.findFirst.mockResolvedValue({ shippingAddress: { address: "221B Baker Street, London" } });
+
+      const result = await customers.get("c1", "biz1");
+      expect(result.lastShippingAddress).toBe("221B Baker Street, London");
+    });
+
+    it("never invents an address — returns null when the customer has no order with a shipping address on file", async () => {
+      prisma.customer.findFirst.mockResolvedValue({ id: "c1", businessId: "biz1", identities: [], leadScore: null });
+      prisma.order.findFirst.mockResolvedValue(null);
+
+      const result = await customers.get("c1", "biz1");
+      expect(result.lastShippingAddress).toBeNull();
     });
   });
 

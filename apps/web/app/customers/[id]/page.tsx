@@ -110,6 +110,7 @@ export default function CustomerProfilePage() {
             {profile.email && <span>{profile.email}</span>}
             {profile.primaryChannel && <span className="source-chip">{CHANNEL_BADGE[profile.primaryChannel] ?? profile.primaryChannel} {profile.primaryChannel}</span>}
           </p>
+          {profile.lastShippingAddress && <p className="profile-meta"><span title="From this customer's most recent order">📍 {profile.lastShippingAddress}</span></p>}
         </div>
       </div>
       <div className="profile-actions">
