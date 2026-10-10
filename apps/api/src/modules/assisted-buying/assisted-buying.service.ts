@@ -217,18 +217,12 @@ export class AssistedBuyingService {
       return true;
     }
 
-    const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
-    try {
-      const updatedCart = await this.cart.addItem(activeCart.id, businessId, variant.id, 1);
-      const { subtotal, currency } = this.cart.totals(updatedCart);
-      await this.conversations.sendButtons(conversationId, businessId, `✅ Added *${product.name}* to your cart.\n🛒 Cart total: ${fmtMoney(subtotal, currency)}`, [
-        { id: "nav_viewcart", title: "View Cart" },
-        { id: "cart_checkout", title: "Checkout" },
-      ]);
-      await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart", reason: `${product.name} (variant ${variant.id})` });
-    } catch (error) {
-      await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not add that to your cart.");
-    }
+    // never assume a quantity — ask first, same copy/state as ShoppingFlowService's own askQuantity(), so the
+    // customer's numeric reply next turn is picked up by ShoppingFlowService.receiveQuantity() once shoppingState
+    // is no longer IDLE (see whatsapp-webhook.service.ts's routing order)
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: product.id, pendingVariantId: variant.id } });
+    await this.conversations.sendMessage(conversationId, businessId, "🔢 How many would you like? Reply with a number.");
+    await logAiAction(this.prisma, { businessId, customerId, conversationId, action: "ASSISTED_BUYING_AWAITING_QUANTITY", result: "awaiting_quantity", reason: `${product.name} (variant ${variant.id})` });
     return true;
   }
 

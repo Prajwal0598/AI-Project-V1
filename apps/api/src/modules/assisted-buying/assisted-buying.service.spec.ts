@@ -245,15 +245,12 @@ describe("AssistedBuyingService", () => {
     });
 
     it("does not treat a single ordinal reference as a comparison request", async () => {
-      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
-      cart.addItem.mockResolvedValue({ items: [] });
-      cart.totals.mockReturnValue({ subtotal: 1799, currency: "INR" });
       prisma.product.findFirst.mockResolvedValue({ id: "p1", name: "Navy Linen Shirt", variants: shirt.variants });
 
       const handled = await service.handle("conv1", "biz1", "cust1", "add the first one");
 
       expect(handled).toBe(true);
-      expect(cart.addItem).toHaveBeenCalled(); // falls through to reference resolution, not comparison
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("How many would you like")); // falls through to reference resolution, not comparison
     });
   });
 
@@ -264,32 +261,24 @@ describe("AssistedBuyingService", () => {
       });
     });
 
-    it("resolves 'the first one' + a mentioned size to the matching variant and adds it to the cart", async () => {
+    it("resolves 'the first one' + a mentioned size to the matching variant and asks for a quantity instead of assuming one", async () => {
       prisma.product.findFirst.mockResolvedValue(shirt);
-      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
-      cart.addItem.mockResolvedValue({ items: [] });
-      cart.totals.mockReturnValue({ subtotal: 1799, currency: "INR" });
 
       const handled = await service.handle("conv1", "biz1", "cust1", "add the first one in size L");
 
       expect(handled).toBe(true);
-      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v2", 1); // L variant, not the originally-recommended M
-      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Navy Linen Shirt"), [
-        { id: "nav_viewcart", title: "View Cart" },
-        { id: "cart_checkout", title: "Checkout" },
-      ]);
-      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_ADDED_TO_CART", result: "added_to_cart" }) }));
+      expect(cart.addItem).not.toHaveBeenCalled(); // never assumed a quantity
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: "p1", pendingVariantId: "v2" } }); // L variant, not the originally-recommended M
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("How many would you like"));
+      expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_AWAITING_QUANTITY", result: "awaiting_quantity" }) }));
     });
 
     it("falls back to the originally recommended variant when no size/color is mentioned", async () => {
       prisma.product.findFirst.mockResolvedValue(shirt);
-      cart.getOrCreateActive.mockResolvedValue({ id: "cart1" });
-      cart.addItem.mockResolvedValue({ items: [] });
-      cart.totals.mockReturnValue({ subtotal: 1799, currency: "INR" });
 
       await service.handle("conv1", "biz1", "cust1", "add the first one");
 
-      expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 1);
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: "conv1" }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: "p1", pendingVariantId: "v1" } });
     });
 
     it("reports out of stock instead of adding to cart when the resolved variant has none left", async () => {
