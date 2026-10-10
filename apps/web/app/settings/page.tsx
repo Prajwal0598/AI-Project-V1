@@ -344,6 +344,9 @@ export default function SettingsPage() {
             {(subscription.status === "PAYMENT_FAILED" || subscription.status === "PAST_DUE") && (
               <button className="primary-button" onClick={startCheckout} disabled={checkingOut}>{checkingOut ? "Opening…" : "Update payment method"}</button>
             )}
+            {(subscription.status === "EXPIRED" || subscription.status === "SUSPENDED") && (
+              <button className="primary-button" onClick={startCheckout} disabled={checkingOut}>{checkingOut ? "Opening…" : "Reactivate subscription"}</button>
+            )}
             {subscription.cancelAtPeriodEnd
               ? <button className="primary-button" onClick={resumeSubscription}>Resume Subscription</button>
               : (subscription.status === "ACTIVE" || subscription.status === "TRIAL") && <button onClick={cancelSubscription}>Cancel Subscription</button>}

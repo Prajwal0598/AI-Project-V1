@@ -37,6 +37,7 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
     api.billing.subscription().then((sub) => {
       if (sub?.status === "PAYMENT_FAILED") setBillingAlert("Your last Relay subscription payment failed — we're retrying automatically. Update your payment method to avoid interruption.");
       else if (sub?.status === "PAST_DUE") setBillingAlert("Your Relay subscription payment is past due. Update your payment method soon to keep using Relay.");
+      else if (sub?.status === "EXPIRED" || sub?.status === "SUSPENDED") setBillingAlert("Your Relay subscription is inactive — Relay's AI assistant has stopped replying to your customers. Reactivate it to resume.");
     }).catch(() => {});
   }, []);
 
