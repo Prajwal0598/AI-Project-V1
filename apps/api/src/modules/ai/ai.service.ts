@@ -13,7 +13,9 @@ import { CustomerSignalService } from "../customer-signals/customer-signal.servi
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { AssistedBuyingService } from "../assisted-buying/assisted-buying.service";
 import { AiModelRouterService } from "./ai-model-router.service";
-import { parseSearchQuery } from "../shopping-flow/shopping-flow.service";
+import { parseSearchQuery } from "../shopping-intelligence/search-utils";
+import { readShoppingContext } from "../shopping-intelligence/shopping-context";
+import { interpretDeterministically } from "../shopping-intelligence/shopping-interpretation";
 
 // an order can still be cancelled/amended by the customer up until it's marked paid
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
@@ -282,8 +284,12 @@ export class AiService {
     // earlier turn keeps being backend-enforced even on a later turn that doesn't restate it.
     const existingContext = conversation.assistedBuyingContext as { filters?: { maxPrice?: number; [k: string]: unknown } } | null;
     const persistedBudgetMax = existingContext?.filters?.maxPrice;
-    const effectiveBudgetMax = resolveEffectiveBudgetMax(latestInbound?.content, persistedBudgetMax);
-    if (effectiveBudgetMax !== undefined && effectiveBudgetMax !== persistedBudgetMax) {
+    // a budget given for one kind of product must not keep constraining a DIFFERENT one ("emerald saree under 5,000"
+    // then "do you have pearl earrings?") — same new-topic reading the deterministic shopping flow uses
+    const switchedTopic = !!latestInbound && persistedBudgetMax !== undefined
+      && interpretDeterministically(latestInbound.content, readShoppingContext(existingContext)).topicRelation === "NEW_TOPIC";
+    const effectiveBudgetMax = resolveEffectiveBudgetMax(latestInbound?.content, switchedTopic ? undefined : persistedBudgetMax);
+    if (effectiveBudgetMax !== persistedBudgetMax) {
       await this.prisma.conversation.update({
         where: { id: conversationId },
         data: { assistedBuyingContext: { ...existingContext, filters: { ...existingContext?.filters, maxPrice: effectiveBudgetMax } } as unknown as Prisma.InputJsonValue },

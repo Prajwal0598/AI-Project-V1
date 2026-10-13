@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { parseSearchQuery, fmtMoney, formatVariantLabel, ShoppingFlowService } from "./shopping-flow.service";
+import { ShoppingInterpreterService } from "../shopping-intelligence/shopping-interpreter.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { ConversationService } from "../conversations/conversation.service";
 import type { CartService } from "../cart/cart.service";
@@ -134,6 +135,7 @@ describe("ShoppingFlowService — state machine", () => {
       cart as unknown as CartService,
       orders as unknown as OrderService,
       signals as unknown as CustomerSignalService,
+      new ShoppingInterpreterService(), // no model router -> the deterministic interpretation only, so these tests stay hermetic
     );
   });
 
@@ -493,7 +495,7 @@ describe("ShoppingFlowService — state machine", () => {
 
       expect(handled).toBe(true);
       expect(prisma.product.findMany).toHaveBeenCalledTimes(1); // no second (relaxed) query attempted
-      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't find anything matching that"), expect.any(Array));
+      expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining('couldn\'t find anything matching "maroon"'), expect.any(Array));
     });
 
     it("'I need something nice for a party' still matches directly (single real keyword, no relaxation needed)", async () => {
@@ -1050,6 +1052,7 @@ describe("ShoppingFlowService — Smart Reply Suggestions", () => {
       cart as unknown as CartService,
       orders as unknown as OrderService,
       signals as unknown as CustomerSignalService,
+      new ShoppingInterpreterService(), // no model router -> the deterministic interpretation only, so these tests stay hermetic
     );
   });
 
@@ -1199,6 +1202,7 @@ describe("ShoppingFlowService — persistent shopping context & intent interrupt
       cart as unknown as CartService,
       orders as unknown as OrderService,
       signals as unknown as CustomerSignalService,
+      new ShoppingInterpreterService(), // no model router -> the deterministic interpretation only, so these tests stay hermetic
     );
   });
 

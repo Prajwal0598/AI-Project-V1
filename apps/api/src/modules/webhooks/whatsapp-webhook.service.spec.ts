@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { WhatsAppWebhookService } from "./whatsapp-webhook.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { QueueService } from "../../queue/queue.service";
@@ -12,6 +13,9 @@ function baseMsg(overrides: Partial<ParsedWhatsAppMessage> = {}): ParsedWhatsApp
     text: "Hi", interactiveId: null, displayName: "Test Customer", timestamp: new Date(), ...overrides,
   };
 }
+
+// what Prisma throws when an insert hits the unique index on Message.providerMessageId
+const uniqueViolation = () => new Prisma.PrismaClientKnownRequestError("Unique constraint failed on providerMessageId", { code: "P2002", clientVersion: "test" });
 
 describe("WhatsAppWebhookService — routing", () => {
   let prisma: any;
@@ -31,7 +35,7 @@ describe("WhatsAppWebhookService — routing", () => {
       customer: { findFirst: jest.fn().mockResolvedValue(customer), create: jest.fn() },
       identity: { upsert: jest.fn().mockResolvedValue(identity) },
       conversation: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
-      message: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
+      message: { create: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(null) },
       activityEvent: { create: jest.fn() },
       order: { count: jest.fn().mockResolvedValue(0) },
       leadScore: { upsert: jest.fn() },
@@ -65,11 +69,35 @@ describe("WhatsAppWebhookService — routing", () => {
 
   it("ignores a re-delivered message (duplicate providerMessageId)", async () => {
     mockConversation();
-    prisma.message.findUnique.mockResolvedValue({ id: "existing-msg" });
+    prisma.message.create.mockRejectedValue(uniqueViolation());
     await (service as any).processMessage(baseMsg());
     expect(shoppingFlow.handleInteractive).not.toHaveBeenCalled();
     expect(shoppingFlow.sendMainMenu).not.toHaveBeenCalled();
     expect(ai.generateAndSendReply).not.toHaveBeenCalled();
+  });
+
+  it("rethrows any non-duplicate failure while recording the message (never silently swallowed as a duplicate)", async () => {
+    mockConversation();
+    prisma.message.create.mockRejectedValue(new Error("db down"));
+    await expect((service as any).processMessage(baseMsg())).rejects.toThrow("db down");
+    expect(ai.generateAndSendReply).not.toHaveBeenCalled();
+  });
+
+  it("a repeated button tap with the same WhatsApp message id is processed exactly once, even when both deliveries arrive at the same time", async () => {
+    mockConversation();
+    // behaves like the real unique index on providerMessageId: the first insert wins, every other attempt gets P2002
+    const seen = new Set<string>();
+    prisma.message.create.mockImplementation(async ({ data }: { data: { providerMessageId: string } }) => {
+      if (seen.has(data.providerMessageId)) throw uniqueViolation();
+      seen.add(data.providerMessageId);
+      return {};
+    });
+    const tap = baseMsg({ interactiveId: "quickadd_v1", text: "🛒 Add to Cart", waMessageId: "wamid.TAP" });
+
+    await Promise.all([(service as any).processMessage(tap), (service as any).processMessage(tap), (service as any).processMessage(tap)]);
+    await (service as any).processMessage(tap); // and a late re-delivery after the others finished
+
+    expect(shoppingFlow.handleInteractive).toHaveBeenCalledTimes(1);
   });
 
   it("always routes an interactive tap to the shopping flow, even while IDLE", async () => {
@@ -99,7 +127,6 @@ describe("WhatsAppWebhookService — routing", () => {
     for (const text of ["Hi!", "HELLO", "menu", "Shop?", "  hey  "]) {
       jest.clearAllMocks();
       prisma.conversation.findFirst.mockResolvedValue({ id: "conv1", shoppingState: "IDLE" });
-      prisma.message.findUnique.mockResolvedValue(null);
       await (service as any).processMessage(baseMsg({ text, waMessageId: `wamid-${text}` }));
       expect(shoppingFlow.sendMainMenu).toHaveBeenCalled();
     }

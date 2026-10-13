@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { ActivityEventType, Channel, ConversationStatus, MessageDirection } from "@prisma/client";
+import { ActivityEventType, Channel, ConversationStatus, MessageDirection, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { QueueService } from "../../queue/queue.service";
 import { AiService } from "../ai/ai.service";
@@ -86,22 +86,26 @@ export class WhatsAppWebhookService {
       await this.queues.scheduleFollowUp(conversation.id, business.id, customer.id);
     }
 
-    // upsert by providerMessageId to deduplicate Meta re-deliveries, and detect whether this was actually new
-    const existing = await this.prisma.message.findUnique({ where: { providerMessageId: msg.waMessageId } });
-    await this.prisma.message.upsert({
-      where: { providerMessageId: msg.waMessageId },
-      create: {
-        conversationId: conversation.id,
-        direction: MessageDirection.INBOUND,
-        content: msg.text,
-        providerMessageId: msg.waMessageId,
-        sentAt: msg.timestamp,
-      },
-      update: {},
-    });
-    if (existing) {
-      this.logger.warn(`Ignoring re-delivered WhatsApp message ${msg.waMessageId} — already processed.`);
-      return;
+    // claim this delivery atomically: the unique providerMessageId means only ONE of any number of concurrent or
+    // repeated deliveries (Meta re-sends, double taps) can create the row — everyone else gets P2002 and stops here,
+    // so a repeated button/webhook delivery can never add a second cart item, order or reply. (A find-then-upsert
+    // would let two simultaneous deliveries both see "not processed yet".)
+    try {
+      await this.prisma.message.create({
+        data: {
+          conversationId: conversation.id,
+          direction: MessageDirection.INBOUND,
+          content: msg.text,
+          providerMessageId: msg.waMessageId,
+          sentAt: msg.timestamp,
+        },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        this.logger.warn(`Ignoring re-delivered WhatsApp message ${msg.waMessageId} — already processed.`);
+        return;
+      }
+      throw err;
     }
 
     await this.prisma.conversation.update({

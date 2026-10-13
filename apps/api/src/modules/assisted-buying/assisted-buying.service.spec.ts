@@ -1,4 +1,5 @@
 import { AssistedBuyingService } from "./assisted-buying.service";
+import { ShoppingInterpreterService } from "../shopping-intelligence/shopping-interpreter.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { ConversationService } from "../conversations/conversation.service";
 import type { CartService } from "../cart/cart.service";
@@ -29,6 +30,7 @@ describe("AssistedBuyingService", () => {
       prisma as unknown as PrismaService,
       conversations as unknown as ConversationService,
       cart as unknown as CartService,
+      new ShoppingInterpreterService(), // no model router -> deterministic interpretation only, keeping these tests hermetic
     );
   });
 
@@ -39,25 +41,40 @@ describe("AssistedBuyingService", () => {
       expect(prisma.product.findMany).not.toHaveBeenCalled();
     });
 
-    it("returns false when nothing in the catalogue matches even after relaxing budget and keywords", async () => {
+    it("returns false when nothing in the catalogue matches within the budget — and never widens the budget to find something", async () => {
       prisma.product.findMany.mockResolvedValue([]);
       const handled = await service.handle("conv1", "biz1", "cust1", "shirt for a wedding under 2000");
       expect(handled).toBe(false);
       expect(conversations.sendMessage).not.toHaveBeenCalled();
-      expect(prisma.product.findMany).toHaveBeenCalledTimes(3); // exact, then budget-relaxed, then keyword-relaxed
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(2); // exact, then the any-keyword relaxation — and NO budget-dropping step (a named product type is never swapped for an unrelated in-budget dump)
+      for (const [args] of prisma.product.findMany.mock.calls) {
+        expect(args.where.variants.some.price).toEqual({ lte: 2000 }); // the ceiling is on every single query
+      }
       expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_NO_MATCH", result: "no_match" }) }));
     });
 
-    it("relaxes the budget and offers the closest alternative when nothing fits the exact price", async () => {
+    it("never recommends a product above the budget, even if the data layer returns one (hard constraint re-checked on the records)", async () => {
+      const pricey = { ...shirt, id: "p9", name: "Designer Shirt", variants: [{ id: "v9", price: 4999, currency: "INR", inventory: 5, attributes: null }] };
+      prisma.product.findMany.mockResolvedValue([pricey]);
+
+      const handled = await service.handle("conv1", "biz1", "cust1", "red leather shoes under 1000");
+
+      expect(handled).toBe(false); // nothing within budget -> falls through to the normal AI reply, with nothing over-budget shown
+      expect(conversations.sendButtons).not.toHaveBeenCalled();
+    });
+
+    it("offers a closest option only when it is genuinely within the budget (any-keyword relaxation)", async () => {
+      const cheapShoe = { ...shirt, id: "p8", name: "Leather Loafers", variants: [{ id: "v8", price: 899, currency: "INR", inventory: 5, attributes: null }] };
       prisma.product.findMany
-        .mockResolvedValueOnce([]) // exact: keywords + under 1000
-        .mockResolvedValueOnce([shirt]); // relaxed: keywords only
+        .mockResolvedValueOnce([]) // exact: red AND leather AND shoes under 1000
+        .mockResolvedValueOnce([]) // colour-aware: leather AND shoes
+        .mockResolvedValueOnce([cheapShoe]); // any-keyword relaxation, still under 1000
 
       const handled = await service.handle("conv1", "biz1", "cust1", "red leather shoes under 1000");
 
       expect(handled).toBe(true);
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't find an exact match"));
-      expect(prisma.product.findMany).toHaveBeenCalledTimes(2);
+      expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("1,000")); // the stated budget is repeated back
     });
 
     it("sends recommendation cards and stores the recommendation set when candidates match", async () => {
@@ -73,7 +90,12 @@ describe("AssistedBuyingService", () => {
       ], expect.stringContaining("/uploads/products/shirt.jpg"));
       expect(prisma.conversation.update).toHaveBeenCalledWith({
         where: { id: "conv1" },
-        data: { assistedBuyingContext: { recommendations: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }], query: "shirt for a wedding under 2000" } },
+        // one shared context shape (also readable by ShoppingFlowService); `recommendations` is kept as a legacy alias of lastResults
+        data: { assistedBuyingContext: {
+          filters: { keywords: ["shirt", "wedding"], maxPrice: 2000 }, occasion: "wedding", expandedTerms: [],
+          lastResults: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }], shownProductIds: ["p1"],
+          recommendations: [{ productId: "p1", variantId: "v1", name: "Navy Linen Shirt" }], query: "shirt for a wedding under 2000",
+        } },
       });
       expect(prisma.aiActionLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ASSISTED_BUYING_RECOMMENDATIONS_SHOWN", result: "shown" }) }));
     });

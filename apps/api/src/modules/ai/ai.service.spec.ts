@@ -699,16 +699,11 @@ describe("AiService — persistent budget context across turns (reuses Conversat
     expect(turn2Transcript).toContain("Customer: Do you have anything in white?");
 
     const turn3Instructions = await sendTurn("Actually show me options up to ₹5,000");
-    // FINDING (not a regression from this change): the shared price parser `parseSearchQuery` in
-    // shopping-flow.service.ts only recognizes "under/below/less than/cheaper than/within" as budget
-    // phrasing — "up to" is not one of its trigger words, so this turn parses no new price at all and
-    // the persisted ₹3,000 budget from turn 1 correctly carries forward unchanged (proven below). This
-    // is a pre-existing phrase-coverage gap in the parser shared with ShoppingFlowService, not something
-    // introduced or regressed by persistent budget context — out of scope to fix here without touching
-    // that shared, explicitly-untouched file. A recognized phrasing (e.g. "under ₹5,000") DOES correctly
-    // raise the budget — already covered by test B above.
-    expect(getPersistedContext()?.filters?.maxPrice).toBe(3000);
-    expect(turn3Instructions).not.toContain("Women's Silk Saree"); // still excluded — budget never actually moved
-    expect(turn3Instructions).toContain("Men's Festive Kurta"); // still the only in-budget item
+    // "up to" (like "upto"/"max"/"at most"/"budget of", and comma-grouped or "5k" amounts) is now recognized by the
+    // shared price parser — previously it parsed NO price here and the stale ₹3,000 silently stayed in force
+    // (a documented phrase-coverage gap). The explicit raise must now take effect server-side.
+    expect(getPersistedContext()?.filters?.maxPrice).toBe(5000);
+    expect(turn3Instructions).toContain("Women's Silk Saree"); // ₹4,200 — now within the raised ₹5,000 budget
+    expect(turn3Instructions).toContain("Men's Festive Kurta");
   });
 });

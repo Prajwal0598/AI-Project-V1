@@ -7,39 +7,56 @@ import { OrderService } from "../orders/order.service";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
+import { captureException } from "../../common/error-reporting.helper";
+import { fmtMoney, formatVariantLabel, keywordAndClauses, parseSearchQuery, STORE_DISCOVERY_RE, type SearchFilters } from "../shopping-intelligence/search-utils";
+import { nextContext, readShoppingContext, resolveOrdinalIndex, type ShoppingContext } from "../shopping-intelligence/shopping-context";
+import { ShoppingInterpreterService } from "../shopping-intelligence/shopping-interpreter.service";
+import { coreTermsOf, type ShoppingInterpretation } from "../shopping-intelligence/shopping-interpretation";
+import { mergeTopic, type MergedTopic } from "../shopping-intelligence/shopping-topic";
+import {
+  applyHardConstraints, buildReason, cheaperCeiling, isInStock, offeredAttributes, rankProducts, selectDiverse, similarityScore, splitByAttributes, variantHasColor, variantHasSize,
+  type Selected,
+} from "../shopping-intelligence/shopping-ranking";
+
+// the search helpers moved to shopping-intelligence/search-utils.ts (so the new intelligence layer can use them
+// without a circular import) — re-exported here so every existing import of them keeps working unchanged
+export { fmtMoney, formatVariantLabel, keywordAndClauses, parseSearchQuery, STORE_DISCOVERY_RE };
 
 const MAX_LIST_ROWS = 10;
+// "a small, curated set": a broad/occasion/alternatives answer is capped lower than a literal catalogue match
+const CURATED_LIMIT = 6;
 
-// ordinal words a customer might use to refer back to a just-shown result list ("show me the first one")
-const ORDINAL_WORDS: Record<string, number> = {
-  first: 0, "1st": 0, second: 1, "2nd": 1, third: 2, "3rd": 2, fourth: 3, "4th": 3, fifth: 4, "5th": 4,
-};
+// active + in-stock + within-budget enforced IN the query (not after a take:30 cut), so a matching in-budget product can never be crowded out by out-of-budget ones
+function hardVariantFilter(maxPrice?: number, minPrice?: number) {
+  return {
+    variants: {
+      some: {
+        active: true,
+        OR: [{ inventory: null }, { inventory: { gt: 0 } }],
+        ...(maxPrice !== undefined || minPrice !== undefined ? { price: { ...(minPrice !== undefined ? { gte: minPrice } : {}), ...(maxPrice !== undefined ? { lte: maxPrice } : {}) } } : {}),
+      },
+    },
+  };
+}
 
-// stopwords stripped before matching search keywords against product name/description/category — includes
-// vague filler words ("something", "anything", "nice", "good") so e.g. "show me something under 1500" is
-// treated as a budget-only query instead of literally searching the catalogue for the word "something";
-// generic catalogue nouns/question words ("what", "which", "products", "items") so e.g. "What fashion products
-// do you have?" extracts just the real constraint ("fashion"); and pure grammar words (prepositions, modal
-// verbs, relative pronouns, conjunctions) that occasion-style questions are full of ("I'm going ON vacation,
-// WHAT WOULD you recommend?", "classy BUT NOT TOO expensive", "someone WHO loves coffee") but that are never
-// themselves a searchable product attribute
-const SEARCH_STOPWORDS = new Set([
-  "show", "me", "i", "want", "need", "looking", "for", "a", "an", "the", "do", "you", "have", "any", "some",
-  "please", "find", "search", "got", "is", "are", "there", "something", "anything", "nice", "good",
-  "what", "which", "products", "product", "items", "item", "options",
-  "on", "in", "would", "who", "someone", "but", "not", "too", "going", "recommend", "attending", "suitable", "loves",
-  "preferably", "prefer", "ideally", "instead",
-  // pronouns/grammar/filler that show up heavily in multi-turn gift-recommendation chatter ("She ALSO likes
-  // accessories", "which one would you PERSONALLY recommend") plus gift-recipient words ("for MY GIRLFRIEND")
-  // that describe who the product is for, not an attribute of the product itself
-  "my", "her", "him", "she", "he", "also", "likes", "give", "your", "personally",
-  "girlfriend", "boyfriend", "wife", "husband", "mom", "mother", "dad", "father", "sister", "brother", "son", "daughter",
-]);
+const SEARCH_INCLUDE = { variants: { where: { active: true }, orderBy: { createdAt: "asc" } }, category: true } as const;
 
-// messages asking what the store carries at all, rather than searching for something specific — must be
-// checked before running a keyword search, otherwise e.g. "What do you sell?" gets searched literally and
-// returns "No products matched that search."
-export const STORE_DISCOVERY_RE = /\b(what do you (sell|offer|have|stock)|what (products?|items?|categories?) do you (have|sell|offer|stock)|what (products?|items?|categories?) (are (available|there)|do you have)|show me (your|the) (products?|catalogue|catalog|store|items?)|what can i (buy|get|purchase)|what do you (guys )?have)\b/i;
+type CatalogueRow = Prisma.ProductGetPayload<{ include: typeof SEARCH_INCLUDE }>;
+
+type MatchQuality = "EXACT" | "ATTRIBUTE_UNAVAILABLE" | "PARTIAL" | "BUDGET_ONLY" | "NONE";
+interface Retrieval {
+  quality: MatchQuality;
+  topic: MergedTopic;
+  // already curated and hard-constraint-checked — every entry is a real catalogue record pinned to a variant that satisfies the constraints
+  matches: Selected<CatalogueRow>[];
+  totalMatches: number;
+  // for ATTRIBUTE_UNAVAILABLE: what was asked for but isn't offered, and what the matching products genuinely do offer
+  unmet?: { color?: string; size?: string };
+  offered?: { colors: string[]; sizes: string[] };
+  // for NONE with a budget: the lowest in-stock price among products excluded only for being above the ceiling
+  cheapestAboveBudget?: number;
+  currency?: string;
+}
 
 // "Tell me more about X" / "More details on X" — asks about ONE specific product by name, not a general
 // search; the captured group is the product name/reference text to resolve against the catalogue
@@ -132,112 +149,39 @@ const VIEW_CART_RE = /\b(what'?s? in my cart|show (?:me )?my cart|view (?:my )?c
 // as their shipping address).
 const INTENT_INTERRUPTION_RE = /\?|\b(something else|anything else|different one|instead|actually|change my mind|for (men|women|him|her|kids|boys|girls)|do you have|show me|what about|never ?mind)\b/i;
 
-interface SearchFilters { maxPrice?: number; minPrice?: number; keywords: string[] }
-
-// accumulated across turns on Conversation.assistedBuyingContext (reused across services since only one of
-// ShoppingFlowService/AssistedBuyingService is ever active per conversation, gated by shoppingState) so a
-// multi-turn refinement ("I need a shirt" / "something casual" / "preferably blue" / "under 1500") combines
-// into one search instead of each message overwriting the last, and "show me the first one" can resolve
-// against whatever was last shown
-interface ShoppingSearchContext {
-  filters: SearchFilters;
-  // gender/color are tracked SEPARATELY from filters.keywords (which only ever accumulates) because these two
-  // are "hard, replaceable" constraints: "do you have this in white?" then later "actually, black" must REPLACE
-  // white with black, not AND-require both (which would then match nothing, ever) — see extractReplaceableSlots
-  gender?: string;
-  color?: string;
-  lastResults: { productId: string; variantId: string; name: string }[];
-  comparedProductIds?: string[];
-  lastCartItem?: { productId: string; variantId: string; name: string };
-}
-
-// a later mention of one of these should REPLACE the earlier one in persisted context, not accumulate
-// alongside it — see extractReplaceableSlots. Deliberately a small, hand-picked list (not exhaustive) since a
-// false miss just falls back to ordinary keyword accumulation, which is safe, whereas a false hit would
-// silently drop a word from a genuine product-name/description match.
-const GENDER_WORDS: Record<string, string> = {
-  men: "men", man: "men", mens: "men", male: "men", boys: "men", boy: "men",
-  women: "women", woman: "women", womens: "women", female: "women", girls: "women", girl: "women",
-  unisex: "unisex", kids: "kids", kid: "kids", children: "kids",
-};
-const COLOR_WORDS = new Set([
-  "white", "black", "red", "blue", "green", "yellow", "pink", "purple", "orange", "brown",
-  "grey", "gray", "navy", "beige", "gold", "silver", "maroon", "cream", "tan", "olive", "turquoise", "magenta",
+const QUANTITY_NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const QUANTITY_FILLER = new Set([
+  "x", "pcs", "pc", "piece", "pieces", "pair", "pairs", "unit", "units", "nos", "qty", "quantity", "of", "them", "it", "please", "pls", "thanks",
+  "i", "ill", "id", "want", "need", "take", "get", "give", "me", "add", "make", "buy", "order", "like", "just", "only", "ok", "okay", "yes", "a", "an", "the", "to", "that", "is", "would", "can", "could", "have", "go", "with", "for", "and",
 ]);
 
-function extractReplaceableSlots(keywords: string[]): { gender?: string; color?: string; rest: string[] } {
-  let gender: string | undefined;
-  let color: string | undefined;
-  const rest: string[] = [];
-  for (const kw of keywords) {
-    if (!gender && GENDER_WORDS[kw]) { gender = GENDER_WORDS[kw]; continue; }
-    if (!color && COLOR_WORDS.has(kw)) { color = kw; continue; }
-    rest.push(kw);
-  }
-  return { gender, color, rest };
-}
-
-/** Deterministic (non-LLM) parsing for queries like "black shoes under 2500" or "jackets above 1000". */
-export function parseSearchQuery(text: string): SearchFilters {
-  let remaining = text.toLowerCase();
-  let maxPrice: number | undefined;
-  let minPrice: number | undefined;
-
-  const under = remaining.match(/(?:under|below|less than|cheaper than|within)\s*(?:rs\.?|inr|₹)?\s*(\d+)/);
-  if (under) { maxPrice = Number(under[1]); remaining = remaining.replace(under[0], " "); }
-  const over = remaining.match(/(?:over|above|more than)\s*(?:rs\.?|inr|₹)?\s*(\d+)/);
-  if (over) { minPrice = Number(over[1]); remaining = remaining.replace(over[0], " "); }
-
-  const keywords = remaining.split(/[^a-z0-9]+/).map((w) => w.trim()).filter((w) => w.length > 1 && !SEARCH_STOPWORDS.has(w));
-  return { maxPrice, minPrice, keywords };
-}
-
-// crude singular/plural normalization ("bags" <-> "bag") so a keyword also matches a product literally named
-// with the other form (e.g. a search for "shirts" still matches a product named "Black Premium Shirt") without
-// needing a real stemming library for this deterministic V1
-function normalizeSearchWord(word: string): string {
-  return word.toLowerCase().replace(/s$/, "");
-}
-
 /**
- * One AND-clause per keyword (each independently required — this is what fixes "black bag" matching a "Black
- * Premium Shirt": the shirt satisfies the "black" clause but has no "bag" anywhere, so the AND across both
- * keywords correctly excludes it). Each keyword is OR'd across name/description/brand/category-name, trying
- * both its literal form and its singular-normalized form, since Prisma's `contains` has no stemming.
- *
- * Deliberately does NOT hard-filter by resolving a keyword to a categoryId: a business's actual product→category
- * assignment can't be trusted to match what a customer calls something in conversation (e.g. a black shirt
- * filed under a generic "Fashion" category rather than "Shirts") — a hard filter would silently exclude a real
- * match instead of just deprioritizing it, which is worse than the original bug this replaced.
+ * Reads a reply to "How many would you like?". It is a quantity only when the message really is one ("2", "three pairs",
+ * "I'll take 3"). A message that merely CONTAINS a number — "pearl earrings under 1300", "size 8", "black one in 7" — is a
+ * new shopping request, never a quantity of 1300 / 8 / 7.
  */
-export function keywordAndClauses(keywords: string[]) {
-  return keywords.map((kw) => {
-    const variants = Array.from(new Set([kw, normalizeSearchWord(kw)]));
-    return {
-      OR: variants.flatMap((v) => [
-        { name: { contains: v, mode: "insensitive" as const } },
-        { description: { contains: v, mode: "insensitive" as const } },
-        { brand: { contains: v, mode: "insensitive" as const } },
-        { category: { name: { contains: v, mode: "insensitive" as const } } },
-      ]),
-    };
-  });
+function readQuantityReply(text: string): { quantity: number | null; otherWords: number; hasBudget: boolean } {
+  const parsed = parseSearchQuery(text);
+  const hasBudget = parsed.maxPrice !== undefined || parsed.minPrice !== undefined;
+  let quantity: number | null = null;
+  let otherWords = 0;
+  for (const token of text.toLowerCase().replace(/['’]/g, "").match(/[a-z]+|\d+/g) ?? []) {
+    const n = /^\d+$/.test(token) ? parseInt(token, 10) : QUANTITY_NUMBER_WORDS[token];
+    if (n !== undefined && quantity === null) quantity = n;
+    else if (!QUANTITY_FILLER.has(token)) otherWords += 1;
+  }
+  return { quantity, otherWords, hasBudget };
 }
 
-// thousands-grouped price string (WhatsApp text/captions render *bold*/_italic_ markdown, but list row titles/descriptions do not)
-// accepts Prisma's Decimal (product/variant prices) as well as plain number/string
-export function fmtMoney(amount: number | string | { toString(): string }, currency: string): string {
-  const n = Number(amount.toString());
-  return `${currency} ${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-}
+// the single persisted shopping state (filters, slots, last/shown results, last cart item) — shared with
+// AssistedBuyingService, see shopping-intelligence/shopping-context.ts. Accumulated across turns on
+// Conversation.assistedBuyingContext so a multi-turn refinement ("I need a shirt" / "something casual" /
+// "preferably blue" / "under 1500") combines into one search instead of each message overwriting the last,
+// and "show me the first one" can resolve against whatever was last shown
+type ShoppingSearchContext = ShoppingContext;
 
 const OUT_OF_STOCK_SUFFIX = " · Out of stock";
 
-export function formatVariantLabel(attributes: unknown): string | null {
-  if (!attributes || typeof attributes !== "object") return null;
-  const values = Object.values(attributes as Record<string, string>).filter(Boolean);
-  return values.length ? values.join(", ") : null;
-}
 
 /**
  * Deterministic WhatsApp shopping flow (menu → categories → products → variant → quantity → cart → checkout),
@@ -254,6 +198,7 @@ export class ShoppingFlowService {
     private readonly cart: CartService,
     private readonly orders: OrderService,
     private readonly signals: CustomerSignalService,
+    private readonly interpreter: ShoppingInterpreterService,
   ) {}
 
   async sendMainMenu(conversationId: string, businessId: string) {
@@ -271,22 +216,22 @@ export class ShoppingFlowService {
     const conversation = await this.prisma.conversation.findFirst({ where: { id: conversationId, businessId } });
     if (!conversation || conversation.escalated) return;
 
-    if (actionId === "menu_shop") return this.showShop(conversationId, businessId);
+    if (actionId === "menu_shop") return this.showShop(conversationId, businessId, undefined, conversation.assistedBuyingContext);
     if (actionId === "menu_cart") return this.showCart(conversationId, businessId, conversation.customerId);
     if (actionId === "menu_orders") return this.showOrders(conversationId, businessId, conversation.customerId);
-    if (actionId.startsWith("cat_")) return this.showProducts(conversationId, businessId, actionId.slice(4));
+    if (actionId.startsWith("cat_")) return this.showProducts(conversationId, businessId, actionId.slice(4), conversation.assistedBuyingContext);
     if (actionId.startsWith("prod_")) return this.showProductDetail(conversationId, businessId, actionId.slice(5), conversation.customerId);
     if (actionId.startsWith("variant_")) return this.askQuantity(conversationId, businessId, actionId.slice(8));
     // Smart Reply Suggestion buttons (gated by Business.smartRepliesEnabled) — attached to AI/deterministic
     // product cards; routed here exactly like every other button tap, so tapping one from an AI-driven
     // conversation seamlessly hands off into this same deterministic cart/browsing machinery
-    if (actionId.startsWith("quickadd_")) return this.quickAddToCart(conversationId, businessId, conversation.customerId, actionId.slice(9));
-    if (actionId.startsWith("similar_")) return this.showSimilarProducts(conversationId, businessId, actionId.slice(8));
+    if (actionId.startsWith("quickadd_")) return this.quickAddToCart(conversationId, businessId, conversation.customerId, actionId.slice(9), conversation.assistedBuyingContext);
+    if (actionId.startsWith("similar_")) return this.showSimilarProducts(conversationId, businessId, actionId.slice(8), conversation.assistedBuyingContext);
     if (actionId === "cart_checkout") return this.beginCheckout(conversationId, businessId, conversation.customerId);
     if (actionId === "cart_clear") return this.clearCart(conversationId, businessId, conversation.customerId);
     // "Keep Shopping" always returns to the top-level category list/full catalog, not the last-viewed
     // category — otherwise a customer who drilled into one category stays pinned there indefinitely
-    if (actionId === "nav_continue") return this.showShop(conversationId, businessId);
+    if (actionId === "nav_continue") return this.showShop(conversationId, businessId, undefined, conversation.assistedBuyingContext);
     if (actionId === "nav_viewcart") return this.showCart(conversationId, businessId, conversation.customerId);
     if (actionId === "pay_upi") return this.setPaymentMethod(conversationId, businessId, "UPI");
     if (actionId === "pay_cod") return this.setPaymentMethod(conversationId, businessId, "COD");
@@ -316,21 +261,17 @@ export class ShoppingFlowService {
     // fall through to the free-text AI assistant instead, so a customer can still describe what else they want
     // in natural language once they have items in their cart — the AI flow merges those cart items back in
     if (["MAIN_MENU", "BROWSING_CATEGORIES", "BROWSING_PRODUCTS", "VIEWING_PRODUCT"].includes(conversation.shoppingState)) {
-      const context = conversation.assistedBuyingContext as unknown as ShoppingSearchContext | null;
-      await this.search(conversationId, businessId, conversation.customerId, text, context, conversation.activeProductId ?? null);
+      await this.search(conversationId, businessId, conversation.customerId, text, conversation.assistedBuyingContext, conversation.activeProductId ?? null);
       return true;
     }
     return false;
   }
 
-  /** Resolves "show me the first one"/"the second one" etc. against the product list from the customer's own last search — checked before treating those words as (nonsensical) literal search keywords. */
+  /** Resolves "show me the first one"/"the second one"/"the last one" etc. against the product list from the customer's own last search — checked before treating those words as (nonsensical) literal search keywords. */
   private resolveOrdinalReference(text: string, context: ShoppingSearchContext | null): { productId: string; variantId: string; name: string } | null {
     if (!context?.lastResults?.length) return null;
-    const lower = text.toLowerCase();
-    for (const [word, idx] of Object.entries(ORDINAL_WORDS)) {
-      if (idx < context.lastResults.length && new RegExp(`\\b${word}\\b`).test(lower)) return context.lastResults[idx];
-    }
-    return null;
+    const idx = resolveOrdinalIndex(text, context.lastResults.length);
+    return idx === null ? null : context.lastResults[idx];
   }
 
   /** Best-matching product among candidates that share some keyword overlap — used whenever a customer's own
@@ -368,7 +309,7 @@ export class ShoppingFlowService {
    * resolves BOTH named products and sends a grounded, template-only summary of their real catalogue facts
    * (name/price/stock/description) — never an invented claim about specs the catalogue doesn't have. Stores
    * the compared set so a follow-up ("Which is cheaper?") can resolve against it. */
-  private async tryCompareProducts(conversationId: string, businessId: string, text: string): Promise<boolean> {
+  private async tryCompareProducts(conversationId: string, businessId: string, text: string, existingContext: ShoppingSearchContext | null = null): Promise<boolean> {
     if (!COMPARISON_RE.test(text)) return false;
     const remainder = text.replace(STRIP_COMPARISON_PREFIX_RE, "").replace(/[?!.]+$/, "").trim();
     const segments = remainder.split(SPLIT_COMPARISON_SEGMENTS_RE).map((s) => s.replace(/^\s*the\s+/i, "").trim()).filter(Boolean);
@@ -391,11 +332,10 @@ export class ShoppingFlowService {
     const lines = withVariant.map((p) => `*${p.name}* — ${fmtMoney(p.variants[0].price as never, p.variants[0].currency)}${p.variants[0].inventory === 0 ? " (out of stock)" : ""}${p.description ? `\n_${p.description}_` : ""}`);
     await this.conversations.sendMessage(conversationId, businessId, lines.join("\n\n"));
 
-    const context: ShoppingSearchContext = {
-      filters: { keywords: [] },
+    const context = nextContext(existingContext, {
       lastResults: withVariant.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })),
       comparedProductIds: withVariant.map((p) => p.id),
-    };
+    });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
     return true;
   }
@@ -460,7 +400,7 @@ export class ShoppingFlowService {
 
   /** "Is there anything similar but cheaper?" — finds other PUBLISHED products in the same category as the
    * active product, priced below it, ordered closest-to-original-price first. */
-  private async trySimilarButCheaper(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
+  private async trySimilarButCheaper(conversationId: string, businessId: string, text: string, activeProductId: string | null, existingContext: ShoppingSearchContext | null = null): Promise<boolean> {
     if (!activeProductId || !SIMILAR_RE.test(text) || !CHEAPER_RE.test(text)) return false;
 
     const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId }, include: { variants: { where: { active: true }, orderBy: { price: "asc" }, take: 1 } } });
@@ -481,7 +421,7 @@ export class ShoppingFlowService {
     await this.conversations.sendList(conversationId, businessId, `Here ${matches.length === 1 ? "is a similar option" : "are some similar options"} that cost less:`, "View", [
       { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: fmtMoney(p.variants[0].price, p.variants[0].currency) })) },
     ]);
-    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    const context = nextContext(existingContext, { lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
     return true;
   }
@@ -512,14 +452,14 @@ export class ShoppingFlowService {
     await this.conversations.sendList(conversationId, businessId, `✨ Here ${matches.length === 1 ? "is a more premium option" : "are some more premium options"}:`, "View", [
       { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: fmtMoney(p.variants[0].price, p.variants[0].currency) })) },
     ]);
-    const upgradedContext: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    const upgradedContext = nextContext(context, { lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: upgradedContext as unknown as Prisma.InputJsonValue } });
     return true;
   }
 
   /** "What else would go well with this?" — merchant-configured CROSS_SELL/UPSELL companions (ProductRelation)
    * for the active product, never an invented pairing. */
-  private async tryCrossSell(conversationId: string, businessId: string, text: string, activeProductId: string | null): Promise<boolean> {
+  private async tryCrossSell(conversationId: string, businessId: string, text: string, activeProductId: string | null, existingContext: ShoppingSearchContext | null = null): Promise<boolean> {
     if (!activeProductId || !CROSS_SELL_RE.test(text.toLowerCase())) return false;
 
     const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId } });
@@ -539,7 +479,7 @@ export class ShoppingFlowService {
     await this.conversations.sendList(conversationId, businessId, `🤝 Goes well with *${product.name}*:`, "View", [
       { rows: matches.map((r) => ({ id: `prod_${r.relatedProduct.id}`, title: r.relatedProduct.name, description: fmtMoney(r.relatedProduct.variants[0].price, r.relatedProduct.variants[0].currency) })) },
     ]);
-    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((r) => ({ productId: r.relatedProduct.id, variantId: r.relatedProduct.variants[0].id, name: r.relatedProduct.name })) };
+    const context = nextContext(existingContext, { lastResults: matches.map((r) => ({ productId: r.relatedProduct.id, variantId: r.relatedProduct.variants[0].id, name: r.relatedProduct.name })) });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
     return true;
   }
@@ -580,7 +520,7 @@ export class ShoppingFlowService {
     });
     await this.conversations.sendMessage(conversationId, businessId, `🏆 My top ${picks.length} pick${picks.length === 1 ? "" : "s"}:\n${lines.join("\n")}`);
 
-    const narrowed: ShoppingSearchContext = { filters: context.filters, lastResults: picks };
+    const narrowed = nextContext(context, { lastResults: picks });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { assistedBuyingContext: narrowed as unknown as Prisma.InputJsonValue } });
     return true;
   }
@@ -611,7 +551,7 @@ export class ShoppingFlowService {
    * cart state, and remembers it as the "last cart item touched" for pronoun follow-ups ("add two of them",
    * "actually make that three", "remove one") — all without changing shoppingState away from a free-text-
    * routable state, so those follow-ups keep reaching search() on subsequent turns. */
-  private async mutateCartItem(conversationId: string, businessId: string, customerId: string, item: { productId: string; variantId: string; name: string }, mode: "add" | "set", amount: number): Promise<boolean> {
+  private async mutateCartItem(conversationId: string, businessId: string, customerId: string, item: { productId: string; variantId: string; name: string }, mode: "add" | "set", amount: number, prevContext: ShoppingSearchContext | null = null): Promise<boolean> {
     const activeCart = await this.cart.getOrCreateActive(conversationId, businessId, customerId);
     try {
       const updated = mode === "add"
@@ -627,11 +567,13 @@ export class ShoppingFlowService {
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "Could not update your cart.");
       // even though this attempt was rejected (e.g. a stock-limit error), still remember which product it was
       // about — otherwise a follow-up quantity-only correction ("okay, give me 5") has nothing to apply to
-      const rejectedContext: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: [], lastCartItem: item };
+      const rejectedContext = nextContext(prevContext, { lastCartItem: item });
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeProductId: item.productId, assistedBuyingContext: rejectedContext as unknown as Prisma.InputJsonValue } });
       return true;
     }
-    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: [], lastCartItem: item };
+    // the cart itself lives in CartService; only the search context is kept here — carried forward (not wiped)
+    // so "the second one" / "under 1,500" / "other options" still work right after something was added
+    const context = nextContext(prevContext, { lastCartItem: item });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeProductId: item.productId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
     return true;
   }
@@ -641,7 +583,7 @@ export class ShoppingFlowService {
    * confirmation message, cart totals, and follow-up "add two more"/"make it 3" free-text corrections all
    * behave identically to the existing AI free-text add-to-cart path — this is genuinely the same action, just
    * reached via a tap instead of typed text. */
-  private async quickAddToCart(conversationId: string, businessId: string, customerId: string, variantId: string) {
+  private async quickAddToCart(conversationId: string, businessId: string, customerId: string, variantId: string, rawContext: unknown = null) {
     const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true }, include: { product: true } });
     if (!variant) {
       await this.conversations.sendMessage(conversationId, businessId, "Sorry, that option is no longer available.");
@@ -651,13 +593,13 @@ export class ShoppingFlowService {
       await this.conversations.sendMessage(conversationId, businessId, "😔 That option is currently out of stock.");
       return;
     }
-    await this.mutateCartItem(conversationId, businessId, customerId, { productId: variant.productId, variantId: variant.id, name: variant.product.name }, "add", 1);
+    await this.mutateCartItem(conversationId, businessId, customerId, { productId: variant.productId, variantId: variant.id, name: variant.product.name }, "add", 1, readShoppingContext(rawContext));
   }
 
   /** Smart Reply "🔎 See Similar" button — other PUBLISHED products in the same category, excluding the
    * product itself. Deliberately a plain same-category listing (no price-direction filter) rather than
    * duplicating trySimilarButCheaper/tryMorePremium's free-text-triggered price-relative variants above. */
-  private async showSimilarProducts(conversationId: string, businessId: string, productId: string) {
+  private async showSimilarProducts(conversationId: string, businessId: string, productId: string, rawContext: unknown = null) {
     const product = await this.prisma.product.findFirst({ where: { id: productId, businessId } });
     if (!product?.categoryId) {
       await this.conversations.sendMessage(conversationId, businessId, "😕 I don't have similar products to suggest for that item.");
@@ -678,7 +620,7 @@ export class ShoppingFlowService {
     await this.conversations.sendList(conversationId, businessId, `🔎 Similar to *${product.name}*:`, "View", [
       { rows: matches.map((p) => ({ id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(p.variants[0].price, p.variants[0].currency)}${p.variants[0].inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` })) },
     ]);
-    const context: ShoppingSearchContext = { filters: { keywords: [] }, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
+    const context = nextContext(readShoppingContext(rawContext), { lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) });
     await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: product.categoryId, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
   }
 
@@ -691,7 +633,7 @@ export class ShoppingFlowService {
     if (qtyMatch) {
       if (!context?.lastCartItem) return false;
       const qty = qtyMatch[1] ? (wordToNumber(qtyMatch[1]) ?? 1) : 1; // group 1 is unset when "another" (not a number word) matched — that always means +1
-      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "add", qty);
+      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "add", qty, context);
     }
 
     const namedWithQtyMatch = text.match(ADD_NAMED_WITH_QTY_RE);
@@ -711,7 +653,7 @@ export class ShoppingFlowService {
     const product = this.bestKeywordMatch(candidates, keywords);
     if (!product.variants[0]) return false;
 
-    return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", explicitQty);
+    return this.mutateCartItem(conversationId, businessId, customerId, { productId: product.id, variantId: product.variants[0].id, name: product.name }, "add", explicitQty, context);
   }
 
   /** "Actually make that three" / "No, just 3" / "Okay, give me 5" / "Can I get 10 instead?" — an ABSOLUTE
@@ -722,7 +664,7 @@ export class ShoppingFlowService {
     if (!match || !context?.lastCartItem) return false;
     const qty = wordToNumber(match[1] ?? match[2]);
     if (qty === null) return false;
-    return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", qty);
+    return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", qty, context);
   }
 
   /** "Remove one" (decrements the last-touched cart item's quantity) vs "Remove the watch" (drops a NAMED
@@ -744,7 +686,7 @@ export class ShoppingFlowService {
       if (!context?.lastCartItem) return false;
       const item = activeCart.items.find((i) => i.variantId === context.lastCartItem!.variantId);
       if (!item) return false;
-      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", Math.max(0, item.quantity - asNumber));
+      return this.mutateCartItem(conversationId, businessId, customerId, context.lastCartItem, "set", Math.max(0, item.quantity - asNumber), context);
     }
 
     // named removal — find the matching cart line by product name rather than requiring the exact string
@@ -754,7 +696,7 @@ export class ShoppingFlowService {
       await this.conversations.sendMessage(conversationId, businessId, `I couldn't find "${captured}" in your cart.`);
       return true;
     }
-    return this.mutateCartItem(conversationId, businessId, customerId, { productId: item.variant.product.id, variantId: item.variantId, name: item.variant.product.name }, "set", 0);
+    return this.mutateCartItem(conversationId, businessId, customerId, { productId: item.variant.product.id, variantId: item.variantId, name: item.variant.product.name }, "set", 0, context);
   }
 
   /** "What's in my cart?" / "Show me my cart again" / "How much is everything?" — the existing cart summary
@@ -765,7 +707,10 @@ export class ShoppingFlowService {
     return true;
   }
 
-  private async search(conversationId: string, businessId: string, customerId: string, text: string, existingContext: ShoppingSearchContext | null, activeProductId: string | null = null) {
+  private async search(conversationId: string, businessId: string, customerId: string, text: string, rawContext: unknown, activeProductId: string | null = null) {
+    // normalize whichever context shape is persisted (this engine's, or AssistedBuyingService's older one)
+    const existingContext = readShoppingContext(rawContext);
+
     // an ordinal reference to a just-shown result ("show me the first one") takes priority over a fresh search —
     // otherwise "first"/"one" get treated as nonsensical literal search keywords and find nothing
     const referenced = this.resolveOrdinalReference(text, existingContext);
@@ -782,130 +727,415 @@ export class ShoppingFlowService {
     if (await this.tryTopNRecommendations(conversationId, businessId, text, existingContext)) return;
     if (await this.tryRecommendationPick(conversationId, businessId, customerId, text, existingContext, activeProductId)) return;
     if (await this.tryProductDetailsByName(conversationId, businessId, customerId, text)) return;
-    if (await this.tryCompareProducts(conversationId, businessId, text)) return;
+    if (await this.tryCompareProducts(conversationId, businessId, text, existingContext)) return;
     if (await this.tryProductFollowUp(conversationId, businessId, text, activeProductId)) return;
-    if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId)) return;
+    if (await this.trySimilarButCheaper(conversationId, businessId, text, activeProductId, existingContext)) return;
     if (await this.tryMorePremium(conversationId, businessId, text, existingContext, activeProductId)) return;
-    if (await this.tryCrossSell(conversationId, businessId, text, activeProductId)) return;
+    if (await this.tryCrossSell(conversationId, businessId, text, activeProductId, existingContext)) return;
 
     // "What do you sell?" etc. is store/catalogue discovery, not a product search — answering it by searching
     // the catalogue for the literal words in the question just returns "No products matched that search."
-    if (STORE_DISCOVERY_RE.test(text)) return this.showShop(conversationId, businessId);
+    if (STORE_DISCOVERY_RE.test(text)) return this.showShop(conversationId, businessId, undefined, rawContext);
 
-    const parsed = parseSearchQuery(text);
-    // merge this turn's constraints onto whatever's already been gathered this conversation — a customer
-    // refining a search across several messages ("I need a shirt" / "something casual" / "preferably blue" /
-    // "under 1500") means all four together, not four independent, mutually-forgetful searches. gender/color
-    // are REPLACEABLE slots (a later "actually, black" overwrites "white" rather than AND-requiring both, which
-    // would then match nothing ever) — free keywords keep accumulating as before.
-    const priorFilters = existingContext?.filters;
-    const { gender: newGender, color: newColor, rest: newFreeKeywords } = extractReplaceableSlots(parsed.keywords);
-    const priorFreeKeywords = priorFilters ? extractReplaceableSlots(priorFilters.keywords).rest : [];
-    const gender = newGender ?? existingContext?.gender;
-    const color = newColor ?? existingContext?.color;
-    const filters: SearchFilters = {
-      keywords: Array.from(new Set([...priorFreeKeywords, ...newFreeKeywords])),
-      maxPrice: parsed.maxPrice ?? priorFilters?.maxPrice,
-      minPrice: parsed.minPrice ?? priorFilters?.minPrice,
-    };
-    // the actual query/ranking keyword list additionally includes the current gender/color slot values —
-    // kept separate from `filters.keywords` so a replaced slot value never lingers in the persisted context
-    const effectiveKeywords = [...filters.keywords, ...(gender ? [gender] : []), ...(color ? [color] : [])];
+    try {
+      await this.interpretAndSearch(conversationId, businessId, text, existingContext, activeProductId);
+    } catch (err) {
+      // a failed lookup is NOT "no match" — say so, keep the context and the cart untouched, never invent results
+      this.logger.error(`Shopping search failed for conversation ${conversationId}`, err instanceof Error ? err.stack : String(err));
+      captureException(err, { conversationId, businessId, flow: "shopping-search" });
+      await this.conversations.sendMessage(conversationId, businessId, "Sorry — I'm having trouble searching our catalogue right now. Please try again in a moment; your cart is safe.");
+    }
+  }
 
-    const products = await this.prisma.product.findMany({
+  /** Reads the message against the persisted context, then routes: variant question, alternatives/similar, cheaper, clarification, or a (possibly refined) catalogue search. */
+  private async interpretAndSearch(conversationId: string, businessId: string, text: string, existingContext: ShoppingSearchContext | null, activeProductId: string | null) {
+    const interp = await this.interpreter.interpret({ conversationId, businessId, text, context: existingContext, activeProductId });
+
+    if (interp.intent === "VARIANT_REQUEST" && activeProductId && (await this.tryVariantRequest(conversationId, businessId, interp, activeProductId))) return;
+    if ((interp.intent === "ALTERNATIVES" || interp.intent === "SIMILAR") && (await this.tryAlternatives(conversationId, businessId, interp, existingContext, activeProductId))) return;
+    if (interp.wantsCheaper && interp.terms.length === 0 && (await this.tryCheaper(conversationId, businessId, interp, existingContext, activeProductId))) return;
+
+    if (interp.intent === "SELECT_PRODUCT") {
+      await this.conversations.sendMessage(conversationId, businessId, "I don't have a list in front of us yet — tell me what you're looking for and I'll show you some options to pick from.");
+      return;
+    }
+    // genuinely ambiguous: ask ONE useful question rather than guessing or dumping the catalogue
+    if (interp.intent === "UNCLEAR") {
+      await this.conversations.sendMessage(conversationId, businessId, interp.clarification ?? "What kind of product are you looking for?");
+      return;
+    }
+
+    const merged = mergeTopic(existingContext, interp);
+    // an ambiguous topic switch ("pearl earrings" right after "emerald saree", no explicit request words) that
+    // finds nothing when combined with the old terms is retried as a fresh topic before any relaxation
+    const recover = interp.ambiguousTopic && !merged.reset && existingContext ? mergeTopic(existingContext, { ...interp, topicRelation: "NEW_TOPIC" }) : undefined;
+    const result = await this.retrieve(businessId, merged, interp, { recover });
+    await this.presentResult(conversationId, businessId, result, existingContext, { clearActiveProduct: !!activeProductId });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Retrieval: structured hard filters (budget/stock enforced in the query AND re-checked on the fetched
+  // records), keyword retrieval, model-proposed broadening terms, then a controlled relaxation ladder that only
+  // ever loosens SOFT preferences — never the price ceiling or availability — and always says which it did.
+  // ---------------------------------------------------------------------------------------------------------
+
+  private curate(kept: Selected<CatalogueRow>[], topic: MergedTopic): Selected<CatalogueRow>[] {
+    // a broad ask (budget/occasion only) should span the catalogue; a specific ask keeps pure relevance order
+    return topic.filters.keywords.length === 0 ? selectDiverse(kept, CURATED_LIMIT) : kept.slice(0, CURATED_LIMIT);
+  }
+
+  /** Level 0 — every keyword (incl. colour/gender slots) AND-required, exactly as before, plus the hard variant filter. Null when nothing qualifies. */
+  private async queryExact(businessId: string, topic: MergedTopic, excludeIds: string[] = []): Promise<Retrieval | null> {
+    const { maxPrice, minPrice } = topic.filters;
+    const rows = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED",
         // every keyword must independently match somewhere (AND across keywords) — a product matching only
         // "black" when "bag" was also required must not be returned
-        ...(effectiveKeywords.length ? { AND: keywordAndClauses(effectiveKeywords) } : {}),
+        ...(topic.effectiveKeywords.length ? { AND: keywordAndClauses(topic.effectiveKeywords) } : {}),
+        ...(excludeIds.length ? { id: { notIn: excludeIds } } : {}),
+        ...hardVariantFilter(maxPrice, minPrice),
       },
-      include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
+      include: SEARCH_INCLUDE,
       take: 30,
     });
+    const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+    if (!hard.kept.length) return null;
 
-    let matches = products.filter((p) => p.variants[0]);
-    if (filters.maxPrice !== undefined) matches = matches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
-    if (filters.minPrice !== undefined) matches = matches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
+    const ranked = rankProducts(hard.kept, topic.effectiveKeywords, topic.expandedTerms);
+    if (topic.size) {
+      const { matching } = splitByAttributes(ranked, { size: topic.size });
+      if (!matching.length) {
+        return { quality: "ATTRIBUTE_UNAVAILABLE", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length, unmet: { size: topic.size }, offered: offeredAttributes(ranked.flatMap((s) => s.eligible)) };
+      }
+      return { quality: "EXACT", topic, matches: this.curate(matching, topic), totalMatches: matching.length };
+    }
+    return { quality: "EXACT", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length };
+  }
 
-    // nothing satisfied every keyword — common for occasion/vibe questions ("something for a wedding") where
-    // no single product literally contains every word. Relax to whichever products match AT LEAST ONE keyword,
-    // ranked by how many they match, instead of a dead "no products matched" end — but only when there were
-    // multiple keywords to begin with, so a genuine single-attribute miss (e.g. a color nobody stocks) still
-    // correctly reports no match rather than surfacing unrelated products
-    let isExactMatch = true;
-    if (!matches.length && effectiveKeywords.length > 1) {
-      const relaxed = await this.prisma.product.findMany({
-        where: { businessId, status: "PUBLISHED", OR: keywordAndClauses(effectiveKeywords).flatMap((clause) => clause.OR) },
-        include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 }, category: true },
+  private async retrieve(businessId: string, topic: MergedTopic, interp: ShoppingInterpretation, opts: { recover?: MergedTopic; excludeIds?: string[] } = {}): Promise<Retrieval> {
+    const exclude = opts.excludeIds ?? [];
+    const { maxPrice, minPrice } = topic.filters;
+
+    const exact = await this.queryExact(businessId, topic, exclude);
+    if (exact) return exact;
+    if (opts.recover) {
+      const alt = await this.queryExact(businessId, opts.recover, exclude);
+      if (alt) return alt;
+    }
+
+    // Level 1 — a requested colour is a soft attribute: look for the product itself and check the REAL variant
+    // attributes (colour is often only on the variant, which the text query can't see). If the product exists
+    // but not in that colour, say so and offer what it genuinely comes in.
+    const freeKeywords = [...topic.filters.keywords, ...(topic.gender ? [topic.gender] : [])];
+    if (topic.color && freeKeywords.length) {
+      const rows = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", AND: keywordAndClauses(freeKeywords), ...(exclude.length ? { id: { notIn: exclude } } : {}), ...hardVariantFilter(maxPrice, minPrice) },
+        include: SEARCH_INCLUDE,
         take: 30,
       });
-      let relaxedMatches = relaxed.filter((p) => p.variants[0]);
-      if (filters.maxPrice !== undefined) relaxedMatches = relaxedMatches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
-      if (filters.minPrice !== undefined) relaxedMatches = relaxedMatches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
-      if (relaxedMatches.length) {
-        const keywordHits = (p: (typeof relaxedMatches)[number]) => {
-          const haystack = `${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase();
-          return effectiveKeywords.filter((kw) => haystack.includes(kw)).length;
-        };
-        matches = relaxedMatches.sort((a, b) => keywordHits(b) - keywordHits(a));
-        isExactMatch = false;
+      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+      if (hard.kept.length) {
+        const ranked = rankProducts(hard.kept, freeKeywords, topic.expandedTerms);
+        const { matching } = splitByAttributes(ranked, { color: topic.color, size: topic.size });
+        if (matching.length) return { quality: "EXACT", topic, matches: this.curate(matching, topic), totalMatches: matching.length };
+        return { quality: "ATTRIBUTE_UNAVAILABLE", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length, unmet: { color: topic.color }, offered: offeredAttributes(ranked.flatMap((s) => s.eligible)) };
       }
     }
 
-    // still nothing, but a budget was stated — a generic occasion word like "gift" alone isn't a real
-    // catalogue attribute, so failing to literally match it shouldn't dead-end and wipe out an otherwise
-    // useful budget constraint (e.g. "a gift under 3000" with no matching "gift" tag anywhere). Falls back to
-    // browsing everything within budget rather than "no products matched"; a genuine attribute miss with NO
-    // budget given (e.g. an unstocked colour) still correctly hard-fails below.
-    if (!matches.length && (filters.maxPrice !== undefined || filters.minPrice !== undefined)) {
-      const budgetOnly = await this.prisma.product.findMany({
-        where: { businessId, status: "PUBLISHED" },
-        include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
+    // Level 2 — occasion/vibe asks rarely have one product literally containing every word: relax to products
+    // matching AT LEAST ONE free keyword (or a model-proposed broadening term), ranked by overlap. Only the free
+    // keywords are used — a lone colour/gender word must never pull in unrelated product types.
+    const relaxedTerms = [...topic.filters.keywords, ...topic.expandedTerms];
+    if (topic.filters.keywords.length > 1 || topic.expandedTerms.length > 0) {
+      const rows = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", OR: keywordAndClauses(relaxedTerms).flatMap((clause) => clause.OR), ...(exclude.length ? { id: { notIn: exclude } } : {}), ...hardVariantFilter(maxPrice, minPrice) },
+        include: SEARCH_INCLUDE,
         take: 30,
       });
-      let budgetMatches = budgetOnly.filter((p) => p.variants[0]);
-      if (filters.maxPrice !== undefined) budgetMatches = budgetMatches.filter((p) => Number(p.variants[0].price) <= filters.maxPrice!);
-      if (filters.minPrice !== undefined) budgetMatches = budgetMatches.filter((p) => Number(p.variants[0].price) >= filters.minPrice!);
-      if (budgetMatches.length) {
-        matches = budgetMatches;
-        isExactMatch = false;
+      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+      if (hard.kept.length) {
+        const ranked = rankProducts(hard.kept, topic.filters.keywords, topic.expandedTerms);
+        return { quality: "PARTIAL", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length };
       }
     }
-    matches = matches.slice(0, MAX_LIST_ROWS);
 
-    if (!matches.length) {
-      await this.conversations.sendButtons(conversationId, businessId, "Hmm, I couldn't find anything matching that — want to try a different search?", [{ id: "menu_shop", title: "🛍️ Shop" }]);
-      // reset to IDLE (and drop the accumulated context) so a dead-end search doesn't strand the customer, or
-      // silently keep filtering later turns by constraints that just proved to match nothing
-      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "IDLE", assistedBuyingContext: Prisma.JsonNull } });
+    // Level 3 — an occasion/vibe-only ask ("a gift under 3000") names no catalogue attribute at all, so failing
+    // to literally match it shouldn't wipe out a useful budget: browse what's in budget, diversified. NEVER done
+    // when the customer named a real product type ("pearl earrings under 1500") — that's an honest no-match.
+    const hasBudget = maxPrice !== undefined || minPrice !== undefined;
+    if (hasBudget && coreTermsOf(topic.filters.keywords).length === 0) {
+      const rows = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", ...(exclude.length ? { id: { notIn: exclude } } : {}), ...hardVariantFilter(maxPrice, minPrice) },
+        include: SEARCH_INCLUDE,
+        take: 30,
+      });
+      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+      if (hard.kept.length) {
+        const ranked = rankProducts(hard.kept, topic.filters.keywords, topic.expandedTerms);
+        return { quality: "BUDGET_ONLY", topic, matches: selectDiverse(ranked, CURATED_LIMIT), totalMatches: ranked.length };
+      }
+    }
+
+    // Level 4 — honest no-match. When a budget was set, find out whether the product exists only ABOVE it, so the
+    // reply can say "the lowest I have starts at X" without ever presenting an over-budget product as a result.
+    let cheapestAboveBudget: number | undefined;
+    let currency: string | undefined;
+    if (maxPrice !== undefined && interp.intent !== "UNCLEAR") {
+      const rows = await this.prisma.product.findMany({
+        where: { businessId, status: "PUBLISHED", ...(topic.effectiveKeywords.length ? { AND: keywordAndClauses(topic.effectiveKeywords) } : {}), ...hardVariantFilter(undefined, undefined) },
+        include: SEARCH_INCLUDE,
+        take: 30,
+      });
+      const diag = applyHardConstraints(rows ?? [], { maxPrice });
+      cheapestAboveBudget = diag.cheapestAboveBudget;
+      currency = rows?.[0]?.variants?.[0]?.currency;
+    }
+    return { quality: "NONE", topic, matches: [], totalMatches: 0, cheapestAboveBudget, currency };
+  }
+
+  private rowDescription(s: Selected<CatalogueRow>, topic: MergedTopic): string {
+    const reason = buildReason(s, { maxPrice: topic.filters.maxPrice, terms: topic.effectiveKeywords, color: topic.color });
+    return `${fmtMoney(s.variant.price as never, s.variant.currency)}${reason ? ` · ${reason}` : ""}`;
+  }
+
+  private budgetNote(topic: MergedTopic, currency = "INR"): string {
+    return topic.filters.maxPrice !== undefined ? ` within ${fmtMoney(topic.filters.maxPrice, currency)}` : "";
+  }
+
+  /** Sends the result with a header that states honestly what kind of match it is, and persists the merged topic + the exact products shown. */
+  private async presentResult(conversationId: string, businessId: string, r: Retrieval, existing: ShoppingContext | null, opts: { clearActiveProduct?: boolean } = {}) {
+    const topic = r.topic;
+    const label = [...topic.filters.keywords, ...(topic.gender ? [topic.gender] : [])].join(" ");
+
+    if (r.quality === "NONE") {
+      const budget = topic.filters.maxPrice;
+      const wanted = [...topic.filters.keywords, ...(topic.gender ? [topic.gender] : []), ...(topic.color ? [topic.color] : [])].join(" ") || "that";
+      const body = r.cheapestAboveBudget !== undefined && budget !== undefined
+        ? `I don't have anything for "${wanted}" within ${fmtMoney(budget, r.currency ?? "INR")}. The lowest-priced option I have starts at ${fmtMoney(r.cheapestAboveBudget, r.currency ?? "INR")} — want me to look at a higher budget?`
+        : `I couldn't find anything matching "${wanted}"${budget !== undefined ? ` within ${fmtMoney(budget, r.currency ?? "INR")}` : ""} right now. Try a different product type, or browse by category.`;
+      await this.conversations.sendButtons(conversationId, businessId, body, [{ id: "menu_shop", title: "🛍️ Shop" }]);
+      // keep browsing state (so the customer can simply refine) and the previous context; only a brand-new topic's own
+      // request is remembered, so "under 5000" can then loosen exactly that request
+      await this.prisma.conversation.update({
+        where: { id: conversationId },
+        data: {
+          shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null,
+          ...(topic.reset ? { assistedBuyingContext: this.contextFor(existing, topic, [], r) as unknown as Prisma.InputJsonValue } : {}),
+        },
+      });
       return;
     }
 
-    const header = isExactMatch
-      ? (matches.length === 1 ? "Yes! I found one option that matches what you're looking for:" : `Yes! I found ${matches.length} options that match what you're looking for:`)
-      : `Nothing matched exactly, but here ${matches.length === 1 ? "is an option" : "are a few options"} that might work:`;
+    const n = r.matches.length;
+    const budget = this.budgetNote(topic, r.matches[0].variant.currency);
+    const more = r.totalMatches > n ? ` (say "other options" to see more)` : "";
+    let header: string;
+    if (r.quality === "EXACT") {
+      header = `${n === 1 ? "Yes! I found one option that matches what you're looking for" : `Yes! I found ${n} options that match what you're looking for`}${budget}${more}:`;
+    } else if (r.quality === "ATTRIBUTE_UNAVAILABLE") {
+      const colour = r.unmet?.color;
+      const offered = colour ? r.offered?.colors : r.offered?.sizes;
+      const what = colour ? `in ${colour}` : `in size ${r.unmet?.size}`;
+      header = `Sorry, I don't have ${label || "that"} ${what} right now.${offered?.length ? ` It comes in: ${offered.join(", ")}.` : ""} Here ${n === 1 ? "is an option" : "are some options"} in other ${colour ? "colours" : "sizes"}${budget}:`;
+    } else if (r.quality === "BUDGET_ONLY") {
+      header = `Nothing matched exactly, but here ${n === 1 ? "is a pick" : "are a few picks"}${topic.occasion ? ` for a ${topic.occasion}` : ""}${budget}:`;
+    } else {
+      header = `Nothing matched exactly, but here ${n === 1 ? "is an option" : "are a few options"} that might work${budget}:`;
+    }
+
     await this.conversations.sendList(conversationId, businessId, header, "View", [
-      { rows: matches.map((p) => {
-        const v = p.variants[0];
-        return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${v.inventory === 0 ? OUT_OF_STOCK_SUFFIX : ""}` };
-      }) },
+      { rows: r.matches.map((s) => ({ id: `prod_${s.product.id}`, title: s.product.name, description: this.rowDescription(s, topic) })) },
     ]);
-    const context: ShoppingSearchContext = { filters, gender, color, lastResults: matches.map((p) => ({ productId: p.id, variantId: p.variants[0].id, name: p.name })) };
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null, assistedBuyingContext: context as unknown as Prisma.InputJsonValue } });
+
+    const lastResults = r.matches.map((s) => ({ productId: s.product.id, variantId: s.variant.id, name: s.product.name }));
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      // a list means no single product is "in view" any more, so a stale activeProductId can't mis-anchor "similar ones"/"more premium"
+      data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: null, ...(opts.clearActiveProduct ? { activeProductId: null } : {}), assistedBuyingContext: this.contextFor(existing, topic, lastResults, r) as unknown as Prisma.InputJsonValue },
+    });
   }
 
-  private async showShop(conversationId: string, businessId: string, categoryId?: string) {
-    if (categoryId) return this.showProducts(conversationId, businessId, categoryId);
+  /** Builds the context to persist for a merged topic: the topic's own fields (an unavailable colour/size is dropped, not remembered), what was shown, and — carried over — the last cart item. */
+  private contextFor(existing: ShoppingContext | null, topic: MergedTopic, lastResults: ShoppingContext["lastResults"], r?: Retrieval): ShoppingContext {
+    const base = topic.reset ? null : existing;
+    const shown = Array.from(new Set([...(base?.shownProductIds ?? []), ...lastResults.map((x) => x.productId)]));
+    return nextContext(existing, {
+      filters: topic.filters,
+      gender: topic.gender, color: r?.unmet?.color ? undefined : topic.color, size: r?.unmet?.size ? undefined : topic.size,
+      occasion: topic.occasion, recipient: topic.recipient, style: topic.style, material: topic.material, expandedTerms: topic.expandedTerms,
+      lastResults, shownProductIds: shown,
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Follow-up handlers driven by the structured interpretation
+  // ---------------------------------------------------------------------------------------------------------
+
+  /** "Do you have this in size L?" / "does it come in red?" — answered strictly from the viewed product's real variants. */
+  private async tryVariantRequest(conversationId: string, businessId: string, interp: ShoppingInterpretation, activeProductId: string): Promise<boolean> {
+    const product = await this.prisma.product.findFirst({ where: { id: activeProductId, businessId, status: "PUBLISHED" }, include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" } } } });
+    if (!product?.variants.length) return false;
+
+    const { color, size } = interp;
+    // colour can also live in the product's own name/description (a single-variant "Black Strappy Heels") rather than a variant attribute
+    const textHasColor = !!color && `${product.name} ${product.description ?? ""}`.toLowerCase().includes(color);
+    const matches = product.variants.filter((v) => (!size || variantHasSize(v, size)) && (!color || textHasColor || variantHasColor(v, color)));
+    const available = matches.filter(isInStock);
+    const requested = [color, size ? `size ${size.toUpperCase()}` : null].filter(Boolean).join(", ");
+
+    if (available.length === 1) {
+      const v = available[0];
+      const label = formatVariantLabel(v.attributes);
+      await this.conversations.sendMessage(conversationId, businessId, `Yes — *${product.name}*${label ? ` (${label})` : ""} is available at ${fmtMoney(v.price, v.currency)}.\n\n🔢 How many would you like? Reply with a number.`);
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "AWAITING_QUANTITY", activeProductId: product.id, pendingVariantId: v.id } });
+      return true;
+    }
+    if (available.length > 1) {
+      await this.conversations.sendList(conversationId, businessId, `Yes — *${product.name}* is available in ${requested}. Choose an option:`, "Select", [
+        { rows: available.map((v) => ({ id: `variant_${v.id}`, title: formatVariantLabel(v.attributes) ?? v.sku ?? "Option", description: fmtMoney(v.price, v.currency) })) },
+      ]);
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "VIEWING_PRODUCT", activeProductId: product.id } });
+      return true;
+    }
+
+    const inStock = product.variants.filter(isInStock);
+    const options = Array.from(new Set(inStock.map((v) => formatVariantLabel(v.attributes)).filter((l): l is string => !!l)));
+    // labels are themselves comma-joined ("7, black"), so list the options with a different separator
+    const body = matches.length
+      ? `*${product.name}* in ${requested} is currently out of stock.${options.length ? ` Still available: ${options.join(" | ")}.` : ""}`
+      : `I don't have *${product.name}* in ${requested}.${options.length ? ` What I do have: ${options.join(" | ")}.` : " It comes in one standard option."}`;
+    await this.conversations.sendMessage(conversationId, businessId, body);
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "VIEWING_PRODUCT", activeProductId: product.id } });
+    return true;
+  }
+
+  /** Same-category / name-overlap alternatives to a reference product, hard constraints enforced, closest first. */
+  private async similarTo(businessId: string, reference: CatalogueRow, filters: SearchFilters, excludeIds: string[], diversify: boolean): Promise<Selected<CatalogueRow>[]> {
+    const rows = await this.prisma.product.findMany({
+      where: {
+        businessId, status: "PUBLISHED", id: { notIn: Array.from(new Set([reference.id, ...excludeIds])) },
+        ...(reference.categoryId ? { categoryId: reference.categoryId } : {}),
+        ...hardVariantFilter(filters.maxPrice, filters.minPrice),
+      },
+      include: SEARCH_INCLUDE,
+      take: 30,
+    });
+    const hard = applyHardConstraints(rows, { maxPrice: filters.maxPrice, minPrice: filters.minPrice });
+    const scored = hard.kept
+      .map((s, i) => ({ s: { ...s, score: similarityScore(reference, s.product) }, i }))
+      .filter((x) => reference.categoryId || x.s.score > 0)
+      .sort((a, b) => b.s.score - a.s.score || a.i - b.i)
+      .map((x) => x.s);
+    return diversify ? selectDiverse(scored, CURATED_LIMIT) : scored.slice(0, CURATED_LIMIT);
+  }
+
+  /** "Do you have any other options?" / "show me similar ones" — anchored to the search in progress and/or the product in view, excluding what was already shown (for alternatives). */
+  private async tryAlternatives(conversationId: string, businessId: string, interp: ShoppingInterpretation, existing: ShoppingContext | null, activeProductId: string | null): Promise<boolean> {
+    const referenceId = activeProductId ?? existing?.lastResults[0]?.productId ?? null;
+    const merged = mergeTopic(existing, { ...interp, topicRelation: "REFINEMENT" });
+    const hasSearch = merged.filters.keywords.length > 0 || !!merged.occasion;
+
+    if (!referenceId && !hasSearch) {
+      await this.conversations.sendMessage(conversationId, businessId, "Other options for what? Tell me what you're looking for and I'll show you some choices.");
+      return true;
+    }
+
+    const isSimilar = interp.intent === "SIMILAR";
+    const shown = Array.from(new Set([...(existing?.shownProductIds ?? []), ...(existing?.lastResults.map((r) => r.productId) ?? []), ...(referenceId ? [referenceId] : [])]));
+    let picked: Selected<CatalogueRow>[] = [];
+
+    // A) the same search again, minus everything the customer has already seen
+    if (!isSimilar && hasSearch) picked = (await this.queryExact(businessId, merged, shown))?.matches ?? [];
+
+    // B) otherwise, products like the one in view / the top result
+    let reference: CatalogueRow | null = null;
+    if (!picked.length && referenceId) {
+      reference = await this.prisma.product.findFirst({ where: { id: referenceId, businessId, status: "PUBLISHED" }, include: SEARCH_INCLUDE });
+      if (reference) picked = await this.similarTo(businessId, reference, merged.filters, isSimilar ? [] : shown, !isSimilar);
+    }
+
+    if (!picked.length) {
+      await this.conversations.sendMessage(conversationId, businessId, isSimilar
+        ? `I don't have anything else similar${reference ? ` to *${reference.name}*` : ""} that fits right now. Want to try a different product type or adjust your budget?`
+        : "That's everything I have that fits what you've asked for right now. Want to adjust your budget or try a different product type?");
+      return true;
+    }
+
+    const n = picked.length;
+    const budget = this.budgetNote(merged, picked[0].variant.currency);
+    const likeText = reference ? ` like *${reference.name}*` : "";
+    await this.conversations.sendList(conversationId, businessId, isSimilar ? `Here ${n === 1 ? "is something" : "are some options"} similar${reference ? ` to *${reference.name}*` : ""}${budget}:` : `Here ${n === 1 ? "is another option" : "are some other options"}${likeText}${budget}:`, "View", [
+      { rows: picked.map((s) => ({ id: `prod_${s.product.id}`, title: s.product.name, description: this.rowDescription(s, merged) })) },
+    ]);
+    const lastResults = picked.map((s) => ({ productId: s.product.id, variantId: s.variant.id, name: s.product.name }));
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: reference?.categoryId ?? null, activeProductId: null, assistedBuyingContext: this.contextFor(existing, { ...merged, reset: false }, lastResults) as unknown as Prisma.InputJsonValue },
+    });
+    return true;
+  }
+
+  /** "Show me something cheaper" — keeps the current search and tightens the budget to strictly below the product in view (or the median of what was shown). */
+  private async tryCheaper(conversationId: string, businessId: string, interp: ShoppingInterpretation, existing: ShoppingContext | null, activeProductId: string | null): Promise<boolean> {
+    const anchorIds = activeProductId ? [activeProductId] : (existing?.lastResults.map((r) => r.productId) ?? []);
+    if (!anchorIds.length) {
+      await this.conversations.sendMessage(conversationId, businessId, "Cheaper than what? Tell me what you're looking for, or a budget like \"under ₹1,500\", and I'll find options.");
+      return true;
+    }
+    const rows = await this.prisma.product.findMany({ where: { id: { in: anchorIds }, businessId }, include: SEARCH_INCLUDE });
+    const prices = (rows ?? []).flatMap((p) => { const ps = p.variants.filter(isInStock).map((v) => Number(String(v.price))); return ps.length ? [Math.min(...ps)] : []; });
+    if (!prices.length) return false;
+
+    const max = cheaperCeiling(prices, !!activeProductId, existing?.filters.maxPrice);
+    if (max === null) {
+      await this.conversations.sendMessage(conversationId, businessId, "That's already the lowest price I have in this range.");
+      return true;
+    }
+
+    const refined: ShoppingInterpretation = { ...interp, topicRelation: "REFINEMENT", budget: { ...interp.budget, max } };
+    const merged = mergeTopic(existing, refined);
+    if (merged.filters.keywords.length || merged.occasion) {
+      await this.presentResult(conversationId, businessId, await this.retrieve(businessId, merged, refined), existing, { clearActiveProduct: !!activeProductId });
+      return true;
+    }
+    // no search to tighten (only a product in view) — look for cheaper products like it instead
+    const reference0 = activeProductId ? rows.find((p) => p.id === activeProductId) : null;
+    if (!reference0) return false;
+    const picked = await this.similarTo(businessId, reference0, merged.filters, [reference0.id], false);
+    if (!picked.length) {
+      await this.conversations.sendMessage(conversationId, businessId, `I don't have anything similar to *${reference0.name}* for less right now.`);
+      return true;
+    }
+    await this.conversations.sendList(conversationId, businessId, `Here ${picked.length === 1 ? "is a cheaper option" : "are some cheaper options"} like *${reference0.name}*${this.budgetNote(merged, picked[0].variant.currency)}:`, "View", [
+      { rows: picked.map((s) => ({ id: `prod_${s.product.id}`, title: s.product.name, description: this.rowDescription(s, merged) })) },
+    ]);
+    const lastResults = picked.map((s) => ({ productId: s.product.id, variantId: s.variant.id, name: s.product.name }));
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { shoppingState: "BROWSING_PRODUCTS", activeProductId: null, assistedBuyingContext: this.contextFor(existing, { ...merged, reset: false }, lastResults) as unknown as Prisma.InputJsonValue },
+    });
+    return true;
+  }
+
+  private async showShop(conversationId: string, businessId: string, categoryId?: string, rawContext: unknown = null) {
+    if (categoryId) return this.showProducts(conversationId, businessId, categoryId, rawContext);
     const categories = await this.prisma.category.findMany({ where: { businessId, active: true, parentId: null }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], take: MAX_LIST_ROWS });
-    if (!categories.length) return this.showProducts(conversationId, businessId, null);
+    if (!categories.length) return this.showProducts(conversationId, businessId, null, rawContext);
 
     await this.conversations.sendList(conversationId, businessId, "🗂️ Choose a category to browse:", "Browse", [
       { rows: categories.map((c) => ({ id: `cat_${c.id}`, title: c.name })) },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_CATEGORIES", assistedBuyingContext: Prisma.JsonNull } });
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_CATEGORIES", assistedBuyingContext: this.browsingContext(rawContext) } });
   }
 
-  private async showProducts(conversationId: string, businessId: string, categoryId: string | null) {
+  /** Category browsing starts a fresh topic (search filters are dropped), but the last cart item must survive so "make that 3" still works after "Keep Shopping". */
+  private browsingContext(rawContext: unknown): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+    const keep = readShoppingContext(rawContext)?.lastCartItem;
+    return keep ? (nextContext(null, { lastCartItem: keep }) as unknown as Prisma.InputJsonValue) : Prisma.JsonNull;
+  }
+
+  private async showProducts(conversationId: string, businessId: string, categoryId: string | null, rawContext: unknown = null) {
     const products = await this.prisma.product.findMany({
       where: { businessId, status: "PUBLISHED", ...(categoryId ? { categoryId } : {}) },
       include: { variants: { where: { active: true }, orderBy: { createdAt: "asc" }, take: 1 } },
@@ -926,7 +1156,7 @@ export class ShoppingFlowService {
         return { id: `prod_${p.id}`, title: p.name, description: `${fmtMoney(v.price, v.currency)}${stock}` };
       }) },
     ]);
-    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId, assistedBuyingContext: Prisma.JsonNull } });
+    await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", activeCategoryId: categoryId, assistedBuyingContext: this.browsingContext(rawContext) } });
   }
 
   private async showProductDetail(conversationId: string, businessId: string, productId: string, customerId: string) {
@@ -1013,14 +1243,18 @@ export class ShoppingFlowService {
     // a plain affirmative ("I'll take it", "yes", "sure") after being shown a single-variant product means
     // quantity 1 — customers confirming a purchase rarely type the number itself
     const isAffirmative = /^\s*(i'?ll take it|take it|i want it|yes|yeah|yep|sure|ok(ay)?|sounds good|perfect|great)\s*[!.]*\s*$/i.test(text);
-    const quantity = isAffirmative ? 1 : parseInt(text.match(/\d+/)?.[0] ?? "", 10);
+    // a question/size/colour message that merely CONTAINS a digit ("what about size 8?") is a new request, never a quantity of 8
+    const isQuestionAboutProduct = /\?|\b(size|sz|colou?rs?|do you have|show me|what about)\b/i.test(text);
+    const reply = readQuantityReply(text);
+    // at most one stray word ("5 shirts", "2 pcs") is still a quantity; a budget phrase, a question or a longer sentence is not
+    const isPlainQuantity = reply.quantity !== null && !reply.hasBudget && !isQuestionAboutProduct && reply.otherWords <= 1;
+    const quantity = isAffirmative ? 1 : isPlainQuantity ? (reply.quantity as number) : Number.NaN;
     if (!conversation.pendingVariantId || !Number.isFinite(quantity) || quantity < 1) {
-      // the customer changed their mind mid-prompt ("for men", "do you have this in white?") rather than
-      // answering it — abandon the quantity prompt and treat this as a new shopping request instead of
+      // the customer changed their mind mid-prompt ("for men", "do you have this in white?", "pearl earrings under 1300")
+      // rather than answering it — abandon the quantity prompt and treat this as a new shopping request instead of
       // repeatedly telling them to enter a number they were never going to enter
-      if (INTENT_INTERRUPTION_RE.test(text)) {
-        const context = conversation.assistedBuyingContext as unknown as ShoppingSearchContext | null;
-        await this.search(conversationId, businessId, conversation.customerId, text, context, conversation.activeProductId ?? null);
+      if (INTENT_INTERRUPTION_RE.test(text) || isQuestionAboutProduct || reply.hasBudget || reply.otherWords >= 2) {
+        await this.search(conversationId, businessId, conversation.customerId, text, conversation.assistedBuyingContext, conversation.activeProductId ?? null);
         return;
       }
       await this.conversations.sendMessage(conversationId, businessId, "No problem — if you meant something else, just tell me what you're looking for and I'll adjust. Otherwise, how many would you like?");

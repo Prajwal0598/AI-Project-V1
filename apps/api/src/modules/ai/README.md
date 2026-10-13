@@ -42,6 +42,27 @@ Every model attempt (including fallback retries) writes one `AiModelInvocation` 
 `errorMessage`. Never stores prompt/reply content or customer data. A telemetry write failure is logged and
 swallowed — it can never break the actual customer-facing reply (see `recordInvocation`).
 
+## Conversational shopping interpretation
+
+WhatsApp shopping (the button flow in `shopping-flow` and the free-text engine in `assisted-buying`) shares one
+layer, `modules/shopping-intelligence`:
+
+- `shopping-interpretation.ts` — deterministic per-message reading (intent, product terms, budget, colour/size/gender,
+  occasion, ordinal, "other / cheaper / similar", new-topic vs refinement). An optional model reading (via
+  `AiModelRouterService`) is schema-validated and **only** widens a failed search or fills a gap; it is never
+  authoritative for product IDs, prices, stock or order state, and any budget it returns that the customer never typed
+  is discarded. Any failure falls back to the deterministic reading.
+- `shopping-context.ts` — the one persisted context (`Conversation.assistedBuyingContext`) read by both engines.
+- `shopping-ranking.ts` — hard constraints (price ceiling/floor, active, in stock) are applied in the database query and
+  re-checked on the returned records; ranking and diversity only reorder what already passed.
+
+| Env var | Effect |
+|---|---|
+| `SHOPPING_INTERPRETER_ENABLED` | `"false"` disables the model step entirely (deterministic only). Default on. |
+| `SHOPPING_INTERPRETER_TIMEOUT_MS` | Max wait for the model reading before falling back. Default `5000`. |
+
+There is no embedding/vector retrieval; model "semantic" help is limited to optional query-expansion terms.
+
 ## Out of scope for this pass
 
 The full multi-field `ShoppingContext` (occasion/gender/color/budget/etc.) as a first-class structured input to
