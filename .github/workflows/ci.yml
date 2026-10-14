@@ -44,6 +44,10 @@ jobs:
       - run: pnpm db:generate
       - run: pnpm typecheck
       - run: pnpm test
+      # checkout atomicity against the real PostgreSQL service above, in a private throwaway schema (see cart.checkout.integration.spec.ts)
+      - run: pnpm --filter @ai-customer-agent/api test:integration
+        env:
+          INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_customer_agent
       - run: pnpm build
 
   docker:

@@ -14,6 +14,11 @@ interface PaymentLinkResult {
   shortUrl: string;
 }
 
+/** An order total (Decimal/number/string) as the integer amount in the currency's smallest unit (paise for INR) — rounded to avoid float drift. Used for BOTH the payment link's amount and verifying what was paid, so the two always agree. */
+export function toMinorUnits(amount: { toString(): string } | number): number {
+  return Math.round(Number(amount) * 100);
+}
+
 /**
  * Wraps Razorpay's Payment Links API (https://api.razorpay.com/v1/payment_links) so a customer choosing
  * UPI gets a real, payable link instead of the simulated dummy checkout URL. Falls back gracefully (returns
@@ -76,8 +81,8 @@ export class RazorpayService {
     const authHeader = this.resolveAuthHeader(business);
     if (!authHeader) return null;
 
-    // amount must be in the smallest currency unit (paise for INR) — total is a Decimal, round to avoid float drift
-    const amountInSubunits = Math.round(Number(order.total) * 100);
+    // amount must be in the smallest currency unit (paise for INR)
+    const amountInSubunits = toMinorUnits(order.total);
 
     try {
       const res = await fetch("https://api.razorpay.com/v1/payment_links", {

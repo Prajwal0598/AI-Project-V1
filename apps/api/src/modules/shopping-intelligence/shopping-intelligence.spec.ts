@@ -346,6 +346,19 @@ describe("shopping-ranking — hard constraints, relevance, diversity", () => {
     it("applies a price floor", () => {
       expect(applyHardConstraints([product("a", "A", [v("1", 400)]), product("b", "B", [v("2", 1200)])], { minPrice: 1000 }).kept.map((s) => s.product.id)).toEqual(["b"]);
     });
+
+    it("a requested gender is matched as a WORD: 'women' is not 'men', and unisex or unmarked products stay", () => {
+      const rows = [
+        product("m", "Linen Shirt for Men", [v("1", 900)]),
+        product("w", "Linen Shirt", [v("2", 900)], { description: "A relaxed shirt for women" }),
+        product("u", "Linen Shirt", [v("3", 900)], { description: "Unisex linen shirt" }),
+        product("plain", "Linen Shirt", [v("4", 900)]),
+        product("both", "Linen Shirt", [v("5", 900)], { description: "For men and women" }),
+      ];
+      expect(applyHardConstraints(rows, { gender: "men" }).kept.map((s) => s.product.id)).toEqual(["m", "u", "plain", "both"]);
+      expect(applyHardConstraints(rows, { gender: "women" }).kept.map((s) => s.product.id)).toEqual(["w", "u", "plain", "both"]);
+      expect(applyHardConstraints(rows, {}).kept).toHaveLength(5);
+    });
   });
 
   describe("splitByAttributes / offeredAttributes", () => {

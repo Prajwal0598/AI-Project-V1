@@ -1066,7 +1066,7 @@ describe("ShoppingFlowService — Smart Reply Suggestions", () => {
 
       await flow.handleInteractive("conv1", "biz1", "quickadd_v1");
 
-      expect(prisma.variant.findFirst).toHaveBeenCalledWith({ where: { id: "v1", businessId: "biz1", active: true }, include: { product: true } });
+      expect(prisma.variant.findFirst).toHaveBeenCalledWith({ where: { id: "v1", businessId: "biz1", active: true, product: { status: "PUBLISHED" } }, include: { product: true } });
       expect(cart.addItem).toHaveBeenCalledWith("cart1", "biz1", "v1", 1);
       expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Blue Shirt"), [
         { id: "nav_viewcart", title: "View Cart" }, { id: "cart_checkout", title: "Checkout" },
@@ -1255,12 +1255,13 @@ describe("ShoppingFlowService — persistent shopping context & intent interrupt
       conversation = { ...conversation, assistedBuyingContext: lastContext() };
       expect((conversation.assistedBuyingContext as { color?: string }).color).toBe("white");
 
-      prisma.product.findMany.mockResolvedValueOnce([dummyMatch("d2")]);
+      // the mocked DB result stands in for the catalogue; its variant really is black, which is what a colour-only ask is matched on
+      prisma.product.findMany.mockResolvedValueOnce([{ ...dummyMatch("d2"), variants: [{ id: "v-d2", price: 999, currency: "INR", inventory: 5, attributes: { color: "black" } }] }]);
       await flow.handleFreeText("conv1", "biz1", conversation, "actually, black");
 
       const where = prisma.product.findMany.mock.calls.at(-1)![0].where;
-      const colorClauses = where.AND.filter((c: { OR: { name?: { contains: string } }[] }) => c.OR.some((o) => o.name?.contains === "black" || o.name?.contains === "white"));
-      expect(colorClauses).toHaveLength(1); // only "black" is required now, not "black" AND "white"
+      // a colour-only ask is matched on the real variant colours (no text clause at all) — either way the old colour must be gone
+      expect(JSON.stringify(where)).not.toContain("white");
       const ctx = lastContext() as { color?: string };
       expect(ctx.color).toBe("black");
     });
