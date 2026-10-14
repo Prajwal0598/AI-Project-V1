@@ -8,6 +8,7 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "jest",
+    "test:integration": "jest integration.spec",
     "test:watch": "jest --watch"
   },
   "dependencies": {
