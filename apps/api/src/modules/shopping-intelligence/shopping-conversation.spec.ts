@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { ShoppingFlowService } from "../shopping-flow/shopping-flow.service";
 import { AssistedBuyingService } from "../assisted-buying/assisted-buying.service";
@@ -73,6 +73,8 @@ function fieldMatches(value: unknown, cond: any): boolean {
     const n = Number(value);
     return (cond.gt === undefined || n > cond.gt) && (cond.gte === undefined || n >= cond.gte) && (cond.lt === undefined || n < cond.lt) && (cond.lte === undefined || n <= cond.lte);
   }
+  // a nested relation filter, e.g. variant.findFirst({ where: { product: { status: "PUBLISHED" } } })
+  if (value && typeof value === "object") return Object.entries(cond).every(([k, c]) => fieldMatches((value as Row)[k], c));
   throw new Error(`fake catalogue: unsupported field condition ${JSON.stringify(cond)}`);
 }
 const variantMatches = (v: Row, where: Row): boolean => Object.entries(where).every(([k, c]) => (k === "OR" ? (c as Row[]).some((s) => variantMatches(v, s)) : k === "AND" ? (c as Row[]).every((s) => variantMatches(v, s)) : fieldMatches(v[k], c)));
@@ -117,7 +119,7 @@ function buildWorld(opts: { router?: AiModelRouterService; products?: FakeProduc
     },
     variant: {
       findFirst: async (args: Row) => {
-        for (const p of products) for (const v of p.variants) if (variantMatches({ ...v, productId: p.id, businessId: BIZ }, args.where)) return { ...v, productId: p.id, businessId: BIZ, product: { id: p.id, name: p.name } };
+        for (const p of products) for (const v of p.variants) if (variantMatches({ ...v, productId: p.id, businessId: BIZ, product: { id: p.id, name: p.name, status: p.status } }, args.where)) return { ...v, productId: p.id, businessId: BIZ, product: { id: p.id, name: p.name, status: p.status } };
         return null;
       },
     },
@@ -154,7 +156,7 @@ function buildWorld(opts: { router?: AiModelRouterService; products?: FakeProduc
     addItem: async (cartId: string, _b: string, variantId: string, quantity: number) => {
       addItemCalls.push({ variantId, quantity });
       const c = carts.find((x) => x.id === cartId); const found = findVariant(variantId);
-      if (!c || !found) throw new NotFoundException("Product variant not found.");
+      if (!c || !found || !found.v.active || found.p.status !== "PUBLISHED") throw new NotFoundException("Product variant not found.");
       const next = (c.items.get(variantId) ?? 0) + quantity;
       if (found.v.inventory !== null && next > found.v.inventory) throw new BadRequestException(`Only ${found.v.inventory} left in stock.`);
       c.items.set(variantId, next);
@@ -170,7 +172,7 @@ function buildWorld(opts: { router?: AiModelRouterService; products?: FakeProduc
     clear: async () => undefined,
     checkout: async (cartId: string) => {
       const c = carts.find((x) => x.id === cartId)!;
-      if (c.status !== "ACTIVE") throw new BadRequestException("This cart has already been checked out.");
+      if (c.status !== "ACTIVE") throw new ConflictException("This cart has already been checked out.");
       if (!c.items.size) throw new BadRequestException("Your cart is empty.");
       c.status = "CHECKED_OUT";
       const order = { id: `order${orders.length + 1}`, items: [...c.items.entries()] as [string, number][] };
@@ -662,6 +664,261 @@ describe("conversational shopping — scenarios", () => {
   });
 });
 
+describe("WhatsApp end-to-end findings — the customer's exact phrasing", () => {
+  const stock = (): FakeProduct[] => [
+    ...catalogue(),
+    product("b-clutch", "Black Evening Clutch", "cat-gift", "A compact black clutch", [{ id: "bclutch-1", price: 1399 }]),
+    product("b-kurta", "Black Silk Kurta", "cat-occ", "A black festive kurta", [{ id: "bkurta-1", price: 2999 }]),
+    product("b-onyx", "Black Onyx Necklace", "cat-jew", "A black onyx pendant necklace", [{ id: "bonyx-1", price: 1599 }]),
+    product("b-belt", "Black Leather Belt", "cat-gift", "A black leather belt", [{ id: "bbelt-1", price: 999 }]),
+    product("b-shawl", "Black Pashmina Shawl", "cat-occ", "A black pashmina shawl", [{ id: "bshawl-1", price: 3499 }]),
+    product("b-bracelet", "Black Pearl Bracelet", "cat-jew", "A black pearl bracelet", [{ id: "bbrace-1", price: 1199 }]),
+    product("shirt-w", "Linen Shirt for Women", "cat-occ", "A relaxed linen shirt for women", [{ id: "shirt-w-1", price: 1699 }]),
+    product("shirt-m", "Linen Shirt for Men", "cat-occ", "A breathable linen shirt for men", [{ id: "shirt-m-1", price: 1799 }]),
+  ];
+  let w: World;
+  beforeEach(() => { clock = 0; w = buildWorld({ products: stock() }); });
+
+  it("1. 'Do you have anything in black?' then 'Show me some other options.' — more black products, never a repeat", async () => {
+    await w.say("hi");
+    await w.say("Do you have anything in black?");
+    const first = titles(w.lastList().rows!);
+    expect(w.ctx()!.color).toBe("black");
+    expect(first.length).toBeGreaterThan(0);
+    for (const t of first) expect(t).toMatch(/black/i);
+    w.assertRowsAreRealRecords(w.lastList().rows!);
+
+    await w.say("Show me some other options.");
+    const second = titles(w.lastList().rows!);
+    expect(second.length).toBeGreaterThan(0);
+    for (const t of second) expect(t).toMatch(/black/i);
+    expect(second.filter((t) => first.includes(t))).toEqual([]);
+    w.assertRowsAreRealRecords(w.lastList().rows!);
+  });
+
+  it("2. black search, then 'Actually, do you have pearl earrings?' — no stale colour, category or occasion", async () => {
+    await w.say("hi");
+    await w.say("Do you have anything in black?");
+    await w.say("Actually, do you have pearl earrings?");
+    const list = w.lastList();
+    expect(w.ctx()!.filters.keywords).toEqual(["pearl", "earrings"]);
+    expect(w.ctx()!.color).toBeUndefined();
+    expect(w.ctx()!.occasion).toBeUndefined();
+    expect(list.body).not.toContain("Nothing matched exactly");
+    for (const t of titles(list.rows!)) expect(t).toMatch(/pearl.*earrings/i);
+    expect(titles(list.rows!)).toContain("Pearl Stud Earrings");
+    w.assertRowsAreRealRecords(list.rows!);
+  });
+
+  it("2b. …and the occasion and the budget of the earlier request are gone too", async () => {
+    await w.say("hi");
+    await w.say("I need a black outfit for a wedding under ₹3,000");
+    expect(w.ctx()!.filters.maxPrice).toBe(3000);
+    await w.say("Actually, do you have pearl earrings?");
+    expect(w.ctx()!.filters.maxPrice).toBeUndefined();
+    expect(w.ctx()!.occasion).toBeUndefined();
+    expect(w.ctx()!.color).toBeUndefined();
+    expect(titles(w.lastList().rows!)).toContain("Diamond Pearl Earrings"); // ₹8,999 — proof the old ceiling did not leak
+  });
+
+  it("3. \"I'm looking for a gift for date night.\" — a gift for an occasion, not a search for the words 'looking' or 'I'm'", async () => {
+    await w.say("hi");
+    await w.say("I'm looking for a gift for date night.");
+    const list = w.lastList();
+    expect(w.ctx()!.occasion).toBe("date night");
+    expect(w.ctx()!.filters.keywords.join(" ")).not.toMatch(/looking|i'm|\bim\b/);
+    expect(titles(list.rows!)).toEqual(expect.arrayContaining(["Rose Perfume 50ml"]));
+    w.assertRowsAreRealRecords(list.rows!);
+  });
+
+  it("4. 'Show me some jewellery options.' — a diverse set of real jewellery, with 'some' and 'options' ignored", async () => {
+    await w.say("hi");
+    await w.say("Show me some jewellery options.");
+    const list = w.lastList();
+    expect(w.ctx()!.filters.keywords).toEqual(["jewellery"]);
+    expect(list.body).not.toContain("Nothing matched exactly");
+    const shown = list.rows!.map((r) => w.productById(r.id.replace("prod_", "")));
+    expect(shown.length).toBeGreaterThanOrEqual(4);
+    for (const p of shown) expect(p.categoryId).toBe("cat-jew");
+    expect(shown.some((p) => /necklace/i.test(p.name)) && shown.some((p) => /earrings/i.test(p.name))).toBe(true); // more than one kind of piece
+    w.assertRowsAreRealRecords(list.rows!);
+  });
+
+  it("5. 'I like the second one' selects the second item of the LATEST list — and verifies it still exists", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    const firstList = w.ctx()!.lastResults;
+    await w.say("I like the second one");
+    expect(w.conversation.activeProductId).toBe(firstList[1].productId);
+
+    await w.say("pearl earrings under 1300"); // a shorter, newer list
+    const latest = w.ctx()!.lastResults;
+    await w.say("I like the second one");
+    expect(w.conversation.activeProductId).toBe(latest[1].productId);
+
+    w.productById(latest[0].productId).status = "DRAFT"; // the merchant hides it after it was shown
+    await w.say("I like the first one");
+    expect(w.lastSent().body).toContain("no longer available");
+    expect(w.conversation.activeProductId).not.toBe(latest[0].productId);
+  });
+
+  it("6. 'For men' while awaiting a quantity is a new request — not a quantity — and only men's products come back", async () => {
+    await w.say("hi");
+    await w.say("linen shirt");
+    await w.tap("prod_shirt-w");
+    expect(w.conversation.shoppingState).toBe("AWAITING_QUANTITY");
+
+    await w.say("For men");
+    expect(w.addItemCalls).toEqual([]);
+    expect(w.conversation.shoppingState).not.toBe("AWAITING_QUANTITY");
+    expect(w.ctx()!.gender).toBe("men");
+    expect(titles(w.lastList().rows!)).toEqual(["Linen Shirt for Men"]); // "for women" contains the letters "men" — it must not match
+    w.assertRowsAreRealRecords(w.lastList().rows!);
+  });
+
+  it("6b. 'I like the second one' while a quantity is awaited picks the second product — it is never read as a quantity of one", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    const list = w.ctx()!.lastResults;
+    await w.tap("prod_pearl-drop");
+    expect(w.conversation.shoppingState).toBe("AWAITING_QUANTITY");
+
+    await w.say("I like the second one");
+    expect(w.addItemCalls).toEqual([]);
+    expect(w.carts.every((c) => c.items.size === 0)).toBe(true);
+    expect(w.conversation.activeProductId).toBe(list[1].productId);
+  });
+
+  it("6c. a gender stays part of 'other options' — women's products never turn up for a men's search", async () => {
+    w.products.push(product("shirt-m2", "Denim Shirt for Men", "cat-occ", "A sturdy denim shirt for men", [{ id: "shirt-m2-1", price: 2099 }]));
+    await w.say("hi");
+    await w.say("shirt for men");
+    const first = titles(w.lastList().rows!);
+    expect(first.sort()).toEqual(["Denim Shirt for Men", "Linen Shirt for Men"]);
+
+    await w.say("show me some other options");
+    for (const list of w.sent.filter((s) => s.kind === "list")) for (const t of titles(list.rows!)) expect(t).not.toMatch(/women/i);
+    expect(w.ctx()!.gender).toBe("men");
+  });
+
+  it("6d. 'anything in black' matches a black VARIANT even when the product's own text never says black", async () => {
+    w = buildWorld({
+      products: [
+        product("tote", "Evening Tote", "cat-gift", "A roomy everyday tote", [{ id: "tote-1", price: 1999, attributes: { color: "black" } }]),
+        product("purse", "Silver Purse", "cat-gift", "A small purse", [{ id: "purse-1", price: 1499, attributes: { color: "silver" } }]),
+      ],
+    });
+    await w.say("hi");
+    await w.say("Do you have anything in black?");
+    expect(titles(w.lastList().rows!)).toEqual(["Evening Tote"]);
+    expect(w.lastList().rows![0].description).toContain("in black");
+
+    await w.say("Do you have anything in red?");
+    expect(w.lastSent().kind).toBe("buttons");
+    expect(w.lastSent().body).toContain("couldn't find anything matching");
+  });
+
+  it("7. 'Something cheaper.' keeps the product context and lowers the budget below the product being viewed", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    await w.tap("prod_pearl-drop"); // ₹1,199
+    await w.say("Something cheaper.");
+    expect(w.ctx()!.filters.keywords).toEqual(["pearl", "earrings"]);
+    expect(w.ctx()!.filters.maxPrice).toBe(1198);
+    expect(titles(w.lastList().rows!)).toEqual(["Pearl Stud Earrings"]);
+  });
+
+  it.each([
+    ["pearl earrings under 1000", 1000],
+    ["I need a gift under ₹1,500", 1500],
+    ["show me some jewellery under 1600", 1600],
+    ["a black outfit under 3000", 3000],
+    ["something for a wedding up to ₹3,000", 3000],
+    ["gold earrings below 1500", 1500],
+  ])("8. '%s' never shows a product above %i", async (phrase, ceiling) => {
+    // a row's price is the lowest in-stock variant price of that product — looked up in the catalogue, not in the latest context
+    const rowPrice = (rowId: string) => Math.min(...w.productById(rowId.replace("prod_", "")).variants.filter((v) => v.active && (v.inventory === null || v.inventory > 0)).map((v) => v.price));
+    await w.say("hi");
+    await w.say(phrase);
+    for (const l of w.sent.filter((s) => s.kind === "list")) for (const r of l.rows!) expect(rowPrice(r.id)).toBeLessThanOrEqual(ceiling);
+    // …and the follow-ups that re-run the search keep honouring it
+    await w.say("show me some other options");
+    for (const l of w.sent.filter((s) => s.kind === "list")) for (const r of l.rows!) expect(rowPrice(r.id)).toBeLessThanOrEqual(ceiling);
+  });
+
+  it("9. an unavailable colour is reported honestly and nothing is presented as that colour", async () => {
+    await w.say("hi");
+    await w.say("Do you have pearl earrings in red?");
+    const text = w.sent.map((s) => s.body).join("\n");
+    expect(text).toMatch(/red/i);
+    const rows = w.sent.filter((s) => s.kind === "list").flatMap((s) => s.rows!);
+    for (const r of rows) expect(r.description ?? "").not.toMatch(/\bin red\b/i);
+    expect(w.lastSent().body).not.toMatch(/here (is|are) .*red/i);
+    if (rows.length) expect(w.sent.some((s) => /doesn't come in red|isn't available in red|no red|not .*red|in red/i.test(s.body))).toBe(true);
+  });
+
+  it("10. the cart survives a new session on another day, and a change of topic", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    await w.tap("quickadd_ps-1");
+    await w.tap("quickadd_pd-1");
+    const inCart = () => [...w.carts.find((c) => c.status === "ACTIVE")!.items.entries()];
+    expect(inCart()).toEqual([["ps-1", 1], ["pd-1", 1]]);
+
+    // the next day: the conversation is at rest and yesterday's search context is gone
+    Object.assign(w.conversation, { shoppingState: "IDLE", assistedBuyingContext: null, activeProductId: null, pendingVariantId: null, activeCategoryId: null });
+    await w.say("hi");
+    await w.tap("nav_viewcart");
+    const cartMessage = w.sent.filter((s) => s.body.includes("Your Cart")).pop()!;
+    expect(cartMessage.body).toContain("Pearl Stud Earrings");
+    expect(cartMessage.body).toContain("Pearl Drop Earrings");
+
+    await w.say("do you have a rose perfume?");
+    await w.say("Actually show me some jewellery options");
+    await w.say("I like the first one");
+    expect(inCart()).toEqual([["ps-1", 1], ["pd-1", 1]]);
+
+    await w.tap("cart_checkout"); // and the cart is still what checkout works on
+    expect(w.conversation.shoppingState).toBe("COLLECTING_ADDRESS");
+  });
+
+  it("11. a stale, hidden or non-existent product/variant id can never be added to the cart", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    const stud = w.productById("pearl-stud");
+
+    stud.status = "DRAFT"; // hidden by the merchant after it was shown
+    await w.tap("quickadd_ps-1");
+    expect(w.lastSent().body).toMatch(/no longer available/i);
+    stud.status = "PUBLISHED";
+
+    stud.variants[0].active = false; // variant switched off
+    await w.tap("quickadd_ps-1");
+    expect(w.lastSent().body).toMatch(/no longer available/i);
+    stud.variants[0].active = true;
+
+    for (const id of ["quickadd_deleted-variant", "variant_deleted-variant", "prod_deleted-product"]) {
+      await w.tap(id);
+      expect(w.lastSent().body).toMatch(/no longer available/i);
+    }
+    expect(w.carts.every((c) => c.items.size === 0)).toBe(true);
+  });
+
+  it("11b. a quantity typed for a product that was hidden while the prompt was open is refused, and the prompt is closed", async () => {
+    await w.say("hi");
+    await w.say("pearl earrings");
+    await w.tap("prod_pearl-stud");
+    expect(w.conversation.shoppingState).toBe("AWAITING_QUANTITY");
+
+    w.productById("pearl-stud").status = "DRAFT";
+    await w.say("2");
+    expect(w.lastSent().body).toMatch(/no longer available/i);
+    expect(w.carts.every((c) => c.items.size === 0)).toBe(true);
+    expect(w.conversation.shoppingState).not.toBe("AWAITING_QUANTITY");
+    expect(w.conversation.pendingVariantId).toBeNull();
+  });
+});
+
 describe("11. repeated button/webhook delivery never duplicates cart items or orders", () => {
   const phoneNumberId = "PHONE1";
   const waMsg = (overrides: Partial<ParsedWhatsAppMessage>): ParsedWhatsAppMessage => ({ phoneNumberId, from: "911234567890", waMessageId: "wamid.1", text: "", interactiveId: null, displayName: "Asha", timestamp: new Date(), ...overrides });
@@ -722,6 +979,7 @@ describe("11. repeated button/webhook delivery never duplicates cart items or or
     await w.deliver(waMsg({ interactiveId: "order_confirm", waMessageId: "wamid.CONFIRM2" })); // an impatient second tap: new delivery, but nothing left to confirm
 
     expect(w.orders).toHaveLength(1);
+    expect(w.lastSent().body).toContain("already been placed"); // told so, rather than restarting checkout on an empty cart
     expect(w.orders[0].items).toEqual([["ps-1", 1]]);
     expect(w.carts.filter((c) => c.status === "CHECKED_OUT")).toHaveLength(1);
   });

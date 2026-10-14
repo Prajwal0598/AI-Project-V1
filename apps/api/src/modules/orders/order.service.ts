@@ -10,7 +10,7 @@ import { InventoryService } from "../inventory/inventory.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { ProductRelationService } from "../product-relations/product-relation.service";
 import { ConversationService } from "../conversations/conversation.service";
-import { RazorpayService } from "../payments/razorpay.service";
+import { RazorpayService, toMinorUnits } from "../payments/razorpay.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
@@ -179,13 +179,29 @@ export class OrderService {
 
   /** Called by the Razorpay webhook once a payment link is genuinely paid — marks the order PAID, records the
    * real payment id, notifies the customer, and kicks off the (still-simulated) shipment-tracking pipeline.
+   * `paid` is what Razorpay says was actually paid (integer minor units + currency): the order is only marked
+   * PAID when it equals the order's own total, so a short, excess or wrong-currency payment never confirms it.
    * Idempotent: a second webhook delivery for an already-PAID order is a harmless no-op. */
-  async markPaidViaRazorpay(orderId: string, businessId: string, razorpayPaymentId: string) {
+  async markPaidViaRazorpay(orderId: string, businessId: string, razorpayPaymentId: string, paid: { amountMinor: number; currency: string }) {
     const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
     if (!order) return { skipped: "order not found" as const };
     if (order.status !== OrderStatus.PENDING_PAYMENT) return { skipped: `order is already ${order.status.toLowerCase()}` as const };
 
-    const updated = await this.prisma.order.update({ where: { id: orderId }, data: { status: OrderStatus.PAID, razorpayPaymentId } });
+    const expectedMinor = toMinorUnits(order.total);
+    if (order.currency.toUpperCase() !== paid.currency.toUpperCase() || expectedMinor !== paid.amountMinor) {
+      return { skipped: "paid amount does not match the order" as const, expectedMinor, expectedCurrency: order.currency, paidMinor: paid.amountMinor, paidCurrency: paid.currency };
+    }
+
+    // the status check above is only a fast path — the write itself is conditional on the order STILL being PENDING_PAYMENT
+    // and its total being the one just verified (an amendment in between must not be paid at the old price), so of any number
+    // of simultaneous deliveries for the same payment exactly one performs the effects below
+    let updated;
+    try {
+      updated = await this.prisma.order.update({ where: { id: orderId, businessId, status: OrderStatus.PENDING_PAYMENT, total: order.total }, data: { status: OrderStatus.PAID, razorpayPaymentId } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") return { skipped: "order changed while the payment was being recorded" as const };
+      throw err;
+    }
     await this.prisma.activityEvent.create({
       data: { businessId, customerId: order.customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Payment received via Razorpay — ${updated.currency} ${updated.total}` },
     });

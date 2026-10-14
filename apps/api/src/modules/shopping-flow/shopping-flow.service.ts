@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { ConflictException, Injectable, Logger } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
@@ -40,6 +40,9 @@ function hardVariantFilter(maxPrice?: number, minPrice?: number) {
 }
 
 const SEARCH_INCLUDE = { variants: { where: { active: true }, orderBy: { createdAt: "asc" } }, category: true } as const;
+
+// "anything in black" — a colour and nothing else to name a product type
+const isColourOnly = (topic: MergedTopic) => !!topic.color && !topic.gender && topic.filters.keywords.length === 0;
 
 type CatalogueRow = Prisma.ProductGetPayload<{ include: typeof SEARCH_INCLUDE }>;
 
@@ -150,6 +153,7 @@ const VIEW_CART_RE = /\b(what'?s? in my cart|show (?:me )?my cart|view (?:my )?c
 const INTENT_INTERRUPTION_RE = /\?|\b(something else|anything else|different one|instead|actually|change my mind|for (men|women|him|her|kids|boys|girls)|do you have|show me|what about|never ?mind)\b/i;
 
 const QUANTITY_NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const PRONOUN_ONE_PREFIX = new Set(["the", "this", "that", "which", "another", "other", "same", "first", "second", "third", "fourth", "fifth", "last", "next", "any", "each"]);
 const QUANTITY_FILLER = new Set([
   "x", "pcs", "pc", "piece", "pieces", "pair", "pairs", "unit", "units", "nos", "qty", "quantity", "of", "them", "it", "please", "pls", "thanks",
   "i", "ill", "id", "want", "need", "take", "get", "give", "me", "add", "make", "buy", "order", "like", "just", "only", "ok", "okay", "yes", "a", "an", "the", "to", "that", "is", "would", "can", "could", "have", "go", "with", "for", "and",
@@ -165,10 +169,13 @@ function readQuantityReply(text: string): { quantity: number | null; otherWords:
   const hasBudget = parsed.maxPrice !== undefined || parsed.minPrice !== undefined;
   let quantity: number | null = null;
   let otherWords = 0;
+  let previous = "";
   for (const token of text.toLowerCase().replace(/['’]/g, "").match(/[a-z]+|\d+/g) ?? []) {
-    const n = /^\d+$/.test(token) ? parseInt(token, 10) : QUANTITY_NUMBER_WORDS[token];
+    // "the second ONE" / "this one" refers to a product — only a bare "one" ("I'll take one") is a quantity
+    const n = /^\d+$/.test(token) ? parseInt(token, 10) : token === "one" && PRONOUN_ONE_PREFIX.has(previous) ? undefined : QUANTITY_NUMBER_WORDS[token];
     if (n !== undefined && quantity === null) quantity = n;
     else if (!QUANTITY_FILLER.has(token)) otherWords += 1;
+    previous = token;
   }
   return { quantity, otherWords, hasBudget };
 }
@@ -584,7 +591,7 @@ export class ShoppingFlowService {
    * behave identically to the existing AI free-text add-to-cart path — this is genuinely the same action, just
    * reached via a tap instead of typed text. */
   private async quickAddToCart(conversationId: string, businessId: string, customerId: string, variantId: string, rawContext: unknown = null) {
-    const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true }, include: { product: true } });
+    const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true, product: { status: "PUBLISHED" } }, include: { product: true } });
     if (!variant) {
       await this.conversations.sendMessage(conversationId, businessId, "Sorry, that option is no longer available.");
       return;
@@ -799,7 +806,7 @@ export class ShoppingFlowService {
       include: SEARCH_INCLUDE,
       take: 30,
     });
-    const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+    const hard = applyHardConstraints(rows, { maxPrice, minPrice, gender: topic.gender });
     if (!hard.kept.length) return null;
 
     const ranked = rankProducts(hard.kept, topic.effectiveKeywords, topic.expandedTerms);
@@ -813,35 +820,57 @@ export class ShoppingFlowService {
     return { quality: "EXACT", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length };
   }
 
+  /** The first, most precise attempt. A colour-only ask ("anything in black") reads real variant colours, which is a superset of the text match; everything else is the exact text query. */
+  private queryPrimary(businessId: string, topic: MergedTopic, excludeIds: string[] = []): Promise<Retrieval | null> {
+    return isColourOnly(topic) ? this.queryColour(businessId, topic, excludeIds) : this.queryExact(businessId, topic, excludeIds);
+  }
+
+  /**
+   * Colour as a real attribute: colour usually lives on the VARIANT ("color": "black"), which the text query in
+   * queryExact cannot see. Looks for the named product (or, for a colour-only ask like "anything in black", a wider
+   * pool of the catalogue) and checks the real variant attributes. Null when nothing qualifies.
+   */
+  private async queryColour(businessId: string, topic: MergedTopic, excludeIds: string[] = []): Promise<Retrieval | null> {
+    if (!topic.color) return null;
+    const { maxPrice, minPrice } = topic.filters;
+    const freeKeywords = [...topic.filters.keywords, ...(topic.gender ? [topic.gender] : [])];
+    const colourOnly = freeKeywords.length === 0;
+    const rows = await this.prisma.product.findMany({
+      where: {
+        businessId, status: "PUBLISHED",
+        ...(colourOnly ? {} : { AND: keywordAndClauses(freeKeywords) }),
+        ...(excludeIds.length ? { id: { notIn: excludeIds } } : {}),
+        ...hardVariantFilter(maxPrice, minPrice),
+      },
+      include: SEARCH_INCLUDE,
+      take: colourOnly ? 100 : 30,
+    });
+    const hard = applyHardConstraints(rows ?? [], { maxPrice, minPrice, gender: topic.gender });
+    if (!hard.kept.length) return null;
+    const ranked = rankProducts(hard.kept, freeKeywords, topic.expandedTerms);
+    const { matching } = splitByAttributes(ranked, { color: topic.color, size: topic.size });
+    if (matching.length) return { quality: "EXACT", topic, matches: this.curate(matching, topic), totalMatches: matching.length };
+    // a colour-only ask that nothing matches is a plain no-match — "it comes in other colours" only makes sense for a named product
+    if (colourOnly) return null;
+    return { quality: "ATTRIBUTE_UNAVAILABLE", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length, unmet: { color: topic.color }, offered: offeredAttributes(ranked.flatMap((s) => s.eligible)) };
+  }
+
   private async retrieve(businessId: string, topic: MergedTopic, interp: ShoppingInterpretation, opts: { recover?: MergedTopic; excludeIds?: string[] } = {}): Promise<Retrieval> {
     const exclude = opts.excludeIds ?? [];
     const { maxPrice, minPrice } = topic.filters;
 
-    const exact = await this.queryExact(businessId, topic, exclude);
+    const exact = await this.queryPrimary(businessId, topic, exclude);
     if (exact) return exact;
     if (opts.recover) {
-      const alt = await this.queryExact(businessId, opts.recover, exclude);
+      const alt = await this.queryPrimary(businessId, opts.recover, exclude);
       if (alt) return alt;
     }
 
     // Level 1 — a requested colour is a soft attribute: look for the product itself and check the REAL variant
     // attributes (colour is often only on the variant, which the text query can't see). If the product exists
     // but not in that colour, say so and offer what it genuinely comes in.
-    const freeKeywords = [...topic.filters.keywords, ...(topic.gender ? [topic.gender] : [])];
-    if (topic.color && freeKeywords.length) {
-      const rows = await this.prisma.product.findMany({
-        where: { businessId, status: "PUBLISHED", AND: keywordAndClauses(freeKeywords), ...(exclude.length ? { id: { notIn: exclude } } : {}), ...hardVariantFilter(maxPrice, minPrice) },
-        include: SEARCH_INCLUDE,
-        take: 30,
-      });
-      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
-      if (hard.kept.length) {
-        const ranked = rankProducts(hard.kept, freeKeywords, topic.expandedTerms);
-        const { matching } = splitByAttributes(ranked, { color: topic.color, size: topic.size });
-        if (matching.length) return { quality: "EXACT", topic, matches: this.curate(matching, topic), totalMatches: matching.length };
-        return { quality: "ATTRIBUTE_UNAVAILABLE", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length, unmet: { color: topic.color }, offered: offeredAttributes(ranked.flatMap((s) => s.eligible)) };
-      }
-    }
+    const byColour = isColourOnly(topic) ? null : await this.queryColour(businessId, topic, exclude);
+    if (byColour) return byColour;
 
     // Level 2 — occasion/vibe asks rarely have one product literally containing every word: relax to products
     // matching AT LEAST ONE free keyword (or a model-proposed broadening term), ranked by overlap. Only the free
@@ -853,7 +882,7 @@ export class ShoppingFlowService {
         include: SEARCH_INCLUDE,
         take: 30,
       });
-      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+      const hard = applyHardConstraints(rows, { maxPrice, minPrice, gender: topic.gender });
       if (hard.kept.length) {
         const ranked = rankProducts(hard.kept, topic.filters.keywords, topic.expandedTerms);
         return { quality: "PARTIAL", topic, matches: this.curate(ranked, topic), totalMatches: ranked.length };
@@ -870,7 +899,7 @@ export class ShoppingFlowService {
         include: SEARCH_INCLUDE,
         take: 30,
       });
-      const hard = applyHardConstraints(rows, { maxPrice, minPrice });
+      const hard = applyHardConstraints(rows, { maxPrice, minPrice, gender: topic.gender });
       if (hard.kept.length) {
         const ranked = rankProducts(hard.kept, topic.filters.keywords, topic.expandedTerms);
         return { quality: "BUDGET_ONLY", topic, matches: selectDiverse(ranked, CURATED_LIMIT), totalMatches: ranked.length };
@@ -1011,7 +1040,7 @@ export class ShoppingFlowService {
   }
 
   /** Same-category / name-overlap alternatives to a reference product, hard constraints enforced, closest first. */
-  private async similarTo(businessId: string, reference: CatalogueRow, filters: SearchFilters, excludeIds: string[], diversify: boolean): Promise<Selected<CatalogueRow>[]> {
+  private async similarTo(businessId: string, reference: CatalogueRow, filters: SearchFilters, excludeIds: string[], diversify: boolean, gender?: string): Promise<Selected<CatalogueRow>[]> {
     const rows = await this.prisma.product.findMany({
       where: {
         businessId, status: "PUBLISHED", id: { notIn: Array.from(new Set([reference.id, ...excludeIds])) },
@@ -1021,7 +1050,7 @@ export class ShoppingFlowService {
       include: SEARCH_INCLUDE,
       take: 30,
     });
-    const hard = applyHardConstraints(rows, { maxPrice: filters.maxPrice, minPrice: filters.minPrice });
+    const hard = applyHardConstraints(rows, { maxPrice: filters.maxPrice, minPrice: filters.minPrice, gender });
     const scored = hard.kept
       .map((s, i) => ({ s: { ...s, score: similarityScore(reference, s.product) }, i }))
       .filter((x) => reference.categoryId || x.s.score > 0)
@@ -1034,7 +1063,8 @@ export class ShoppingFlowService {
   private async tryAlternatives(conversationId: string, businessId: string, interp: ShoppingInterpretation, existing: ShoppingContext | null, activeProductId: string | null): Promise<boolean> {
     const referenceId = activeProductId ?? existing?.lastResults[0]?.productId ?? null;
     const merged = mergeTopic(existing, { ...interp, topicRelation: "REFINEMENT" });
-    const hasSearch = merged.filters.keywords.length > 0 || !!merged.occasion;
+    // a colour/gender/size the customer asked for is part of the search too ("anything in black" has no product word at all)
+    const hasSearch = merged.effectiveKeywords.length > 0 || !!merged.occasion;
 
     if (!referenceId && !hasSearch) {
       await this.conversations.sendMessage(conversationId, businessId, "Other options for what? Tell me what you're looking for and I'll show you some choices.");
@@ -1046,13 +1076,17 @@ export class ShoppingFlowService {
     let picked: Selected<CatalogueRow>[] = [];
 
     // A) the same search again, minus everything the customer has already seen
-    if (!isSimilar && hasSearch) picked = (await this.queryExact(businessId, merged, shown))?.matches ?? [];
+    if (!isSimilar && hasSearch) {
+      const again = (await this.queryPrimary(businessId, merged, shown)) ?? (isColourOnly(merged) ? null : await this.queryColour(businessId, merged, shown));
+      picked = again?.quality === "EXACT" ? again.matches : [];
+    }
 
-    // B) otherwise, products like the one in view / the top result
+    // B) otherwise, products like the one in view / the top result — but never for a colour-only ask ("anything in
+    // black"): footwear "similar to" the first black item is not what that customer asked for, so we say we're out
     let reference: CatalogueRow | null = null;
-    if (!picked.length && referenceId) {
+    if (!picked.length && referenceId && !(hasSearch && !isSimilar && isColourOnly(merged))) {
       reference = await this.prisma.product.findFirst({ where: { id: referenceId, businessId, status: "PUBLISHED" }, include: SEARCH_INCLUDE });
-      if (reference) picked = await this.similarTo(businessId, reference, merged.filters, isSimilar ? [] : shown, !isSimilar);
+      if (reference) picked = await this.similarTo(businessId, reference, merged.filters, isSimilar ? [] : shown, !isSimilar, merged.gender);
     }
 
     if (!picked.length) {
@@ -1226,7 +1260,7 @@ export class ShoppingFlowService {
   }
 
   private async askQuantity(conversationId: string, businessId: string, variantId: string) {
-    const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true } });
+    const variant = await this.prisma.variant.findFirst({ where: { id: variantId, businessId, active: true, product: { status: "PUBLISHED" } } });
     if (!variant) {
       await this.conversations.sendMessage(conversationId, businessId, "Sorry, that option is no longer available.");
       return;
@@ -1243,8 +1277,9 @@ export class ShoppingFlowService {
     // a plain affirmative ("I'll take it", "yes", "sure") after being shown a single-variant product means
     // quantity 1 — customers confirming a purchase rarely type the number itself
     const isAffirmative = /^\s*(i'?ll take it|take it|i want it|yes|yeah|yep|sure|ok(ay)?|sounds good|perfect|great)\s*[!.]*\s*$/i.test(text);
-    // a question/size/colour message that merely CONTAINS a digit ("what about size 8?") is a new request, never a quantity of 8
-    const isQuestionAboutProduct = /\?|\b(size|sz|colou?rs?|do you have|show me|what about)\b/i.test(text);
+    // a question/size/colour message that merely CONTAINS a digit ("what about size 8?"), or a pick from the list
+    // ("I like the second one"), is a new request, never a quantity
+    const isQuestionAboutProduct = /\?|\b(size|sz|colou?rs?|do you have|show me|what about)\b/i.test(text) || resolveOrdinalIndex(text, 9) !== null;
     const reply = readQuantityReply(text);
     // at most one stray word ("5 shirts", "2 pcs") is still a quantity; a budget phrase, a question or a longer sentence is not
     const isPlainQuantity = reply.quantity !== null && !reply.hasBudget && !isQuestionAboutProduct && reply.otherWords <= 1;
@@ -1261,8 +1296,10 @@ export class ShoppingFlowService {
       return;
     }
 
-    const variant = await this.prisma.variant.findFirst({ where: { id: conversation.pendingVariantId, businessId }, include: { product: true } });
+    const variant = await this.prisma.variant.findFirst({ where: { id: conversation.pendingVariantId, businessId, active: true, product: { status: "PUBLISHED" } }, include: { product: true } });
     if (!variant) {
+      // hidden or removed while the prompt was open — close the prompt so the next message isn't read as a quantity for a dead item
+      await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "BROWSING_PRODUCTS", pendingVariantId: null } });
       await this.conversations.sendMessage(conversationId, businessId, "Sorry, that item is no longer available.");
       return;
     }
@@ -1354,6 +1391,12 @@ export class ShoppingFlowService {
 
   private async confirmOrder(conversationId: string, businessId: string, conversation: { customerId: string; pendingAddress: string | null; pendingPaymentMethod: string | null }) {
     if (!conversation.pendingAddress || !conversation.pendingPaymentMethod) {
+      // a repeated tap on "Confirm Order" after the order was placed has nothing left to confirm — never restart checkout over it
+      const remaining = await this.cart.findActiveForConversation(conversationId, businessId);
+      if (!remaining?.items.length) {
+        await this.conversations.sendMessage(conversationId, businessId, "✅ Your order has already been placed — there's nothing more to confirm. We'll keep you posted here.");
+        return;
+      }
       await this.conversations.sendMessage(conversationId, businessId, "Let's start checkout again — what's your shipping address?");
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { shoppingState: "COLLECTING_ADDRESS" } });
       return;
@@ -1367,6 +1410,8 @@ export class ShoppingFlowService {
         paymentMethod: conversation.pendingPaymentMethod as "UPI" | "COD" | "CARD",
       });
     } catch (error) {
+      // another confirmation for this same cart won the race and is already replying — don't contradict it
+      if (error instanceof ConflictException) return;
       await this.conversations.sendMessage(conversationId, businessId, error instanceof Error ? error.message : "We couldn't place that order — please try again.");
       return;
     }

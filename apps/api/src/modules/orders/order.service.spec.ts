@@ -137,15 +137,17 @@ describe("OrderService", () => {
   });
 
   describe("markPaidViaRazorpay()", () => {
+    const paid = { amountMinor: 229900, currency: "INR" }; // ₹2,299.00 in paise
+
     it("is a no-op if the order doesn't exist", async () => {
       prisma.order.findFirst.mockResolvedValue(null);
-      const result = await orders.markPaidViaRazorpay("missing", "biz1", "pay_1");
+      const result = await orders.markPaidViaRazorpay("missing", "biz1", "pay_1", paid);
       expect(result).toEqual({ skipped: "order not found" });
     });
 
     it("is a no-op (idempotent) if the order is no longer PENDING_PAYMENT", async () => {
       prisma.order.findFirst.mockResolvedValue({ id: "o1", status: OrderStatus.PAID });
-      const result = await orders.markPaidViaRazorpay("o1", "biz1", "pay_1");
+      const result = await orders.markPaidViaRazorpay("o1", "biz1", "pay_1", paid);
       expect(result).toEqual({ skipped: "order is already paid" });
       expect(prisma.order.update).not.toHaveBeenCalled();
     });
@@ -156,12 +158,35 @@ describe("OrderService", () => {
       });
       prisma.order.update = jest.fn().mockResolvedValue({ id: "o1", status: OrderStatus.PAID, currency: "INR", total: 2299 });
 
-      const result = await orders.markPaidViaRazorpay("o1", "biz1", "pay_1");
+      const result = await orders.markPaidViaRazorpay("o1", "biz1", "pay_1", paid);
 
-      expect(prisma.order.update).toHaveBeenCalledWith({ where: { id: "o1" }, data: { status: OrderStatus.PAID, razorpayPaymentId: "pay_1" } });
+      // the write is conditional on the order still being PENDING_PAYMENT at the verified total (atomic guard against duplicate deliveries and amendments)
+      expect(prisma.order.update).toHaveBeenCalledWith({ where: { id: "o1", businessId: "biz1", status: OrderStatus.PENDING_PAYMENT, total: 2299 }, data: { status: OrderStatus.PAID, razorpayPaymentId: "pay_1" } });
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("Payment received"));
       expect(queues.scheduleFulfillmentKickoff).toHaveBeenCalledWith("o1", "biz1");
       expect("updated" in result).toBe(true);
+    });
+
+    it.each([
+      ["less than the order total", { amountMinor: 229800, currency: "INR" }],
+      ["more than the order total", { amountMinor: 229901, currency: "INR" }],
+      ["in another currency", { amountMinor: 229900, currency: "USD" }],
+    ])("does not mark the order paid when the amount paid is %s", async (_label, wrongPayment) => {
+      prisma.order.findFirst.mockResolvedValue({ id: "o1", status: OrderStatus.PENDING_PAYMENT, customerId: "cust1", conversationId: "conv1", currency: "INR", total: 2299 });
+      prisma.order.update = jest.fn();
+
+      const result = await orders.markPaidViaRazorpay("o1", "biz1", "pay_1", wrongPayment);
+
+      expect(result).toMatchObject({ skipped: "paid amount does not match the order", expectedMinor: 229900 });
+      expect(prisma.order.update).not.toHaveBeenCalled();
+      expect(conversations.sendMessage).not.toHaveBeenCalled();
+      expect(queues.scheduleFulfillmentKickoff).not.toHaveBeenCalled();
+    });
+
+    it("compares exact integer minor units — a total with paise never drifts through floating point", async () => {
+      prisma.order.findFirst.mockResolvedValue({ id: "o1", status: OrderStatus.PENDING_PAYMENT, customerId: "cust1", conversationId: null, currency: "INR", total: "1199.99" });
+      prisma.order.update = jest.fn().mockResolvedValue({ id: "o1", currency: "INR", total: "1199.99" });
+      expect("updated" in (await orders.markPaidViaRazorpay("o1", "biz1", "pay_1", { amountMinor: 119999, currency: "inr" }))).toBe(true);
     });
   });
 

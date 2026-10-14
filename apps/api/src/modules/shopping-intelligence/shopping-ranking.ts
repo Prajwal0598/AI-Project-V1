@@ -22,7 +22,22 @@ export interface Selected<T extends RankProduct> {
 const priceOf = (v: RankVariant) => Number(String(v.price));
 export const isInStock = (v: RankVariant) => v.inventory === null || v.inventory === undefined || v.inventory > 0;
 
-export interface HardConstraints { maxPrice?: number; minPrice?: number; requireStock?: boolean }
+export interface HardConstraints { maxPrice?: number; minPrice?: number; requireStock?: boolean; gender?: string }
+
+const MEN_WORDS = new Set(["men", "man", "mens", "male", "gents", "gent", "boys", "boy"]);
+const WOMEN_WORDS = new Set(["women", "woman", "womens", "female", "ladies", "lady", "girls", "girl"]);
+
+/**
+ * True when the product's own text names the OPPOSITE gender and never the requested one (or "unisex"). Word-based, because a
+ * substring match would treat "women" as containing "men" and show women's products to someone asking for men's.
+ */
+export function contradictsGender(p: RankProduct, gender?: string): boolean {
+  if (gender !== "men" && gender !== "women") return false;
+  const words = new Set(`${p.name} ${p.description ?? ""} ${p.brand ?? ""} ${p.category?.name ?? ""}`.toLowerCase().split(/[^a-z]+/));
+  if (words.has("unisex")) return false;
+  const [wanted, opposite] = gender === "men" ? [MEN_WORDS, WOMEN_WORDS] : [WOMEN_WORDS, MEN_WORDS];
+  return [...opposite].some((w) => words.has(w)) && ![...wanted].some((w) => words.has(w));
+}
 export interface HardResult<T extends RankProduct> {
   kept: Selected<T>[];
   excludedForBudget: number;
@@ -40,7 +55,7 @@ export function applyHardConstraints<T extends RankProduct>(products: T[], c: Ha
   let cheapestAboveBudget: number | undefined;
 
   for (const product of products) {
-    if (!product.variants.length) continue;
+    if (!product.variants.length || contradictsGender(product, c.gender)) continue;
     const stocked = product.variants.filter((v) => !requireStock || isInStock(v)) as T["variants"];
     const eligible = stocked.filter((v) => {
       const p = priceOf(v);

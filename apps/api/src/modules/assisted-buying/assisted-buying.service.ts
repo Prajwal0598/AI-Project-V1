@@ -118,7 +118,7 @@ export class AssistedBuyingService {
     type Candidate = Awaited<ReturnType<AssistedBuyingService["findCandidates"]>>[number];
     // price ceiling/floor and availability are HARD constraints: enforced in the query and re-checked on the
     // fetched records, and never relaxed below — only soft preferences (colour, descriptor words) ever are
-    const enforce = (rows: Candidate[]): Candidate[] => applyHardConstraints(rows, { maxPrice, minPrice }).kept.map((k) => ({ ...k.product, variants: k.eligible }));
+    const enforce = (rows: Candidate[]): Candidate[] => applyHardConstraints(rows, { maxPrice, minPrice, gender: merged.gender }).kept.map((k) => ({ ...k.product, variants: k.eligible }));
 
     let candidates = enforce(await this.findCandidates(businessId, filters, 20, excludedCategoryIds, { excludeIds: shown }));
     let quality: "EXACT" | "PARTIAL" | "ATTRIBUTE_UNAVAILABLE" = "EXACT";
@@ -129,7 +129,7 @@ export class AssistedBuyingService {
     // only on the variant) — if it isn't offered in that colour, say so and show what it genuinely comes in
     const freeKeywords = [...merged.filters.keywords, ...(merged.gender ? [merged.gender] : [])];
     if (!candidates.length && merged.color && freeKeywords.length) {
-      const rows = applyHardConstraints(await this.findCandidates(businessId, { keywords: freeKeywords, minPrice, maxPrice }, 20, excludedCategoryIds, { excludeIds: shown }), { maxPrice, minPrice }).kept;
+      const rows = applyHardConstraints(await this.findCandidates(businessId, { keywords: freeKeywords, minPrice, maxPrice }, 20, excludedCategoryIds, { excludeIds: shown }), { maxPrice, minPrice, gender: merged.gender }).kept;
       if (rows.length) {
         const { matching } = splitByAttributes(rows, { color: merged.color, size: merged.size });
         candidates = (matching.length ? matching : rows).map((k) => ({ ...k.product, variants: k.eligible }));
