@@ -5,10 +5,10 @@ import { GetUser } from "../../../common/get-user.decorator";
 import { Public } from "../../auth/public.decorator";
 import { RazorpayOAuthService } from "./razorpay-oauth.service";
 import { RazorpayOAuthCallbackDto } from "./dto/razorpay-oauth-callback.dto";
+import { primaryWebOrigin } from "../../../common/cors.helper";
 
 function settingsRedirectUrl(query: string): string {
-  const webOrigin = process.env.WEB_ORIGIN?.split(",")[0]?.trim() || "http://localhost:3000";
-  return `${webOrigin}/settings?${query}`;
+  return `${primaryWebOrigin(process.env.WEB_ORIGIN)}/settings?${query}`;
 }
 
 @Controller("integrations/razorpay")
