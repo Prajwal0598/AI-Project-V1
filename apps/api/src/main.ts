@@ -7,6 +7,7 @@ import { config } from "dotenv";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { assertRequiredEnv } from "./common/env";
+import { resolveCors } from "./common/cors.helper";
 import { initErrorReporting } from "./common/error-reporting.helper";
 import { SentryExceptionFilter } from "./common/sentry-exception.filter";
 
@@ -21,10 +22,11 @@ async function bootstrap() {
   // default "same-origin" CORP blocks the browser (not curl) from loading uploaded product images
   // from the API's origin (:4000) when embedded in the web app (:3000) via <img>
   app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
-  app.enableCors({
-    origin: process.env.WEB_ORIGIN?.split(",") ?? "http://localhost:3000",
-    credentials: true
-  });
+  const cors = resolveCors(process.env.WEB_ORIGIN);
+  if (cors.ignored.length) console.warn(`[bootstrap] Ignoring WEB_ORIGIN entries that are not exact http(s) origins (a wildcard is never allowed): ${cors.ignored.join(", ")}`);
+  if (!cors.origins.length) console.error("[bootstrap] WEB_ORIGIN has no valid origin — browsers will be blocked by CORS until it is fixed");
+  else console.log(`[bootstrap] CORS allows: ${cors.origins.join(", ")}`);
+  app.enableCors(cors.options);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   app.useGlobalFilters(new SentryExceptionFilter(app.get(HttpAdapterHost).httpAdapter));
   app.enableShutdownHooks();
