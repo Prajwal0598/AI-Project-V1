@@ -63,7 +63,7 @@ export function AppShell({ title, subtitle, action, children }: { title: string;
 
   return <main className="app-shell">
     <aside className="app-sidebar">
-      <Link className="app-brand" href="/"><span>r</span>relay</Link>
+      <Link className="app-brand" href="/"><img src="/relayshift-logo.png" alt="RelayShift" width={640} height={142} /></Link>
       <p className="app-section-label">Workspace</p>
       <nav>{items.map(([label, href, mark]) => <Link key={href} href={href} className={`app-nav-link ${pathname === href ? "selected" : ""}`}><b>{mark}</b>{label}{label === "Inbox" && !!openConversations && <i>{openConversations}</i>}{label === "Orders" && !!ordersNeedingAction && <i>{ordersNeedingAction}</i>}</Link>)}
       {isPlatformAdmin && <Link href="/platform" className={`app-nav-link ${pathname === "/platform" ? "selected" : ""}`}><b>⚙</b>Platform</Link>}

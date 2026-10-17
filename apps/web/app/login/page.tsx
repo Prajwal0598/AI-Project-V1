@@ -71,7 +71,7 @@ export default function LoginPage() {
       <div className="login-showcase">
         <div className="login-showcase-glow" />
         <div className="login-showcase-top">
-          <div className="login-brand"><span>r</span>relay</div>
+          <div className="login-brand"><img src="/relayshift-logo.png" alt="RelayShift" width={640} height={142} /></div>
           <span className="login-showcase-tag">AI-Powered Commerce</span>
         </div>
 
