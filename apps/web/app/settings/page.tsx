@@ -232,8 +232,8 @@ export default function SettingsPage() {
       const checkout = new window.Razorpay({
         key: razorpayKeyId,
         subscription_id: subscriptionId,
-        name: "Relay",
-        description: "Relay Pro subscription",
+        name: "RelayShift",
+        description: "RelayShift Pro subscription",
         theme: { color: "#7760d4" },
         handler: () => loadBilling(),
         modal: { ondismiss: () => loadBilling() },
@@ -324,7 +324,7 @@ export default function SettingsPage() {
     {saveError && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{saveError} <button onClick={() => setSaveError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
     <section className="settings-section">
       <h2>Billing</h2>
-      <p>Relay's own subscription — separate from your customers' payments to you.</p>
+      <p>RelayShift's own subscription — separate from your customers' payments to you.</p>
       {billingError && <p style={{ color: "#b94940", fontSize: 12, marginBottom: 8 }}>{billingError}</p>}
       {subscription ? (
         <div style={{ maxWidth: 480, marginTop: 8 }}>
@@ -367,7 +367,7 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div style={{ maxWidth: 420, marginTop: 8 }}>
-          <p>Start your free trial to activate Relay's AI assistant for your customers.</p>
+          <p>Start your free trial to activate RelayShift's AI assistant for your customers.</p>
           <button className="primary-button" onClick={startCheckout} disabled={checkingOut}>{checkingOut ? "Opening…" : "Start free trial"}</button>
         </div>
       )}
@@ -399,7 +399,7 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div style={{ maxWidth: 420, marginTop: 8 }}>
-          <p>Connect your WhatsApp Business account to let Relay talk to your customers.</p>
+          <p>Connect your WhatsApp Business account to let RelayShift talk to your customers.</p>
           {waStatus && !["DISCONNECTED", "CONNECTED"].includes(waStatus.status) && (
             <p style={{ fontSize: 12, color: "var(--muted)" }}>Current status: {waStatus.status.replace(/_/g, " ").toLowerCase()}{waStatus.lastErrorMessage ? ` — ${waStatus.lastErrorMessage}` : ""}</p>
           )}
@@ -475,7 +475,7 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div style={{ maxWidth: 420, marginTop: 8 }}>
-          <p>Connect your Razorpay account — you'll log in on Razorpay's own site and authorize Relay, without ever pasting API keys here.</p>
+          <p>Connect your Razorpay account — you'll log in on Razorpay's own site and authorize RelayShift, without ever pasting API keys here.</p>
           {rzStatus?.status === "RETRY_REQUIRED" && (
             <p style={{ fontSize: 12, color: "var(--muted)" }}>Current status: retry required{rzStatus.lastErrorMessage ? ` — ${rzStatus.lastErrorMessage}` : ""}</p>
           )}
@@ -640,7 +640,7 @@ export default function SettingsPage() {
 
     <section className="settings-section">
       <h2>Proactive AI Suggestions</h2>
-      <p>Relay watches conversations, carts, and inventory for sales opportunities (abandoned carts, product enquiries, back-in-stock) and drafts a message for your review in the <a href="/suggestions">Suggestions</a> inbox.</p>
+      <p>RelayShift watches conversations, carts, and inventory for sales opportunities (abandoned carts, product enquiries, back-in-stock) and drafts a message for your review in the <a href="/suggestions">Suggestions</a> inbox.</p>
       <div style={{ maxWidth: 420, marginTop: 16 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
           <input type="checkbox" checked={proactiveSuggestionsEnabled} onChange={e => setProactiveSuggestionsEnabled(e.target.checked)} />

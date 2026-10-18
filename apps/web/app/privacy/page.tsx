@@ -1,18 +1,18 @@
 import { LegalPage, LEGAL_ENTITY_NAME, LEGAL_CONTACT_EMAIL } from "../../components/legal-page";
 
-export const metadata = { title: "Privacy Policy — Relay" };
+export const metadata = { title: "Privacy Policy — RelayShift" };
 
 export default function PrivacyPolicyPage() {
   return (
     <LegalPage title="Privacy Policy">
-      <p>This Privacy Policy explains what data Relay ("we", "us") collects when a merchant business ("Merchant")
-      uses the Relay platform, and when that Merchant's customers ("Customers") message the Merchant through a
-      channel Relay operates on the Merchant's behalf (WhatsApp, Instagram Direct, or email).</p>
+      <p>This Privacy Policy explains what data RelayShift ("we", "us") collects when a merchant business ("Merchant")
+      uses the RelayShift platform, and when that Merchant's customers ("Customers") message the Merchant through a
+      channel RelayShift operates on the Merchant's behalf (WhatsApp, Instagram Direct, or email).</p>
 
       <h2>1. Who this applies to</h2>
-      <p>Relay is operated by {LEGAL_ENTITY_NAME}. Merchants sign up directly with Relay. Customers interact with
-      a Merchant's chat channel and are not required to sign up with Relay directly — their messages and order
-      data are processed by Relay solely to provide that Merchant's chat-commerce service.</p>
+      <p>RelayShift is operated by {LEGAL_ENTITY_NAME}. Merchants sign up directly with RelayShift. Customers interact with
+      a Merchant's chat channel and are not required to sign up with RelayShift directly — their messages and order
+      data are processed by RelayShift solely to provide that Merchant's chat-commerce service.</p>
 
       <h2>2. Data we collect</h2>
       <p><strong>From Merchants:</strong> account/contact details (name, email, password hash), business profile
@@ -30,7 +30,7 @@ export default function PrivacyPolicyPage() {
           and sending payment links and order updates.</li>
         <li>Message content and relevant product/order context are sent to our AI provider (OpenAI) solely to
           generate a reply for that conversation — never to train external models on your data.</li>
-        <li>Payment collection is handled by Razorpay; Relay does not store card numbers or bank credentials.</li>
+        <li>Payment collection is handled by Razorpay; RelayShift does not store card numbers or bank credentials.</li>
         <li>To detect and prevent abuse, and to maintain security logs (e.g. webhook signature verification,
           authentication attempts).</li>
       </ul>

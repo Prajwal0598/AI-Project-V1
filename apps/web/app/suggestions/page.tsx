@@ -106,7 +106,7 @@ export default function SuggestionsPage() {
 
   const visible = useMemo(() => opportunities, [opportunities]);
 
-  return <AppShell title="Suggestions" subtitle="Relay's proactive sales opportunities — review, edit, and send." action={
+  return <AppShell title="Suggestions" subtitle="RelayShift's proactive sales opportunities — review, edit, and send." action={
     !business ? undefined : <span style={{ fontSize: 12, color: "var(--muted)" }}>
       Proactive AI Suggestions is {business.proactiveSuggestionsEnabled ? <strong style={{ color: "#237a52" }}>ON</strong> : <strong style={{ color: "#b94940" }}>OFF</strong>} — <a href="/settings">manage in Settings</a>
     </span>
@@ -114,7 +114,7 @@ export default function SuggestionsPage() {
     {error && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{error} <button onClick={() => setError("")} style={{ marginLeft: 8, textDecoration: "underline" }}>Dismiss</button></div>}
 
     {business && !business.proactiveSuggestionsEnabled && <div style={{ background: "#fff8ea", border: "1px solid #f3e0ad", color: "#8a6a1f", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>
-      Proactive AI Suggestions is currently off — Relay won't detect new opportunities until you enable it in Settings.
+      Proactive AI Suggestions is currently off — RelayShift won't detect new opportunities until you enable it in Settings.
     </div>}
 
     {summary && <div className="metric-grid" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>

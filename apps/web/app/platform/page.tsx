@@ -38,7 +38,7 @@ export default function PlatformAdminPage() {
     </AppShell>;
   }
 
-  return <AppShell title="Platform" subtitle="Order values, revenue, and merchants across every business on Relay.">
+  return <AppShell title="Platform" subtitle="Order values, revenue, and merchants across every business on RelayShift.">
     {error && <div style={{ background: "#fff3f2", border: "1px solid #fcd9d6", color: "#b94940", fontSize: 12, padding: "8px 14px", marginBottom: 12 }}>{error}</div>}
     {loading && <p style={{ color: "var(--muted)", fontSize: 12 }}>Loading…</p>}
 
@@ -47,7 +47,7 @@ export default function PlatformAdminPage() {
       <article className="metric-card"><p>Total orders</p><h2>{overview.orders}</h2></article>
       <article className="metric-card revenue"><p>Total revenue (paid orders)</p><h2>{fmtRevenue(overview.revenue)}</h2></article>
       <article className="metric-card"><p>Customers</p><h2>{overview.customers}</h2></article>
-      <article className="metric-card"><p>Relay Paid MRR</p><h2>{fmtRevenue(overview.paidMRR)}</h2></article>
+      <article className="metric-card"><p>RelayShift Paid MRR</p><h2>{fmtRevenue(overview.paidMRR)}</h2></article>
     </div>}
 
     {!loading && <div style={{ marginTop: 20, overflowX: "auto" }}>
@@ -61,7 +61,7 @@ export default function PlatformAdminPage() {
             <th style={{ padding: 6 }}>Instagram</th>
             <th style={{ padding: 6 }}>Orders</th>
             <th style={{ padding: 6 }}>Revenue</th>
-            <th style={{ padding: 6 }}>Relay billing</th>
+            <th style={{ padding: 6 }}>RelayShift billing</th>
           </tr>
         </thead>
         <tbody>

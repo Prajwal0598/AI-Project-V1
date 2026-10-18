@@ -75,7 +75,7 @@ export default function Home() {
       </div>
 
       {opportunitySummary && <article className="card" style={{ marginBottom: 20 }}>
-        <div className="card-heading"><div><h3>✦ AI Opportunities</h3><p>Relay is telling you where your next sales are.</p></div><button className="select" onClick={() => router.push("/suggestions")}>Review <i>→</i></button></div>
+        <div className="card-heading"><div><h3>✦ AI Opportunities</h3><p>RelayShift is telling you where your next sales are.</p></div><button className="select" onClick={() => router.push("/suggestions")}>Review <i>→</i></button></div>
         <div className="metric-grid" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginTop: 16, marginBottom: 0 }}>
           <article className="metric-card"><p>Opportunities detected</p><h2>{opportunitySummary.opportunitiesDetected}</h2></article>
           <article className="metric-card"><p>Awaiting your action</p><h2>{opportunitySummary.awaitingAction}</h2></article>

@@ -19,7 +19,7 @@ export function LegalPage({ title, children }: { title: string; children: ReactN
   return (
     <div style={{ minHeight: "100vh", background: "var(--canvas)" }}>
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "48px 24px 80px" }}>
-        <Link href="/" style={{ color: "var(--purple)", fontSize: 13, textDecoration: "none" }}>← Back to Relay</Link>
+        <Link href="/" style={{ color: "var(--purple)", fontSize: 13, textDecoration: "none" }}>← Back to RelayShift</Link>
         <h1 style={{ marginTop: 16, marginBottom: 4 }}>{title}</h1>
         <p style={{ color: "var(--muted)", fontSize: 13, marginBottom: 32 }}>Last updated: {LEGAL_LAST_UPDATED}</p>
         <div style={{ lineHeight: 1.7, fontSize: 14, color: "var(--ink)" }}>{children}</div>
