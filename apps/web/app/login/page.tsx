@@ -77,10 +77,10 @@ export default function LoginPage() {
 
         <h1 className="login-showcase-headline">Turn conversations into <em>customers</em>.</h1>
         <p className="login-showcase-copy">
-          Relay helps businesses turn customer conversations into sales — with AI that answers questions,
+          RelayShift helps businesses turn customer conversations into sales — with AI that answers questions,
           recommends products, takes orders and follows up automatically.
         </p>
-        <button type="button" className="login-demo-cta" onClick={() => setShowDemo(true)}>See how Relay works →</button>
+        <button type="button" className="login-demo-cta" onClick={() => setShowDemo(true)}>See how RelayShift works →</button>
 
         <div className="login-showcase-features">
           <div><span className="login-feature-icon peach">💬</span>AI Sales Assistant</div>
@@ -109,7 +109,7 @@ export default function LoginPage() {
       <div className="login-panel">
         <div className="login-card">
           <h1>{mode === "login" ? "Welcome back" : "Create your account"} {mode === "login" && <span className="login-wave">👋</span>}</h1>
-          <p>{mode === "login" ? "Sign in to your Relay workspace." : "Set up your AI sales workspace."}</p>
+          <p>{mode === "login" ? "Sign in to your RelayShift workspace." : "Set up your AI sales workspace."}</p>
 
           {error && <div className="login-error">{error}</div>}
 
@@ -140,9 +140,9 @@ export default function LoginPage() {
           </button>
 
           <p className="login-toggle">
-            {mode === "login" ? "New to Relay?" : "Already have an account?"}
+            {mode === "login" ? "New to RelayShift?" : "Already have an account?"}
             <button onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
-              {mode === "login" ? "Start selling with Relay →" : "Sign in"}
+              {mode === "login" ? "Start selling with RelayShift →" : "Sign in"}
             </button>
           </p>
           <p style={{ marginTop: 24, fontSize: 11, color: "var(--muted)", display: "flex", gap: 12, justifyContent: "center" }}>
@@ -156,9 +156,9 @@ export default function LoginPage() {
 
       {showDemo && (
         <div className="login-demo-backdrop" role="presentation" onClick={() => setShowDemo(false)}>
-          <div className="login-demo-modal" role="dialog" aria-modal="true" aria-label="Relay product demo" onClick={e => e.stopPropagation()}>
+          <div className="login-demo-modal" role="dialog" aria-modal="true" aria-label="RelayShift product demo" onClick={e => e.stopPropagation()}>
             <button type="button" className="login-demo-close" aria-label="Close demo" onClick={() => setShowDemo(false)}>✕</button>
-            <h2>See how Relay works</h2>
+            <h2>See how RelayShift works</h2>
             <p>A real conversation, handled automatically from question to order.</p>
             <DemoChat />
           </div>
