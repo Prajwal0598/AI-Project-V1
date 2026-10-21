@@ -5,7 +5,7 @@ import { ShoppingInterpreterService } from "../shopping-intelligence/shopping-in
 import type { PrismaService } from "../../database/prisma.service";
 import type { ConversationService } from "../conversations/conversation.service";
 import type { CartService } from "../cart/cart.service";
-import type { OrderService } from "../orders/order.service";
+import { PAYMENT_RETRY_BUTTONS, type OrderService } from "../orders/order.service";
 import type { CustomerSignalService } from "../customer-signals/customer-signal.service";
 
 describe("parseSearchQuery", () => {
@@ -232,6 +232,75 @@ describe("ShoppingFlowService — state machine", () => {
         data: { pendingPaymentMethod: "CARD", shoppingState: "ORDER_CONFIRMATION" },
       });
       expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("💳 Payment: Card"));
+    });
+
+    describe("order_confirm for an online payment", () => {
+      const confirming = { customerId: "cust1", escalated: false, pendingAddress: "123 Main St", pendingPaymentMethod: "UPI" };
+      const placedOrder = { id: "order12345678", status: "PENDING_PAYMENT", total: 2299, currency: "INR", razorpayPaymentLinkUrl: null as string | null };
+
+      beforeEach(() => {
+        prisma.conversation.findFirst.mockResolvedValue(confirming);
+        cart.getOrCreateActive.mockResolvedValue({ id: "cart1", items: [] });
+        cart.checkout = jest.fn();
+      });
+
+      it("sends the real Razorpay link when one was created", async () => {
+        cart.checkout.mockResolvedValue({ ...placedOrder, razorpayPaymentLinkUrl: "https://rzp.io/abc" });
+        await flow.handleInteractive("conv1", "biz1", "order_confirm");
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", "https://rzp.io/abc");
+        expect(conversations.sendButtons).not.toHaveBeenCalled();
+      });
+
+      it("still sends the placeholder link when the business has not configured Razorpay at all", async () => {
+        cart.checkout.mockResolvedValue(placedOrder);
+        await flow.handleInteractive("conv1", "biz1", "order_confirm");
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", "https://pay.relay-dummy.app/checkout/order12345678");
+      });
+
+      it("never sends a placeholder link when Razorpay refused — it apologises and offers a retry button", async () => {
+        cart.checkout.mockResolvedValue({ ...placedOrder, paymentLinkFailed: true });
+        await flow.handleInteractive("conv1", "biz1", "order_confirm");
+        expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't create your payment link"), PAYMENT_RETRY_BUTTONS);
+        expect(conversations.sendMessage).not.toHaveBeenCalled();
+        // the order stays open on the conversation so "Try again" knows which order to retry
+        expect(prisma.conversation.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ activeOrderId: "order12345678" }) }));
+      });
+    });
+
+    describe("pay_retry ('Try again' after Razorpay refused a payment link)", () => {
+      beforeEach(() => {
+        orders.retryPaymentLink = jest.fn();
+      });
+
+      it("sends the payment link once the retry succeeds", async () => {
+        prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false, activeOrderId: "order1" });
+        orders.retryPaymentLink.mockResolvedValue({ status: "link", url: "https://rzp.io/retry" });
+        await flow.handleInteractive("conv1", "biz1", "pay_retry");
+        expect(orders.retryPaymentLink).toHaveBeenCalledWith("order1", "biz1");
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", "https://rzp.io/retry");
+      });
+
+      it("offers another retry when Razorpay still refuses", async () => {
+        prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false, activeOrderId: "order1" });
+        orders.retryPaymentLink.mockResolvedValue({ status: "failed" });
+        await flow.handleInteractive("conv1", "biz1", "pay_retry");
+        expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't create your payment link"), PAYMENT_RETRY_BUTTONS);
+      });
+
+      it("explains there is nothing to retry when the order no longer needs a link", async () => {
+        prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false, activeOrderId: "order1" });
+        orders.retryPaymentLink.mockResolvedValue({ status: "not_applicable" });
+        await flow.handleInteractive("conv1", "biz1", "pay_retry");
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("no order waiting for a payment link"));
+        expect(conversations.sendButtons).not.toHaveBeenCalled();
+      });
+
+      it("does not touch any order when the conversation has none open", async () => {
+        prisma.conversation.findFirst.mockResolvedValue({ customerId: "cust1", escalated: false, activeOrderId: null });
+        await flow.handleInteractive("conv1", "biz1", "pay_retry");
+        expect(orders.retryPaymentLink).not.toHaveBeenCalled();
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("no order waiting for a payment link"));
+      });
     });
   });
 

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { Business, Order } from "@prisma/client";
-import { RazorpayService } from "./razorpay.service";
+import { PaymentLinkUnavailableError, RazorpayService } from "./razorpay.service";
 import { encryptSecret } from "../../common/crypto.helper";
 
 type BusinessPick = Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "razorpayAccessTokenEncrypted" | "razorpayConnectionStatus" | "name">;
@@ -131,19 +131,19 @@ describe("RazorpayService", () => {
       expect(body.customer.contact).toBe("+911234567890");
     });
 
-    it("returns null (and doesn't throw) when Razorpay responds with a non-OK status", async () => {
+    it("throws PaymentLinkUnavailableError (never null) when a configured business gets a non-OK status — e.g. Test Mode's 30-link cap", async () => {
       process.env.RAZORPAY_KEY_SECRET = "secret";
       jest.spyOn(global, "fetch").mockResolvedValue({
         ok: false,
-        json: async () => ({ error: { description: "bad request" } }),
+        json: async () => ({ error: { code: "RATE_LIMIT_EXCEEDED", description: "test mode limit of 30 reached for payment_link" } }),
       } as Response);
-      await expect(service.createPaymentLink(business, order, customer)).resolves.toBeNull();
+      await expect(service.createPaymentLink(business, order, customer)).rejects.toBeInstanceOf(PaymentLinkUnavailableError);
     });
 
-    it("returns null (and doesn't throw) when the fetch call itself fails", async () => {
+    it("throws PaymentLinkUnavailableError when the fetch call itself fails", async () => {
       process.env.RAZORPAY_KEY_SECRET = "secret";
       jest.spyOn(global, "fetch").mockRejectedValue(new Error("network down"));
-      await expect(service.createPaymentLink(business, order, customer)).resolves.toBeNull();
+      await expect(service.createPaymentLink(business, order, customer)).rejects.toBeInstanceOf(PaymentLinkUnavailableError);
     });
   });
 });
