@@ -1,13 +1,13 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { OrderStatus, FulfillmentStatus } from "@prisma/client";
-import { OrderService } from "./order.service";
+import { OrderService, PAYMENT_RETRY_BUTTONS } from "./order.service";
 import type { PrismaService } from "../../database/prisma.service";
 import type { QueueService } from "../../queue/queue.service";
 import type { InventoryService } from "../inventory/inventory.service";
 import type { OpportunityService } from "../opportunities/opportunity.service";
 import type { ProductRelationService } from "../product-relations/product-relation.service";
 import type { ConversationService } from "../conversations/conversation.service";
-import type { RazorpayService } from "../payments/razorpay.service";
+import { PaymentLinkUnavailableError, type RazorpayService } from "../payments/razorpay.service";
 
 describe("OrderService", () => {
   let prisma: any;
@@ -15,13 +15,14 @@ describe("OrderService", () => {
   let inventory: { notifyBackInStock: jest.Mock; recordAdjustment: jest.Mock };
   let opportunities: { attachOrderOutcome: jest.Mock };
   let productRelations: Record<string, jest.Mock>;
-  let conversations: { sendMessage: jest.Mock };
+  let conversations: { sendMessage: jest.Mock; sendButtons: jest.Mock };
   let razorpay: { createPaymentLink: jest.Mock };
   let orders: OrderService;
 
   beforeEach(() => {
     prisma = {
-      order: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0), $transaction: undefined },
+      order: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn().mockResolvedValue(0), $transaction: undefined },
+      orderItem: { deleteMany: jest.fn() },
       customer: { findFirst: jest.fn(), findUnique: jest.fn() },
       business: { findUnique: jest.fn() },
       activityEvent: { create: jest.fn() },
@@ -35,7 +36,7 @@ describe("OrderService", () => {
     inventory = { notifyBackInStock: jest.fn(), recordAdjustment: jest.fn().mockResolvedValue({ restocked: false }) };
     opportunities = { attachOrderOutcome: jest.fn() };
     productRelations = { getRelationsFor: jest.fn() };
-    conversations = { sendMessage: jest.fn() };
+    conversations = { sendMessage: jest.fn(), sendButtons: jest.fn() };
     razorpay = { createPaymentLink: jest.fn() };
 
     orders = new OrderService(
@@ -133,6 +134,146 @@ describe("OrderService", () => {
       // expiry safety net still applies even with a real payment link, in case the customer never pays
       expect(queues.scheduleOrderExpiry).toHaveBeenCalledWith("order1", "biz1", OrderStatus.PENDING_PAYMENT);
       expect(result.razorpayPaymentLinkId).toBe("plink_1");
+    });
+  });
+
+  describe("Razorpay configured but refusing to create the payment link", () => {
+    const customer = { id: "cust1", firstName: "Test", lastName: null, phone: "+911234567890" };
+    const refuse = () => razorpay.createPaymentLink.mockRejectedValue(new PaymentLinkUnavailableError());
+
+    beforeEach(() => {
+      prisma.customer.findFirst.mockResolvedValue(customer);
+      prisma.customer.findUnique.mockResolvedValue(customer);
+      prisma.business.findUnique.mockResolvedValue({ id: "biz1", name: "Test Biz", autonomyMaxOrderValue: null });
+      prisma.order.update = jest.fn();
+    });
+
+    it("create() leaves an honest unpaid order: no simulated payment timer, no fake link, merchant flagged", async () => {
+      prisma.order.create = jest.fn().mockResolvedValue({
+        id: "order1", businessId: "biz1", customerId: "cust1", status: OrderStatus.PENDING_PAYMENT,
+        total: 2299, currency: "INR", paymentMethod: "UPI", razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null, items: [],
+      });
+      refuse();
+
+      const result = await orders.create("biz1", { customerId: "cust1", subtotal: 2299, currency: "INR", paymentMethod: "UPI", items: [] } as any);
+
+      expect(result.paymentLinkFailed).toBe(true);
+      expect(result.razorpayPaymentLinkUrl).toBeNull();
+      expect(prisma.order.update).not.toHaveBeenCalled();
+      expect(queues.scheduleOrderProgress).not.toHaveBeenCalled(); // nothing may auto-mark this order paid
+      expect(queues.scheduleOrderExpiry).toHaveBeenCalledWith("order1", "biz1", OrderStatus.PENDING_PAYMENT); // stock is still released if it is never paid
+      expect(prisma.activityEvent.create).toHaveBeenCalledWith({ data: expect.objectContaining({ summary: expect.stringContaining("couldn't create a payment link for order #") }) });
+    });
+
+    describe("approve()", () => {
+      const awaiting = { id: "order1", businessId: "biz1", customerId: "cust1", conversationId: "conv1", status: OrderStatus.AWAITING_APPROVAL, paymentMethod: "UPI", total: 5000, currency: "INR" };
+
+      beforeEach(() => {
+        prisma.order.findFirst.mockResolvedValue(awaiting);
+        prisma.order.update = jest.fn().mockResolvedValue({ ...awaiting, status: OrderStatus.PENDING_PAYMENT, razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null });
+      });
+
+      it("offers the customer a retry instead of saying the order is being processed, and starts no simulated payment", async () => {
+        refuse();
+
+        await orders.approve("order1", "biz1");
+
+        expect(queues.scheduleOrderProgress).not.toHaveBeenCalled();
+        expect(queues.scheduleOrderExpiry).toHaveBeenCalledWith("order1", "biz1", OrderStatus.PENDING_PAYMENT);
+        expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't create your payment link"), PAYMENT_RETRY_BUTTONS);
+        expect(conversations.sendMessage).not.toHaveBeenCalled();
+        expect(prisma.activityEvent.create).toHaveBeenCalledWith({ data: expect.objectContaining({ summary: expect.stringContaining("couldn't create a payment link") }) });
+      });
+
+      it("keeps the simulated payment flow when Razorpay is simply not configured for the business", async () => {
+        razorpay.createPaymentLink.mockResolvedValue(null);
+
+        await orders.approve("order1", "biz1");
+
+        expect(queues.scheduleOrderProgress).toHaveBeenCalledWith("order1", "biz1");
+        expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("now being processed"));
+        expect(conversations.sendButtons).not.toHaveBeenCalled();
+      });
+    });
+
+    it("replaceItems() drops the link that belonged to the old total and reports the failure", async () => {
+      const existing = {
+        id: "order1", businessId: "biz1", customerId: "cust1", conversationId: "conv1", status: OrderStatus.PENDING_PAYMENT, paymentMethod: "UPI",
+        shippingFee: 0, shippingAddress: null, currency: "INR", total: 1000, razorpayPaymentLinkId: "plink_old", razorpayPaymentLinkUrl: "https://rzp.io/old", items: [],
+      };
+      prisma.order.findFirst.mockResolvedValue(existing);
+      prisma.order.update = jest.fn()
+        .mockResolvedValueOnce({ ...existing, total: 1500, items: [] })
+        .mockResolvedValueOnce({ ...existing, total: 1500, razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null, items: [] });
+      refuse();
+
+      const result = await orders.replaceItems("order1", "biz1", [{ name: "Shirt", quantity: 1, unitPrice: 1500 }]);
+
+      expect(prisma.order.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null } }));
+      expect(result.paymentLinkFailed).toBe(true);
+      expect(result.razorpayPaymentLinkUrl).toBeNull();
+    });
+  });
+
+  describe("retryPaymentLink()", () => {
+    const pending = { id: "order1", businessId: "biz1", customerId: "cust1", status: OrderStatus.PENDING_PAYMENT, paymentMethod: "UPI", total: 2299, currency: "INR", razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null };
+
+    beforeEach(() => {
+      prisma.customer.findUnique.mockResolvedValue({ id: "cust1", firstName: "Test", lastName: null, phone: "+911234567890" });
+      prisma.business.findUnique.mockResolvedValue({ id: "biz1", name: "Test Biz" });
+    });
+
+    it.each([
+      ["does not exist", null],
+      ["is already paid", { ...pending, status: OrderStatus.PAID }],
+      ["is cash on delivery", { ...pending, paymentMethod: "COD" }],
+    ])("is not applicable when the order %s", async (_label, order) => {
+      prisma.order.findFirst.mockResolvedValue(order);
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "not_applicable" });
+      expect(razorpay.createPaymentLink).not.toHaveBeenCalled();
+    });
+
+    it("hands back an existing link without creating a second one", async () => {
+      prisma.order.findFirst.mockResolvedValue({ ...pending, razorpayPaymentLinkId: "plink_1", razorpayPaymentLinkUrl: "https://rzp.io/1" });
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "link", url: "https://rzp.io/1" });
+      expect(razorpay.createPaymentLink).not.toHaveBeenCalled();
+    });
+
+    it("creates and attaches a link when Razorpay accepts the retry", async () => {
+      prisma.order.findFirst.mockResolvedValue(pending);
+      razorpay.createPaymentLink.mockResolvedValue({ id: "plink_2", shortUrl: "https://rzp.io/2" });
+      prisma.order.updateMany.mockResolvedValue({ count: 1 });
+
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "link", url: "https://rzp.io/2" });
+      // only attaches while the order is still unpaid and linkless, so two simultaneous taps can't both win
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: "order1", businessId: "biz1", status: OrderStatus.PENDING_PAYMENT, razorpayPaymentLinkId: null },
+        data: { razorpayPaymentLinkId: "plink_2", razorpayPaymentLinkUrl: "https://rzp.io/2" },
+      });
+    });
+
+    it("reports a failure (and attaches nothing) when Razorpay refuses again", async () => {
+      prisma.order.findFirst.mockResolvedValue(pending);
+      razorpay.createPaymentLink.mockRejectedValue(new PaymentLinkUnavailableError());
+
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "failed" });
+      expect(prisma.order.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("gives the loser of a simultaneous retry the winner's link", async () => {
+      prisma.order.findFirst
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({ ...pending, razorpayPaymentLinkId: "plink_winner", razorpayPaymentLinkUrl: "https://rzp.io/winner" });
+      razorpay.createPaymentLink.mockResolvedValue({ id: "plink_loser", shortUrl: "https://rzp.io/loser" });
+      prisma.order.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "link", url: "https://rzp.io/winner" });
+    });
+
+    it("is not applicable when Razorpay isn't configured for the business", async () => {
+      prisma.order.findFirst.mockResolvedValue(pending);
+      razorpay.createPaymentLink.mockResolvedValue(null);
+      expect(await orders.retryPaymentLink("order1", "biz1")).toEqual({ status: "not_applicable" });
     });
   });
 

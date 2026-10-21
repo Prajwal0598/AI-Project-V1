@@ -14,6 +14,14 @@ interface PaymentLinkResult {
   shortUrl: string;
 }
 
+/** Razorpay is configured for the business but could not produce a payment link (rejected request, rate limit, network). */
+export class PaymentLinkUnavailableError extends Error {
+  constructor(message = "Razorpay could not create a payment link") {
+    super(message);
+    this.name = "PaymentLinkUnavailableError";
+  }
+}
+
 /** An order total (Decimal/number/string) as the integer amount in the currency's smallest unit (paise for INR) — rounded to avoid float drift. Used for BOTH the payment link's amount and verifying what was paid, so the two always agree. */
 export function toMinorUnits(amount: { toString(): string } | number): number {
   return Math.round(Number(amount) * 100);
@@ -21,9 +29,10 @@ export function toMinorUnits(amount: { toString(): string } | number): number {
 
 /**
  * Wraps Razorpay's Payment Links API (https://api.razorpay.com/v1/payment_links) so a customer choosing
- * UPI gets a real, payable link instead of the simulated dummy checkout URL. Falls back gracefully (returns
- * null, never throws) when a business hasn't configured Razorpay yet — callers keep working exactly as
- * before (simulated payment flow) in that case, so this is purely additive/opt-in per business.
+ * UPI gets a real, payable link instead of the simulated dummy checkout URL. Returns null when a business
+ * hasn't configured Razorpay yet — callers keep working exactly as before (simulated payment flow) in that
+ * case, so this is purely additive/opt-in per business. When Razorpay IS configured but fails, it throws
+ * PaymentLinkUnavailableError instead, so a real payment is never silently replaced by a simulated one.
  */
 @Injectable()
 export class RazorpayService {
@@ -70,9 +79,9 @@ export class RazorpayService {
     return verifyRazorpaySignature(rawBody, signatureHeader, this.resolveWebhookSecret(business));
   }
 
-  /** Creates a real, payable Razorpay Payment Link for this order's total. Returns null (logged) if Razorpay
-   * isn't configured for this business, or if the Razorpay API call fails for any reason — never throws, so
-   * the caller can fall back to the existing simulated payment flow instead of failing order creation. */
+  /** Creates a real, payable Razorpay Payment Link for this order's total. Returns null if Razorpay isn't
+   * configured for this business; throws PaymentLinkUnavailableError (after logging and reporting it) if it is
+   * configured but the Razorpay API call fails for any reason. */
   async createPaymentLink(
     business: Pick<Business, "id" | "razorpayKeyId" | "razorpayKeySecretEncrypted" | "razorpayAccessTokenEncrypted" | "razorpayConnectionStatus" | "name">,
     order: Pick<Order, "id" | "total" | "currency">,
@@ -110,15 +119,16 @@ export class RazorpayService {
         const errBody = await res.json().catch(() => ({}));
         this.logger.error(`Razorpay payment link creation failed for order ${order.id}: ${JSON.stringify(errBody)}`);
         captureException(new Error("Razorpay payment link creation failed"), { orderId: order.id, businessId: business.id, errBody });
-        return null;
+        throw new PaymentLinkUnavailableError();
       }
 
       const data = await res.json() as { id: string; short_url: string };
       return { id: data.id, shortUrl: data.short_url };
     } catch (err) {
+      if (err instanceof PaymentLinkUnavailableError) throw err;
       this.logger.error(`Razorpay payment link request failed for order ${order.id}`, err instanceof Error ? err.stack : String(err));
       captureException(err, { orderId: order.id, businessId: business.id });
-      return null;
+      throw new PaymentLinkUnavailableError();
     }
   }
 }

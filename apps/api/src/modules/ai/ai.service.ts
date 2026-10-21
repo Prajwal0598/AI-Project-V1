@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException, ServiceUnavailableException, BadRequestException } from "@nestjs/common";
 import { MessageDirection, OrderStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
-import { OrderService } from "../orders/order.service";
+import { OrderService, PAYMENT_RETRY_BUTTONS, paymentLinkFailedText } from "../orders/order.service";
 import { OrderItemInputDto } from "../orders/dto/create-order.dto";
 import { ConversationService } from "../conversations/conversation.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
@@ -306,6 +306,8 @@ export class AiService {
 
     let orderCreated: { id: string; total: string; currency: string } | null = null;
     let paymentLink: string | null = null;
+    // Razorpay is configured but refused to create this order's payment link — the reply is a plain apology plus a retry button
+    let paymentLinkFailed = false;
     let imagesToSend: string[] = [];
     // true only for the exact turn where the AI is about to ask the customer to pick a payment method (items +
     // address known, nothing chosen yet) — sent as tap-to-choose buttons instead of asking the customer to type
@@ -365,6 +367,11 @@ export class AiService {
             // held for merchant approval — no payment link yet, and don't let the model claim it's placed/confirmed
             return `Thanks! Your order total is ${result.currency} ${result.total}, which needs a quick review from our team before we can proceed — we'll confirm shortly.`;
           }
+          if (result.paymentLinkFailed) {
+            // never the model's "here's your payment link" reply when there is no link — say so plainly and offer a retry
+            paymentLinkFailed = true;
+            return paymentLinkFailedText(result.orderId!);
+          }
           paymentLink = result.paymentLink ?? null;
           return stripHallucinatedLinks(parsed.reply);
         }
@@ -384,7 +391,9 @@ export class AiService {
           { id: "ai_pay_upi", title: "📱 UPI" },
           { id: "ai_pay_cod", title: "💵 COD" },
         ])
-      : this.conversations.sendMessage(conversationId, conversation.businessId, content));
+      : paymentLinkFailed
+        ? this.conversations.sendButtons(conversationId, conversation.businessId, content, PAYMENT_RETRY_BUTTONS)
+        : this.conversations.sendMessage(conversationId, conversation.businessId, content));
 
     // sent as a separate follow-up message after the order summary/confirmation, not bundled into it
     if (paymentLink) {
@@ -497,7 +506,7 @@ export class AiService {
     items: { productName: string; quantity: number }[],
     shippingAddress: string,
     paymentMethod: string
-  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[]; paymentLink?: string; status?: string; isAmendment?: boolean }> {
+  ): Promise<{ success: boolean; error?: string; orderId?: string; total?: string; currency?: string; items?: string[]; unmatched?: string[]; paymentLink?: string; paymentLinkFailed?: boolean; status?: string; isAmendment?: boolean }> {
     if (!items?.length) return { success: false, error: "No items specified." };
 
     const { matched, unmatched } = matchCatalogueItems(conversation.business.products, items);
@@ -552,8 +561,13 @@ export class AiService {
         items: matched.map((i) => `${i.quantity}x ${i.name}`),
         status: order.status,
         isAmendment,
-        // real Razorpay link if this business has it configured, otherwise the simulated dummy checkout page
-        ...((normalizedPayment === "UPI" || normalizedPayment === "CARD") && order.status !== "AWAITING_APPROVAL" ? { paymentLink: order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}` } : {}),
+        // real Razorpay link if this business has it configured, otherwise the simulated dummy checkout page —
+        // but if Razorpay IS configured and refused, report that instead of handing out a placeholder link
+        ...(order.paymentLinkFailed
+          ? { paymentLinkFailed: true }
+          : (normalizedPayment === "UPI" || normalizedPayment === "CARD") && order.status !== "AWAITING_APPROVAL"
+            ? { paymentLink: order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}` }
+            : {}),
         ...(unmatched.length ? { unmatched } : {}),
       };
     } catch (error) {

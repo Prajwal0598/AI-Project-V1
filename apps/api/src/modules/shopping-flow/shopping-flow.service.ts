@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConversationService } from "../conversations/conversation.service";
 import { CartService } from "../cart/cart.service";
-import { OrderService } from "../orders/order.service";
+import { OrderService, PAYMENT_RETRY_BUTTONS, paymentLinkFailedText } from "../orders/order.service";
 import { toPublicImageUrl } from "../products/image-storage";
 import { CustomerSignalService } from "../customer-signals/customer-signal.service";
 import { logAiAction } from "../../common/ai-action-log.helper";
@@ -245,6 +245,7 @@ export class ShoppingFlowService {
     if (actionId === "pay_card") return this.setPaymentMethod(conversationId, businessId, "CARD");
     if (actionId === "order_confirm") return this.confirmOrder(conversationId, businessId, conversation);
     if (actionId === "order_cancel") return this.cancelCheckout(conversationId, businessId);
+    if (actionId === "pay_retry") return this.retryPayment(conversationId, businessId, conversation.activeOrderId);
     // "Maybe Later" on a proactive product suggestion (back-in-stock/cross-sell/upsell) — just a polite acknowledgement, no state change
     if (actionId === "suggestion_dismiss") return this.conversations.sendMessage(conversationId, businessId, "No worries! We'll keep it in mind — let us know whenever you're ready 🙂");
   }
@@ -1426,10 +1427,28 @@ export class ShoppingFlowService {
       return;
     }
     if (conversation.pendingPaymentMethod === "UPI" || conversation.pendingPaymentMethod === "CARD") {
+      // Razorpay is configured but refused to create the link: never send a placeholder link or let the order look paid
+      if ("paymentLinkFailed" in order && order.paymentLinkFailed) {
+        await this.conversations.sendButtons(conversationId, businessId, paymentLinkFailedText(order.id), PAYMENT_RETRY_BUTTONS);
+        return;
+      }
       await this.conversations.sendMessage(conversationId, businessId, "Thanks! 💳 Please complete your payment using the link below — your order will be confirmed once payment is received.");
       await this.conversations.sendMessage(conversationId, businessId, order.razorpayPaymentLinkUrl ?? `https://pay.relay-dummy.app/checkout/${order.id}`);
     } else {
       await this.conversations.sendMessage(conversationId, businessId, `🎉 Your order has been placed and will be delivered soon — payment collected on delivery.\nOrder ref: *#${order.id.slice(-8).toUpperCase()}*`);
+    }
+  }
+
+  /** "Try again" after Razorpay couldn't create a payment link — re-attempts it for the conversation's open order. */
+  private async retryPayment(conversationId: string, businessId: string, activeOrderId: string | null) {
+    const result = activeOrderId ? await this.orders.retryPaymentLink(activeOrderId, businessId) : { status: "not_applicable" as const };
+    if (result.status === "link") {
+      await this.conversations.sendMessage(conversationId, businessId, "Thanks for your patience! 💳 Please complete your payment using the link below — your order will be confirmed once payment is received.");
+      await this.conversations.sendMessage(conversationId, businessId, result.url);
+    } else if (result.status === "failed" && activeOrderId) {
+      await this.conversations.sendButtons(conversationId, businessId, paymentLinkFailedText(activeOrderId), PAYMENT_RETRY_BUTTONS);
+    } else {
+      await this.conversations.sendMessage(conversationId, businessId, "There's no order waiting for a payment link right now. If you've already paid, your order will be confirmed here shortly.");
     }
   }
 

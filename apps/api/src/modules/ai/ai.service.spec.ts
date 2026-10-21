@@ -1,7 +1,7 @@
 import { ServiceUnavailableException } from "@nestjs/common";
 import { AiService, buildOrderKey, stripHallucinatedLinks, filterCatalogueByBudget } from "./ai.service";
 import type { PrismaService } from "../../database/prisma.service";
-import type { OrderService } from "../orders/order.service";
+import { PAYMENT_RETRY_BUTTONS, type OrderService } from "../orders/order.service";
 import type { ConversationService } from "../conversations/conversation.service";
 import type { CartService } from "../cart/cart.service";
 import type { CustomerSignalService } from "../customer-signals/customer-signal.service";
@@ -417,6 +417,67 @@ describe("AiService — grounding: unavailable attributes and unsupported polici
     const { ai, getCapturedInstructions } = setUp("Anything");
     await ai.generateAndSendReply("conv1", "biz1");
     expect(getCapturedInstructions()).toContain("Never invent pricing, stock, discounts, or links — use only the catalogue below.");
+  });
+});
+
+describe("AiService — payment link for a confirmed UPI order", () => {
+  const product = { id: "p1", name: "Blue Shirt", imageUrl: null, variants: [{ id: "v1", price: 799, currency: "INR", inventory: 10 }] };
+  const placedOrder = { id: "order12345678", status: "PENDING_PAYMENT", total: 799, currency: "INR", razorpayPaymentLinkUrl: null as string | null };
+
+  const setUp = (order: Record<string, unknown>) => {
+    const orders = { getRecentForCustomer: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(order) };
+    const prisma: any = {
+      conversation: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: "conv1", businessId: "biz1", customerId: "cust1", channel: "WHATSAPP", escalated: false,
+          activeOrderId: null, lastOrderKey: null, customer: { firstName: "Alex", lastName: null },
+          business: { name: "Test Biz", assistedBuyingEnabled: false, smartRepliesEnabled: false, products: [product] },
+          messages: [{ direction: "INBOUND", content: "Yes, please place it — 1 Blue Shirt to 12 Main St, paying by UPI", sentAt: new Date(), metadata: null }],
+        }),
+        update: jest.fn(),
+      },
+      aiActionLog: { create: jest.fn() },
+    };
+    const conversations = { sendMessage: jest.fn(), sendButtons: jest.fn(), sendImage: jest.fn() };
+    const cart = { findActiveForConversation: jest.fn().mockResolvedValue(null), clear: jest.fn() };
+    const ai = new AiService(
+      prisma as unknown as PrismaService,
+      orders as unknown as OrderService,
+      conversations as unknown as ConversationService,
+      cart as unknown as CartService,
+      {} as unknown as CustomerSignalService,
+      {} as unknown as OpportunityService,
+      { handle: jest.fn() } as unknown as AssistedBuyingService,
+      { generate: jest.fn() } as unknown as AiModelRouterService,
+    );
+    (ai as unknown as { modelRouter: { generate: jest.Mock } }).modelRouter.generate = jest.fn().mockResolvedValue({
+      text: JSON.stringify({
+        reply: "Order confirmed — your payment link is on its way!", items: [{ productName: "Blue Shirt", quantity: 1 }], shippingAddress: "12 Main St",
+        paymentMethod: "UPI", orderConfirmed: true, cancelOrder: false, needsHumanReview: false, needsHumanReviewReason: null, showProductImages: [],
+      }),
+      modelId: "gpt-4o", variant: "control", tier: "control", experimentId: null, fallbackUsed: false,
+    });
+    return { ai, conversations };
+  };
+
+  it("sends the real Razorpay link as a follow-up message when one was created", async () => {
+    const { ai, conversations } = setUp({ ...placedOrder, razorpayPaymentLinkUrl: "https://rzp.io/abc" });
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("https://rzp.io/abc"));
+    expect(conversations.sendButtons).not.toHaveBeenCalled();
+  });
+
+  it("still sends the placeholder link when the business has not configured Razorpay at all", async () => {
+    const { ai, conversations } = setUp(placedOrder);
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendMessage).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("https://pay.relay-dummy.app/checkout/order12345678"));
+  });
+
+  it("never sends a link, or the model's 'link is on its way' reply, when Razorpay refused — it apologises with a retry button", async () => {
+    const { ai, conversations } = setUp({ ...placedOrder, paymentLinkFailed: true });
+    await ai.generateAndSendReply("conv1", "biz1");
+    expect(conversations.sendButtons).toHaveBeenCalledWith("conv1", "biz1", expect.stringContaining("couldn't create your payment link"), PAYMENT_RETRY_BUTTONS);
+    expect(conversations.sendMessage).not.toHaveBeenCalled();
   });
 });
 

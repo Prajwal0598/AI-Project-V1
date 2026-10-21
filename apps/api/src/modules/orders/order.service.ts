@@ -10,7 +10,7 @@ import { InventoryService } from "../inventory/inventory.service";
 import { OpportunityService } from "../opportunities/opportunity.service";
 import { ProductRelationService } from "../product-relations/product-relation.service";
 import { ConversationService } from "../conversations/conversation.service";
-import { RazorpayService, toMinorUnits } from "../payments/razorpay.service";
+import { PaymentLinkUnavailableError, RazorpayService, toMinorUnits } from "../payments/razorpay.service";
 
 // terminal statuses that cannot transition further
 const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStatus.REFUNDED]);
@@ -18,6 +18,18 @@ const TERMINAL_STATUSES = new Set<OrderStatus>([OrderStatus.CANCELLED, OrderStat
 const AMENDABLE_STATUSES = new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.AWAITING_APPROVAL, OrderStatus.PENDING_PAYMENT]);
 // payment methods that go through a real Razorpay Payment Link (as opposed to COD, which has no online payment step)
 const ONLINE_PAYMENT_METHODS = new Set(["UPI", "CARD"]);
+
+type OrderWithItems = Prisma.OrderGetPayload<{ include: { items: true } }>;
+/** `paymentLinkFailed` is set only when Razorpay IS configured but refused to create the payment link — the order is
+ * saved and unpaid, so callers must ask the customer to retry instead of sending a link or treating it as paid. */
+export type OrderWithPaymentOutcome = OrderWithItems & { paymentLinkFailed?: boolean };
+export type PaymentRetryResult = { status: "link"; url: string } | { status: "failed" } | { status: "not_applicable" };
+
+// WhatsApp button the customer taps to re-attempt a payment link that Razorpay refused to create
+export const PAYMENT_RETRY_BUTTONS = [{ id: "pay_retry", title: "🔁 Try again" }];
+export function paymentLinkFailedText(orderId: string): string {
+  return `Sorry, we couldn't create your payment link just now. Your order #${orderId.slice(-8).toUpperCase()} is saved and you haven't been charged — tap Try again in a moment.`;
+}
 
 // customer-facing copy for a merchant manually setting an order to one of these lifecycle statuses —
 // mirrors the wording the simulated/automatic order-progress worker job already sends for consistency
@@ -60,15 +72,57 @@ export class OrderService {
     }
   }
 
+  /** Tells the customer their payment link couldn't be created and offers a one-tap retry — best-effort, like every notification. */
+  private async offerPaymentRetry(conversationId: string | null, businessId: string, orderId: string, intro: string): Promise<void> {
+    if (!conversationId) return;
+    try {
+      await this.conversations.sendButtons(conversationId, businessId, `${intro} ${paymentLinkFailedText(orderId)}`, PAYMENT_RETRY_BUTTONS);
+    } catch (err) {
+      console.error(`[orders] failed to offer a payment retry in conversation ${conversationId}`, err);
+    }
+  }
+
   /** Creates (or refreshes, e.g. after an amendment changes the total) a real Razorpay Payment Link for a UPI
-   * order — returns null (never throws) if the business hasn't configured Razorpay, so callers can fall back
-   * to the existing simulated payment flow. */
-  private async createRazorpayLinkForOrder(businessId: string, customerId: string, order: { id: string; total: Prisma.Decimal; currency: string }): Promise<{ id: string; shortUrl: string } | null> {
+   * order. `link: null, failed: false` means this business hasn't configured Razorpay, so callers may use the
+   * simulated payment flow; `failed: true` means Razorpay is configured but refused, which must never be
+   * papered over with a simulated payment. */
+  private async createRazorpayLinkForOrder(businessId: string, customerId: string, order: { id: string; total: Prisma.Decimal; currency: string }): Promise<{ link: { id: string; shortUrl: string } | null; failed: boolean }> {
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
-    if (!business || !customer) return null;
+    if (!business || !customer) return { link: null, failed: false };
     const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "Customer";
-    return this.razorpay.createPaymentLink(business, order, { name: customerName, phone: customer.phone });
+    try {
+      return { link: await this.razorpay.createPaymentLink(business, order, { name: customerName, phone: customer.phone }), failed: false };
+    } catch (err) {
+      if (err instanceof PaymentLinkUnavailableError) return { link: null, failed: true };
+      throw err;
+    }
+  }
+
+  /** Puts a failed payment link on the merchant's activity feed so the unpaid order isn't mistaken for a normal one. */
+  private async flagPaymentLinkFailure(businessId: string, customerId: string, order: { id: string; total: Prisma.Decimal | number | string; currency: string }): Promise<void> {
+    await this.prisma.activityEvent.create({
+      data: { businessId, customerId, type: ActivityEventType.ORDER_UPDATED, summary: `Razorpay couldn't create a payment link for order #${order.id.slice(-8).toUpperCase()} (${order.currency} ${order.total}) — the order is unpaid and the customer was asked to try again.` },
+    });
+  }
+
+  /** Re-attempts the Razorpay payment link for an unpaid online order that never got one (the customer tapped "Try again"). */
+  async retryPaymentLink(orderId: string, businessId: string): Promise<PaymentRetryResult> {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
+    if (!order || order.status !== OrderStatus.PENDING_PAYMENT || !order.paymentMethod || !ONLINE_PAYMENT_METHODS.has(order.paymentMethod)) return { status: "not_applicable" };
+    if (order.razorpayPaymentLinkUrl) return { status: "link", url: order.razorpayPaymentLinkUrl };
+
+    const { link, failed } = await this.createRazorpayLinkForOrder(businessId, order.customerId, order);
+    if (!link) return failed ? { status: "failed" } : { status: "not_applicable" };
+
+    // of several simultaneous taps only one link may be attached; the others hand out that same link, never a second one
+    const attached = await this.prisma.order.updateMany({
+      where: { id: orderId, businessId, status: OrderStatus.PENDING_PAYMENT, razorpayPaymentLinkId: null },
+      data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl },
+    });
+    if (attached.count === 1) return { status: "link", url: link.shortUrl };
+    const current = await this.prisma.order.findFirst({ where: { id: orderId, businessId } });
+    return current?.status === OrderStatus.PENDING_PAYMENT && current.razorpayPaymentLinkUrl ? { status: "link", url: current.razorpayPaymentLinkUrl } : { status: "not_applicable" };
   }
 
   async findAll(businessId: string) {
@@ -104,7 +158,7 @@ export class OrderService {
     return { items, total, page, pageSize };
   }
 
-  async create(businessId: string, input: CreateOrderDto) {
+  async create(businessId: string, input: CreateOrderDto): Promise<OrderWithPaymentOutcome> {
     const customer = await this.prisma.customer.findFirst({ where: { id: input.customerId, businessId } });
     if (!customer) throw new NotFoundException("Customer not found.");
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
@@ -149,23 +203,28 @@ export class OrderService {
     await this.opportunities.attachOrderOutcome(businessId, input.customerId, order);
     await this.suggestCrossSellUpsell(businessId, input.customerId, order.items, customer, business?.name ?? "our store");
 
-    // for a UPI order, try to back it with a REAL, payable Razorpay Payment Link — falls back to null (and the
-    // existing simulated payment flow below) if this business hasn't configured Razorpay yet
+    // for a UPI order, try to back it with a REAL, payable Razorpay Payment Link — falls back to the existing
+    // simulated payment flow below ONLY if this business hasn't configured Razorpay yet. If Razorpay is configured
+    // but refuses, the order stays an honest unpaid PENDING_PAYMENT order (no fake link, no simulated payment).
     let orderWithLink = order;
+    let paymentLinkFailed = false;
     if (input.paymentMethod && ONLINE_PAYMENT_METHODS.has(input.paymentMethod) && order.status === OrderStatus.PENDING_PAYMENT) {
-      const link = await this.createRazorpayLinkForOrder(businessId, input.customerId, order);
+      const { link, failed } = await this.createRazorpayLinkForOrder(businessId, input.customerId, order);
       if (link) {
         orderWithLink = await this.prisma.order.update({
           where: { id: order.id },
           data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl },
           include: { items: true },
         });
+      } else if (failed) {
+        paymentLinkFailed = true;
+        await this.flagPaymentLinkFailure(businessId, input.customerId, order);
       }
     }
 
     // approval-pending orders don't start the payment/fulfillment simulation until a human approves them.
     // A UPI order backed by a real Razorpay payment link waits for the webhook instead of the fake PAID timer.
-    if (input.paymentMethod && orderWithLink.status === OrderStatus.PENDING_PAYMENT && !orderWithLink.razorpayPaymentLinkId) {
+    if (input.paymentMethod && orderWithLink.status === OrderStatus.PENDING_PAYMENT && !orderWithLink.razorpayPaymentLinkId && !paymentLinkFailed) {
       await this.queues.scheduleOrderProgress(orderWithLink.id, businessId);
     }
     // safety net: auto-cancel and release stock if the order is abandoned in either waiting state — applies even
@@ -174,7 +233,7 @@ export class OrderService {
       await this.queues.scheduleOrderExpiry(orderWithLink.id, businessId, orderWithLink.status);
     }
 
-    return orderWithLink;
+    return paymentLinkFailed ? { ...orderWithLink, paymentLinkFailed } : orderWithLink;
   }
 
   /** Called by the Razorpay webhook once a payment link is genuinely paid — marks the order PAID, records the
@@ -230,20 +289,28 @@ export class OrderService {
     });
 
     let orderWithLink = updated;
+    let paymentLinkFailed = false;
     if (order.paymentMethod && ONLINE_PAYMENT_METHODS.has(order.paymentMethod)) {
-      const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, updated);
+      const { link, failed } = await this.createRazorpayLinkForOrder(businessId, order.customerId, updated);
       if (link) {
         orderWithLink = await this.prisma.order.update({ where: { id: orderId }, data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl } });
+      } else if (failed) {
+        paymentLinkFailed = true;
+        await this.flagPaymentLinkFailure(businessId, order.customerId, updated);
       }
     }
-    if (!orderWithLink.razorpayPaymentLinkId) await this.queues.scheduleOrderProgress(order.id, businessId);
+    if (!orderWithLink.razorpayPaymentLinkId && !paymentLinkFailed) await this.queues.scheduleOrderProgress(order.id, businessId);
     await this.queues.scheduleOrderExpiry(order.id, businessId, OrderStatus.PENDING_PAYMENT);
-    await this.notifyOrderUpdate(
-      order.conversationId, businessId,
-      orderWithLink.razorpayPaymentLinkUrl
-        ? `✅ Good news — your order has been approved! Please complete your UPI payment here: ${orderWithLink.razorpayPaymentLinkUrl}`
-        : "✅ Good news — your order has been approved and is now being processed!",
-    );
+    if (paymentLinkFailed) {
+      await this.offerPaymentRetry(order.conversationId, businessId, order.id, "✅ Good news — your order has been approved!");
+    } else {
+      await this.notifyOrderUpdate(
+        order.conversationId, businessId,
+        orderWithLink.razorpayPaymentLinkUrl
+          ? `✅ Good news — your order has been approved! Please complete your UPI payment here: ${orderWithLink.razorpayPaymentLinkUrl}`
+          : "✅ Good news — your order has been approved and is now being processed!",
+      );
+    }
     return orderWithLink;
   }
 
@@ -270,7 +337,7 @@ export class OrderService {
   }
 
   /** Replaces an amendable order's items entirely (releasing old stock, reserving new stock) and recomputes totals. */
-  async replaceItems(orderId: string, businessId: string, items: OrderItemInputDto[], shippingAddress?: Record<string, unknown>) {
+  async replaceItems(orderId: string, businessId: string, items: OrderItemInputDto[], shippingAddress?: Record<string, unknown>): Promise<OrderWithPaymentOutcome> {
     const order = await this.prisma.order.findFirst({ where: { id: orderId, businessId }, include: { items: true } });
     if (!order) throw new NotFoundException("Order not found.");
     if (!AMENDABLE_STATUSES.has(order.status)) {
@@ -310,18 +377,28 @@ export class OrderService {
 
     // the total just changed — any existing Razorpay payment link was for the OLD amount, so refresh it
     let orderWithLink = updated.order;
+    let paymentLinkFailed = false;
     if (orderWithLink.paymentMethod && ONLINE_PAYMENT_METHODS.has(orderWithLink.paymentMethod) && orderWithLink.status === OrderStatus.PENDING_PAYMENT) {
-      const link = await this.createRazorpayLinkForOrder(businessId, order.customerId, orderWithLink);
+      const { link, failed } = await this.createRazorpayLinkForOrder(businessId, order.customerId, orderWithLink);
       if (link) {
         orderWithLink = await this.prisma.order.update({
           where: { id: orderId },
           data: { razorpayPaymentLinkId: link.id, razorpayPaymentLinkUrl: link.shortUrl },
           include: { items: true },
         });
+      } else if (failed) {
+        paymentLinkFailed = true;
+        // the old link is for the previous total — never keep handing it out, and let a retry create a correct one
+        orderWithLink = await this.prisma.order.update({
+          where: { id: orderId },
+          data: { razorpayPaymentLinkId: null, razorpayPaymentLinkUrl: null },
+          include: { items: true },
+        });
+        await this.flagPaymentLinkFailure(businessId, order.customerId, orderWithLink);
       }
     }
 
-    return orderWithLink;
+    return paymentLinkFailed ? { ...orderWithLink, paymentLinkFailed } : orderWithLink;
   }
 
   async updateStatus(orderId: string, businessId: string, input: UpdateOrderStatusDto) {
