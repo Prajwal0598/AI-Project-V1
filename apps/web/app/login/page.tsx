@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import { api, getToken, setToken, setRefreshToken } from "../../lib/api";
+import { SiteFooter } from "../../components/site-footer";
 
 // shared by the inline showcase panel and the "See how Relay works" modal, so the demo content never drifts between the two
 function DemoChat() {
@@ -145,12 +145,9 @@ export default function LoginPage() {
               {mode === "login" ? "Start selling with RelayShift →" : "Sign in"}
             </button>
           </p>
-          <p style={{ marginTop: 24, fontSize: 11, color: "var(--muted)", display: "flex", gap: 12, justifyContent: "center" }}>
-            <Link href="/privacy" style={{ color: "var(--muted)" }}>Privacy</Link>
-            <Link href="/terms" style={{ color: "var(--muted)" }}>Terms</Link>
-            <Link href="/cookies" style={{ color: "var(--muted)" }}>Cookies</Link>
-            <Link href="/data-deletion" style={{ color: "var(--muted)" }}>Data Deletion</Link>
-          </p>
+          <div style={{ marginTop: 24 }}>
+            <SiteFooter align="center" />
+          </div>
         </div>
       </div>
 
