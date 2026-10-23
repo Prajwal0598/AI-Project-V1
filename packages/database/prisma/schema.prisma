@@ -698,6 +698,28 @@ model AiModelInvocation {
   @@index([experimentId, variant])
 }
 
+// audit trail for production customer-data erasure requests run by a platform admin. Holds identifiers, row counts and
+// the verification method only — never the personal data that was erased. No relations on purpose: the record must
+// outlive the customer/business rows it refers to, and (businessId, customerId, requestReference) makes a retry idempotent.
+model DataErasureRequest {
+  id                 String    @id @default(cuid())
+  businessId         String
+  customerId         String
+  requestReference   String // operator-supplied ticket/reference, validated to a restricted character set so it cannot carry personal data
+  requestedBy        String // "CUSTOMER" | "MERCHANT"
+  verificationMethod String // how the requester's identity/authority was verified off-system
+  status             String // "IN_PROGRESS" | "COMPLETED" | "FAILED"
+  executedByUserId   String
+  counts             Json? // per-table row counts only
+  failureReason      String? // error class only, never row data
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  completedAt        DateTime?
+
+  @@unique([businessId, customerId, requestReference])
+  @@index([businessId, customerId])
+}
+
 // at most one ACTIVE alert per variant at a time (enforced in InventoryService, not the DB) — auto-resolved once restocked above threshold
 model InventoryAlert {
   id                 String               @id @default(cuid())
