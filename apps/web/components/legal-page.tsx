@@ -7,7 +7,7 @@ import { SiteFooter } from "./site-footer";
 export { LEGAL_ENTITY_NAME };
 // single contact address shown on the Privacy, Terms, Cookie and Data Deletion pages
 export const LEGAL_CONTACT_EMAIL = "prajwalms0598@gmail.com";
-export const LEGAL_LAST_UPDATED = "22 October 2026";
+export const LEGAL_LAST_UPDATED = "23 October 2026";
 
 export function LegalPage({ title, children, showLastUpdated = true }: { title: string; children: ReactNode; showLastUpdated?: boolean }) {
   return (

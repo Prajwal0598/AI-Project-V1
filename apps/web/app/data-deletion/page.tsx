@@ -23,6 +23,8 @@ export default function DataDeletionPage() {
       <p>We will verify the request and complete deletion within 30 days, and confirm by email once complete.
       Some records (e.g. completed order/payment records) may be retained for a shorter additional period where
       required for tax, accounting, or fraud-prevention obligations, and deleted thereafter.</p>
+      <p>Requests are currently handled by our team by hand. Deleted data can remain in database backups, which we
+      keep for 14 days before they expire.</p>
 
       <h2>Meta-specific note</h2>
       <p>If you are contacting us as a result of removing RelayShift's access from your Facebook/Instagram/WhatsApp
