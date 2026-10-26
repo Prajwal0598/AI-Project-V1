@@ -1,11 +1,13 @@
 import { WhatsAppEmbeddedSignupService } from "./whatsapp-embedded-signup.service";
 import type { PrismaService } from "../../../database/prisma.service";
 import type { MetaGraphApiService } from "./meta-graph-api.service";
+import type { MetaUserLinkService } from "../meta-callbacks/meta-user-link.service";
 import { decryptSecret } from "../../../common/crypto.helper";
 
 describe("WhatsAppEmbeddedSignupService", () => {
   let prisma: any;
   let meta: Record<string, jest.Mock>;
+  let links: { replaceConnectionLinks: jest.Mock };
   let service: WhatsAppEmbeddedSignupService;
   const ORIGINAL_ENV = { ...process.env };
 
@@ -17,13 +19,14 @@ describe("WhatsAppEmbeddedSignupService", () => {
   };
 
   beforeEach(() => {
-    process.env = { ...ORIGINAL_ENV, CREDENTIALS_ENCRYPTION_KEY: "1".repeat(64) };
+    process.env = { ...ORIGINAL_ENV, CREDENTIALS_ENCRYPTION_KEY: "1".repeat(64), META_APP_ID: "app123", WHATSAPP_APP_SECRET: "secret456" };
     prisma = { business: { findUnique: jest.fn(), update: jest.fn() } };
     meta = {
       exchangeCodeForToken: jest.fn(), registerPhoneNumber: jest.fn(), subscribeAppToWaba: jest.fn(),
-      getPhoneNumberDetails: jest.fn(), deauthorize: jest.fn(),
+      getPhoneNumberDetails: jest.fn(), deauthorize: jest.fn(), getTokenIdentity: jest.fn().mockResolvedValue({ id: "sysuser-1" }),
     };
-    service = new WhatsAppEmbeddedSignupService(prisma as unknown as PrismaService, meta as unknown as MetaGraphApiService);
+    links = { replaceConnectionLinks: jest.fn().mockResolvedValue(undefined) };
+    service = new WhatsAppEmbeddedSignupService(prisma as unknown as PrismaService, meta as unknown as MetaGraphApiService, links as unknown as MetaUserLinkService);
   });
 
   afterAll(() => {
@@ -129,6 +132,86 @@ describe("WhatsAppEmbeddedSignupService", () => {
       for (const call of prisma.business.update.mock.calls) {
         expect(call[0].where).toEqual({ id: "biz1" });
       }
+    });
+
+    it("records the server-verified token identity (never a browser-supplied id), scoped to this business, only after CONNECTED", async () => {
+      prisma.business.findUnique.mockResolvedValueOnce(disconnectedBusiness).mockResolvedValueOnce(null);
+      meta.exchangeCodeForToken.mockResolvedValue("token");
+      meta.registerPhoneNumber.mockResolvedValue(undefined);
+      meta.subscribeAppToWaba.mockResolvedValue(undefined);
+      meta.getPhoneNumberDetails.mockResolvedValue({ displayPhoneNumber: "+91 98765 43210", verifiedName: null });
+      prisma.business.update.mockImplementation(({ data }: any) => Promise.resolve({ ...disconnectedBusiness, ...data }));
+
+      await service.completeOnboarding("biz1", input);
+
+      expect(meta.getTokenIdentity).toHaveBeenCalledWith("token");
+      expect(links.replaceConnectionLinks).toHaveBeenCalledTimes(1);
+      expect(links.replaceConnectionLinks).toHaveBeenCalledWith("biz1", "sysuser-1");
+    });
+
+    it("does not touch links when the connection setup fails", async () => {
+      prisma.business.findUnique.mockResolvedValueOnce(disconnectedBusiness);
+      meta.exchangeCodeForToken.mockRejectedValue(new Error("expired"));
+      prisma.business.update.mockResolvedValue(disconnectedBusiness);
+
+      await expect(service.completeOnboarding("biz1", input)).rejects.toThrow();
+      expect(links.replaceConnectionLinks).not.toHaveBeenCalled();
+    });
+
+    it("still connects when the identity lookup fails (stale links are retired, none created)", async () => {
+      prisma.business.findUnique.mockResolvedValueOnce(disconnectedBusiness).mockResolvedValueOnce(null);
+      meta.exchangeCodeForToken.mockResolvedValue("token");
+      meta.registerPhoneNumber.mockResolvedValue(undefined);
+      meta.subscribeAppToWaba.mockResolvedValue(undefined);
+      meta.getPhoneNumberDetails.mockResolvedValue({ displayPhoneNumber: "+91 98765 43210", verifiedName: null });
+      prisma.business.update.mockImplementation(({ data }: any) => Promise.resolve({ ...disconnectedBusiness, ...data }));
+      meta.getTokenIdentity.mockRejectedValue(new Error("graph down"));
+
+      const result = await service.completeOnboarding("biz1", input);
+      expect(result.status).toBe("CONNECTED");
+      expect(links.replaceConnectionLinks).toHaveBeenCalledWith("biz1", null);
+    });
+
+    it.each([
+      ["META_APP_ID", ["META_APP_ID"]],
+      ["WHATSAPP_APP_SECRET", ["WHATSAPP_APP_SECRET"]],
+      ["CREDENTIALS_ENCRYPTION_KEY", ["CREDENTIALS_ENCRYPTION_KEY"]],
+    ])("names the missing server variable (%s) and changes nothing instead of failing ambiguously", async (variable, expected) => {
+      delete process.env[variable];
+
+      const error = await service.completeOnboarding("biz1", input).catch((e) => e);
+
+      expect(error.message).toContain(expected[0]);
+      expect(error.message).not.toContain("secret456");
+      expect(prisma.business.findUnique).not.toHaveBeenCalled();
+      expect(prisma.business.update).not.toHaveBeenCalled();
+      expect(meta.exchangeCodeForToken).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getStatus configuration report", () => {
+    beforeEach(() => {
+      prisma.business.findUnique.mockResolvedValue({ ...disconnectedBusiness, name: "ABC Fashion" });
+    });
+
+    it("reports ready with the public app id when every server variable is set", async () => {
+      const view = await service.getStatus("biz1");
+      expect(view.config).toEqual({ ready: true, missing: [], appId: "app123" });
+    });
+
+    it("lists exactly the missing variable names, never any value", async () => {
+      delete process.env.META_APP_ID;
+      delete process.env.WHATSAPP_APP_SECRET;
+
+      const view = await service.getStatus("biz1");
+
+      expect(view.config).toEqual({ ready: false, missing: ["META_APP_ID", "WHATSAPP_APP_SECRET"], appId: null });
+    });
+
+    it("never exposes the app secret or the encryption key", async () => {
+      const serialised = JSON.stringify(await service.getStatus("biz1"));
+      expect(serialised).not.toContain("secret456");
+      expect(serialised).not.toContain("1".repeat(64));
     });
   });
 

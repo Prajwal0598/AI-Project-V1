@@ -1,8 +1,8 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { randomInt } from "node:crypto";
+import { META_GRAPH_BASE_URL } from "../../../common/meta-graph";
 
-const GRAPH_API_VERSION = "v21.0";
-const GRAPH_API_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
+const GRAPH_API_BASE = META_GRAPH_BASE_URL;
 
 export interface PhoneNumberDetails {
   displayPhoneNumber: string;
@@ -112,13 +112,57 @@ export class MetaGraphApiService {
     return { displayPhoneNumber: body.display_phone_number, verifiedName: body.verified_name ?? null };
   }
 
+  /** Asks Meta who a token belongs to: GET /me?fields=id,client_business_id. For the business token Embedded Signup returns, `id`
+   * is the app-scoped id of the business's system user — documented in "Facebook Login for Business > Get a client business ID".
+   * Meta answers this itself, so unlike anything the browser sends it can be trusted. */
+  async getTokenIdentity(accessToken: string): Promise<{ id: string; clientBusinessId: string | null }> {
+    let res: Response;
+    try {
+      res = await fetch(`${GRAPH_API_BASE}/me?fields=id,client_business_id`, { headers: { Authorization: `Bearer ${accessToken}` } });
+    } catch (err) {
+      this.logger.error("Token identity lookup failed", err instanceof Error ? err.stack : String(err));
+      throw new ServiceUnavailableException("Could not reach Meta to identify the connection.");
+    }
+    if (!res.ok) {
+      this.logger.error(`Token identity lookup rejected (HTTP ${res.status})`);
+      throw new ServiceUnavailableException("Meta could not identify this connection.");
+    }
+    const body = (await res.json()) as { id?: string; client_business_id?: string };
+    if (!body.id) throw new ServiceUnavailableException("Meta did not return an identity for this connection.");
+    return { id: body.id, clientBusinessId: body.client_business_id ?? null };
+  }
+
+  /** GET /debug_token, signed with the app's own access token (app id|app secret). Never trust an access token just because the
+   * browser sent it — Meta's guidance is to check which app issued it and whose it is. Never logs the token or the secret. */
+  async debugToken(inputToken: string): Promise<{ appId: string | null; type: string | null; userId: string | null; isValid: boolean }> {
+    const { appId, appSecret } = this.appCredentials();
+    const params = new URLSearchParams({ input_token: inputToken, access_token: `${appId}|${appSecret}` });
+    let res: Response;
+    try {
+      res = await fetch(`${GRAPH_API_BASE}/debug_token?${params.toString()}`);
+    } catch (err) {
+      // the request URL carries the app secret, so log the error class only — never the stack or message
+      this.logger.error(`Token inspection request failed (${err instanceof Error ? err.name : "UnknownError"})`);
+      throw new ServiceUnavailableException("Could not reach Meta to verify the Facebook login.");
+    }
+    if (!res.ok) {
+      this.logger.error(`Token inspection rejected (HTTP ${res.status})`);
+      throw new ServiceUnavailableException("Meta could not verify the Facebook login.");
+    }
+    const body = (await res.json()) as { data?: { app_id?: string; type?: string; user_id?: string; is_valid?: boolean } };
+    const data = body.data ?? {};
+    return { appId: data.app_id ?? null, type: data.type ?? null, userId: data.user_id ?? null, isValid: data.is_valid === true };
+  }
+
   /** Best-effort revocation on disconnect — never blocks the local disconnect if Meta's side fails, since the
-   * merchant's intent (stop using this connection) must always succeed locally regardless. */
+   * merchant's intent (stop using this connection) must always succeed locally regardless. The timeout keeps a slow
+   * Meta from stalling callers (the deauthorization callback answers Meta while this runs). */
   async deauthorize(wabaId: string, accessToken: string): Promise<void> {
     try {
       await fetch(`${GRAPH_API_BASE}/${wabaId}/subscribed_apps`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(4000),
       });
     } catch (err) {
       this.logger.warn(`Meta deauthorization call failed during disconnect (non-fatal): ${err instanceof Error ? err.message : String(err)}`);

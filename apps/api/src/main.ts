@@ -10,6 +10,7 @@ import { assertRequiredEnv } from "./common/env";
 import { resolveCors } from "./common/cors.helper";
 import { initErrorReporting } from "./common/error-reporting.helper";
 import { SentryExceptionFilter } from "./common/sentry-exception.filter";
+import { isCallbackIdentityMatchVerified, readMetaAppConfig } from "./modules/integrations/meta-callbacks/meta-app-config";
 
 async function bootstrap() {
   for (const path of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
@@ -27,6 +28,9 @@ async function bootstrap() {
   if (!cors.origins.length) console.error("[bootstrap] WEB_ORIGIN has no valid origin — browsers will be blocked by CORS until it is fixed");
   else console.log(`[bootstrap] CORS allows: ${cors.origins.join(", ")}`);
   app.enableCors(cors.options);
+  const metaConfig = readMetaAppConfig();
+  if (metaConfig.missing.length) console.warn(`[bootstrap] WhatsApp Embedded Signup and the Meta deauthorization/data-deletion callbacks are not fully configured — missing: ${metaConfig.missing.join(", ")}`);
+  if (!isCallbackIdentityMatchVerified()) console.warn("[bootstrap] Meta callback identity matching is unverified: a callback that matches a stored link is parked for platform-admin review and changes nothing (set META_CALLBACK_IDENTITY_MATCH_VERIFIED=true only after a real Meta callback has been seen to match)");
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   app.useGlobalFilters(new SentryExceptionFilter(app.get(HttpAdapterHost).httpAdapter));
   app.enableShutdownHooks();

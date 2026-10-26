@@ -4,6 +4,16 @@ import { PrismaService } from "../../../database/prisma.service";
 import { encryptSecret, decryptSecret } from "../../../common/crypto.helper";
 import { MetaGraphApiService } from "./meta-graph-api.service";
 import { CompleteEmbeddedSignupDto } from "./dto/complete-embedded-signup.dto";
+import { MetaUserLinkService } from "../meta-callbacks/meta-user-link.service";
+import { readMetaAppConfig } from "../meta-callbacks/meta-app-config";
+
+export interface EmbeddedSignupServerConfig {
+  /** False while any server variable Embedded Signup needs is missing; `missing` lists their names (never values). */
+  ready: boolean;
+  missing: string[];
+  /** Public Meta App ID the server uses — the browser compares it with NEXT_PUBLIC_META_APP_ID to catch two different apps. */
+  appId: string | null;
+}
 
 export interface WhatsAppConnectionStatusView {
   status: WhatsAppConnectionStatus;
@@ -13,6 +23,7 @@ export interface WhatsAppConnectionStatusView {
   connectedAt: Date | null;
   lastValidatedAt: Date | null;
   lastErrorMessage: string | null;
+  config: EmbeddedSignupServerConfig;
 }
 
 const SETUP_FIELDS_SELECT = {
@@ -37,6 +48,7 @@ export class WhatsAppEmbeddedSignupService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly meta: MetaGraphApiService,
+    private readonly links: MetaUserLinkService,
   ) {}
 
   private toView(business: {
@@ -44,6 +56,7 @@ export class WhatsAppEmbeddedSignupService {
     metaBusinessId: string | null; whatsappBusinessAccountId: string | null; whatsappConnectedAt: Date | null;
     whatsappLastValidatedAt: Date | null; whatsappLastErrorMessage: string | null;
   }, businessName?: string): WhatsAppConnectionStatusView {
+    const { appId, missing } = readMetaAppConfig();
     return {
       status: business.whatsappConnectionStatus,
       phoneNumberId: business.whatsappPhoneNumberId,
@@ -52,6 +65,7 @@ export class WhatsAppEmbeddedSignupService {
       connectedAt: business.whatsappConnectedAt,
       lastValidatedAt: business.whatsappLastValidatedAt,
       lastErrorMessage: business.whatsappLastErrorMessage,
+      config: { ready: missing.length === 0, missing, appId },
     };
   }
 
@@ -74,6 +88,12 @@ export class WhatsAppEmbeddedSignupService {
   }
 
   async completeOnboarding(businessId: string, input: CompleteEmbeddedSignupDto): Promise<WhatsAppConnectionStatusView> {
+    // a configuration problem is not the merchant's failed attempt, so name it up front instead of recording RETRY_REQUIRED
+    const { missing } = readMetaAppConfig();
+    if (missing.length) {
+      throw new ServiceUnavailableException(`WhatsApp Embedded Signup is not configured on the server. Missing: ${missing.join(", ")}.`);
+    }
+
     const business = await this.prisma.business.findUnique({ where: { id: businessId } });
     if (!business) throw new NotFoundException("Business not found.");
 
@@ -138,8 +158,24 @@ export class WhatsAppEmbeddedSignupService {
         whatsappLastErrorMessage: null,
       },
     });
+    await this.recordConnectionIdentity(businessId, accessToken);
     this.logger.log(`WhatsApp Embedded Signup completed for business ${businessId}`);
     return this.toView(updated, updated.name);
+  }
+
+  /**
+   * Retires the links that described the previous connection and records who Meta says the new token belongs to. Meta's
+   * deauthorization/data-deletion callbacks can only find this business through that id. Failure here never fails the
+   * onboarding: the connection simply stays unassociated and such callbacks fall back to platform-admin review.
+   */
+  private async recordConnectionIdentity(businessId: string, accessToken: string): Promise<void> {
+    let identityId: string | null = null;
+    try {
+      identityId = (await this.meta.getTokenIdentity(accessToken)).id;
+    } catch (err) {
+      this.logger.warn(`Could not read the Meta identity of the new connection for business ${businessId} (${err instanceof Error ? err.name : "UnknownError"})`);
+    }
+    await this.links.replaceConnectionLinks(businessId, identityId);
   }
 
   async disconnect(businessId: string): Promise<WhatsAppConnectionStatusView> {

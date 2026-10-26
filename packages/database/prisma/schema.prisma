@@ -204,7 +204,8 @@ enum ActivityEventType {
 }
 
 // connection lifecycle for Meta WhatsApp Embedded Signup — CONNECTED is only ever set once BOTH server-side
-// phone registration AND webhook subscription have succeeded, never just after the OAuth redirect completes
+// phone registration AND webhook subscription have succeeded, never just after the OAuth redirect completes.
+// DEAUTHORIZED means Meta told us the Facebook user who connected it removed the app; it is not the merchant's own Disconnect.
 enum WhatsAppConnectionStatus {
   DISCONNECTED
   ONBOARDING
@@ -214,6 +215,7 @@ enum WhatsAppConnectionStatus {
   CONNECTED
   RETRY_REQUIRED
   SETUP_REQUIRED
+  DEAUTHORIZED
 }
 
 // connection lifecycle for Razorpay OAuth (Technology Partner) — mirrors WhatsAppConnectionStatus's shape.
@@ -303,6 +305,7 @@ model Business {
   productRelations                  ProductRelation[]
   promotions                        Promotion[]
   subscription                      Subscription?
+  metaUserLinks                     MetaUserLink[]
 }
 
 model User {
@@ -718,6 +721,70 @@ model DataErasureRequest {
 
   @@unique([businessId, customerId, requestReference])
   @@index([businessId, customerId])
+}
+
+// Ties a business's WhatsApp Embedded Signup connection to a Meta app-scoped user id, so Meta's deauthorization and data-deletion
+// callbacks, which name a person by that id alone, can find the business. An id is only ever stored when this server obtained it
+// from Meta itself (never from a client-supplied id or signed_request); the two sources are named in `source`. Links describe the
+// CURRENT connection: a new Embedded Signup retires every earlier link, and credentials typed in by hand supersede them. Whether
+// Meta's callback user_id equals these ids is unverified, so a match only acts on its own when META_CALLBACK_IDENTITY_MATCH_VERIFIED=true.
+model MetaUserLink {
+  id            String    @id @default(cuid())
+  businessId    String
+  metaUserId    String
+  source        String // "ES_SYSTEM_USER" (the business integration's system user, read with GET /me using the business token) | "FACEBOOK_LOGIN_USER_TOKEN" (a person, read with debug_token from a user token the server exchanged itself)
+  revokedAt     DateTime?
+  revokedReason String? // "DEAUTHORIZED" | "SUPERSEDED"
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, metaUserId])
+  @@index([metaUserId])
+}
+
+// Audit trail for the two callbacks Meta sends: a Facebook user removing the app (DEAUTHORIZATION) and a user asking for
+// their data to be deleted (DATA_DELETION). They are different events and are never merged. No relation to Business on
+// purpose, so the record outlives any business it refers to. Holds ids and counts only; metaUserId is cleared once a
+// deletion request is completed, and the public status lookup never returns it. A DATA_DELETION request that could not be
+// matched to a verified connection waits in PENDING_REVIEW until a platform admin resolves it (resolvedByUserId,
+// resolutionReference, verificationMethod); every state change is also appended to MetaCallbackEvent.
+model MetaCallbackRequest {
+  id                    String               @id @default(cuid())
+  kind                  String // "DEAUTHORIZATION" | "DATA_DELETION"
+  dedupeKey             String               @unique // sha256(kind:userId:issued_at) — a retry of the same signed request resolves to the same row
+  confirmationCode      String?              @unique // DATA_DELETION only: the unguessable code behind the public status page
+  metaUserId            String?
+  status                String // "COMPLETED" | "NO_MATCH" (deauth, nothing linked) | "NO_ACTION_UNVERIFIED" (deauth matched a link while identity matching is unverified) | "NO_CHANGE_RECORDED" (deauth reviewed, nothing changed) | "PENDING_REVIEW" | "NO_DATA_HELD" (deletion)
+  matchedBusinessIds    String[]             @default([])
+  connectionsRevoked    Int                  @default(0)
+  signedRequestIssuedAt DateTime?
+  resolvedByUserId      String? // platform admin who resolved a PENDING_REVIEW request
+  resolutionReference   String? // admin-supplied ticket id; makes a retried resolution idempotent
+  verificationMethod    String? // how the resolution was verified off-system
+  resolutionReason      String? // fixed reason code when a reviewed deauthorization left every connection unchanged
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  completedAt           DateTime?
+  events                MetaCallbackEvent[]
+
+  @@index([kind, status])
+  @@index([metaUserId])
+}
+
+// Append-only history of a MetaCallbackRequest. Never holds a Facebook user id, a token or free text.
+model MetaCallbackEvent {
+  id          String              @id @default(cuid())
+  requestId   String
+  action      String // "RECEIVED" | "PROCESSED" | "RESOLVED"
+  fromStatus  String?
+  toStatus    String?
+  actorUserId String? // the platform admin for RESOLVED; null for what the callback did by itself
+  detail      Json? // counts and business ids only
+  createdAt   DateTime            @default(now())
+  request     MetaCallbackRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
 }
 
 // at most one ACTIVE alert per variant at a time (enforced in InventoryService, not the DB) — auto-resolved once restocked above threshold

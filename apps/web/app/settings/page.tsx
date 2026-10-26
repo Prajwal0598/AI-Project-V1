@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Script from "next/script";
 import { AppShell } from "../../components/app-shell";
 import { api, getBusinessId, whatsappEmbeddedSignup, razorpayOAuth } from "../../lib/api";
+import { META_GRAPH_API_VERSION } from "../../lib/meta-graph";
 import type { AutomationRule, Business, Category, Me, OpportunityType, TeamUser, WhatsAppConnectionStatusView, RazorpayConnectionStatusView, Subscription, BillingHistoryItem } from "../../lib/api";
 
 declare global {
@@ -22,6 +23,18 @@ function fmtBillingDate(d: string | null) {
 
 const META_APP_ID = process.env.NEXT_PUBLIC_META_APP_ID;
 const META_WHATSAPP_CONFIG_ID = process.env.NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID;
+
+// the exact variables (and which Railway service owns each) that keep "Connect WhatsApp" from working — names only, never values
+function embeddedSignupIssues(status: WhatsAppConnectionStatusView | null): string[] {
+  const issues: string[] = [];
+  if (!META_APP_ID) issues.push("NEXT_PUBLIC_META_APP_ID (web service, must be set before the build)");
+  if (!META_WHATSAPP_CONFIG_ID) issues.push("NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID (web service, must be set before the build)");
+  if (status) {
+    for (const name of status.config.missing) issues.push(`${name} (API service)`);
+    if (META_APP_ID && status.config.appId && META_APP_ID !== status.config.appId) issues.push("META_APP_ID (API service) is a different Meta app from NEXT_PUBLIC_META_APP_ID (web service)");
+  }
+  return issues;
+}
 
 export default function SettingsPage() {
   const [biz, setBiz] = useState<Business | null>(null);
@@ -119,10 +132,12 @@ export default function SettingsPage() {
     return () => window.removeEventListener("message", handleSignupMessage);
   }, []);
 
+  const waIssues = embeddedSignupIssues(waStatus);
+
   function connectWhatsApp() {
     setWaConnectError("");
-    if (!META_APP_ID || !META_WHATSAPP_CONFIG_ID) {
-      setWaConnectError("WhatsApp Embedded Signup isn't configured yet — set NEXT_PUBLIC_META_APP_ID / NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID, or use the manual connection below.");
+    if (waIssues.length) {
+      setWaConnectError(`WhatsApp Embedded Signup isn't configured yet. Missing: ${waIssues.join("; ")}. You can use the manual connection below instead.`);
       return;
     }
     if (!window.FB) {
@@ -142,17 +157,19 @@ export default function SettingsPage() {
         return;
       }
       setWaConnecting(true);
+      // the server identifies the connecting account itself from Meta; nothing identity-related is taken from the browser
       whatsappEmbeddedSignup.complete({ code, wabaId: pending.wabaId, phoneNumberId: pending.phoneNumberId })
-        .then(setWaStatus)
+        .then(status => { setWaStatus(status); setWaPhoneId(status.phoneNumberId ?? ""); }) // keep the manual-field state in step, or the next Save would blank the number
         .catch(err => setWaConnectError(err instanceof Error ? err.message : "Could not complete the WhatsApp connection."))
         .finally(() => setWaConnecting(false));
-    }, { config_id: META_WHATSAPP_CONFIG_ID, response_type: "code", override_default_response_type: true });
+    }, { config_id: META_WHATSAPP_CONFIG_ID, response_type: "code", override_default_response_type: true, extras: { setup: {} } });
   }
 
   async function disconnectWhatsApp() {
     setWaConnectError("");
     try {
       setWaStatus(await whatsappEmbeddedSignup.disconnect());
+      setWaPhoneId("");
     } catch (err) { setWaConnectError(err instanceof Error ? err.message : "Could not disconnect WhatsApp."); }
   }
 
@@ -315,7 +332,7 @@ export default function SettingsPage() {
         src="https://connect.facebook.net/en_US/sdk.js"
         strategy="afterInteractive"
         onLoad={() => {
-          window.fbAsyncInit = () => window.FB?.init({ appId: META_APP_ID, autoLogAppEvents: true, xfbml: false, version: "v21.0" });
+          window.fbAsyncInit = () => window.FB?.init({ appId: META_APP_ID, autoLogAppEvents: true, xfbml: false, version: META_GRAPH_API_VERSION });
           window.fbAsyncInit();
         }}
       />
@@ -387,13 +404,19 @@ export default function SettingsPage() {
     <section className="settings-section">
       <h2>WhatsApp Business</h2>
       {waConnectError && <p style={{ color: "#b94940", fontSize: 12, marginBottom: 8 }}>{waConnectError}</p>}
+      {waIssues.length > 0 && (
+        <div style={{ background: "#fff8e6", border: "1px solid #f1dca3", color: "#7a5a00", fontSize: 12, padding: "8px 14px", marginBottom: 12, maxWidth: 520 }}>
+          <strong>WhatsApp Embedded Signup isn't set up on this deployment yet.</strong> Missing:
+          <ul style={{ margin: "4px 0 0 16px" }}>{waIssues.map(issue => <li key={issue}><code>{issue}</code></li>)}</ul>
+        </div>
+      )}
       {waStatus?.status === "CONNECTED" ? (
         <div style={{ maxWidth: 420, marginTop: 8 }}>
           <p style={{ color: "var(--green)", fontWeight: 600 }}>✓ Connected</p>
           <p>Business: {waStatus.businessName}</p>
           <p>Number: {waStatus.displayPhoneNumber}</p>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting}>Manage Connection</button>
+            <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting || waIssues.length > 0}>Manage Connection</button>
             <button onClick={disconnectWhatsApp} disabled={waConnecting}>Disconnect</button>
           </div>
         </div>
@@ -403,7 +426,7 @@ export default function SettingsPage() {
           {waStatus && !["DISCONNECTED", "CONNECTED"].includes(waStatus.status) && (
             <p style={{ fontSize: 12, color: "var(--muted)" }}>Current status: {waStatus.status.replace(/_/g, " ").toLowerCase()}{waStatus.lastErrorMessage ? ` — ${waStatus.lastErrorMessage}` : ""}</p>
           )}
-          <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting}>{waConnecting ? "Connecting…" : "Connect WhatsApp"}</button>
+          <button className="primary-button" onClick={connectWhatsApp} disabled={waConnecting || waIssues.length > 0}>{waConnecting ? "Connecting…" : "Connect WhatsApp"}</button>
         </div>
       )}
       <button onClick={() => setShowManualWhatsApp(v => !v)} style={{ marginTop: 16, fontSize: 12, textDecoration: "underline" }}>

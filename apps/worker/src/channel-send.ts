@@ -1,11 +1,12 @@
 // mirrors the send logic in apps/api's ConversationService — duplicated here because the worker is a
 // separate process with its own Prisma client and no access to the API's NestJS DI container.
 import { resolveToken } from "./crypto.helper";
+import { META_GRAPH_BASE_URL } from "./meta-graph";
 
 type Channel = "WHATSAPP" | "INSTAGRAM" | "EMAIL" | "FACEBOOK" | "WEB" | "MANUAL";
 
 async function sendWhatsApp(phoneNumberId: string, accessToken: string, to: string, content: string): Promise<string | null> {
-  const res = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+  const res = await fetch(`${META_GRAPH_BASE_URL}/${phoneNumberId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to, type: "text", text: { body: content.trim() } }),
@@ -16,7 +17,7 @@ async function sendWhatsApp(phoneNumberId: string, accessToken: string, to: stri
 }
 
 async function sendInstagram(pageId: string, accessToken: string, to: string, content: string): Promise<string | null> {
-  const res = await fetch(`https://graph.facebook.com/v19.0/${pageId}/messages?access_token=${accessToken}`, {
+  const res = await fetch(`${META_GRAPH_BASE_URL}/${pageId}/messages?access_token=${accessToken}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ recipient: { id: to }, message: { text: content.trim() } }),
