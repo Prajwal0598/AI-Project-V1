@@ -141,7 +141,7 @@ export interface Business {
   updatedAt: string;
 }
 
-export type WhatsAppConnectionStatus = "DISCONNECTED" | "ONBOARDING" | "AUTHORIZED" | "CONFIGURING" | "WEBHOOK_CONNECTED" | "CONNECTED" | "RETRY_REQUIRED" | "SETUP_REQUIRED";
+export type WhatsAppConnectionStatus = "DISCONNECTED" | "ONBOARDING" | "AUTHORIZED" | "CONFIGURING" | "WEBHOOK_CONNECTED" | "CONNECTED" | "RETRY_REQUIRED" | "SETUP_REQUIRED" | "DEAUTHORIZED";
 
 export interface WhatsAppConnectionStatusView {
   status: WhatsAppConnectionStatus;
@@ -151,6 +151,16 @@ export interface WhatsAppConnectionStatusView {
   connectedAt: string | null;
   lastValidatedAt: string | null;
   lastErrorMessage: string | null;
+  // what the API itself is missing for Embedded Signup — names only, never values
+  config: { ready: boolean; missing: string[]; appId: string | null };
+}
+
+export interface MetaDeletionStatusView {
+  confirmationCode: string;
+  status: string;
+  message: string;
+  receivedAt: string;
+  completedAt: string | null;
 }
 
 export type RazorpayConnectionStatus = "DISCONNECTED" | "CONNECTED" | "RETRY_REQUIRED";
@@ -772,6 +782,14 @@ export const whatsappEmbeddedSignup = {
     request<WhatsAppConnectionStatusView>("/integrations/whatsapp/embedded-signup/complete", { method: "POST", body: JSON.stringify(data) }),
   disconnect: () => request<WhatsAppConnectionStatusView>("/integrations/whatsapp/disconnect", { method: "POST" }),
 };
+
+// public (no login): the page Meta's Data Deletion callback points people to. null = unknown confirmation code.
+export async function getMetaDeletionStatus(confirmationCode: string): Promise<MetaDeletionStatusView | null> {
+  const res = await fetch(`${API_URL}/integrations/meta/data-deletion/status/${encodeURIComponent(confirmationCode)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Could not load the request status (${res.status}).`);
+  return res.json() as Promise<MetaDeletionStatusView>;
+}
 
 export const razorpayOAuth = {
   getStatus: () => request<RazorpayConnectionStatusView>("/integrations/razorpay"),

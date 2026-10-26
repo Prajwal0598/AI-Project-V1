@@ -139,6 +139,13 @@ export class BusinessService {
         ...(input.razorpayWebhookSecret !== undefined && { razorpayWebhookSecretEncrypted: input.razorpayWebhookSecret.trim() ? encryptSecret(input.razorpayWebhookSecret.trim()) : null }),
       },
     });
+    // credentials typed in by hand replace what Embedded Signup stored, so the Facebook user who authorised that
+    // connection no longer controls it; an unchanged phone number id (every Settings save resends it) does not count
+    const replacesConnection = input.whatsappAccessToken !== undefined
+      || (input.whatsappPhoneNumberId !== undefined && (input.whatsappPhoneNumberId?.trim() || null) !== business.whatsappPhoneNumberId);
+    if (replacesConnection) {
+      await this.prisma.metaUserLink.updateMany({ where: { businessId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: "SUPERSEDED" } });
+    }
     return this.sanitize(updated);
   }
 

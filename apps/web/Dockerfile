@@ -16,7 +16,14 @@ RUN pnpm install --frozen-lockfile
 # --- build: NEXT_PUBLIC_* vars are inlined into the client bundle at build time, not read at runtime ---
 FROM deps AS build
 ARG NEXT_PUBLIC_API_URL=http://localhost:4000/api
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Meta WhatsApp Embedded Signup: the Meta App ID and the Facebook Login for Business configuration ID. Both are public identifiers
+# that ship in the browser bundle. Railway hands a service variable to a Dockerfile build ONLY when it is declared with ARG, so
+# without these two lines the variables exist but never reach the bundle. The Meta App SECRET must never be declared here.
+ARG NEXT_PUBLIC_META_APP_ID=
+ARG NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID=
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_META_APP_ID=$NEXT_PUBLIC_META_APP_ID \
+    NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID=$NEXT_PUBLIC_META_WHATSAPP_CONFIG_ID
 COPY apps/web apps/web
 RUN pnpm --filter @ai-customer-agent/web build
 

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnav
 import { Channel, ConversationOutcome, ConversationStatus, MessageDirection } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { decryptSecret } from "../../common/crypto.helper";
+import { META_GRAPH_BASE_URL } from "../../common/meta-graph";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateMessageDto } from "./dto/create-message.dto";
 
@@ -134,7 +135,7 @@ export class ConversationService {
     if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
+      `${META_GRAPH_BASE_URL}/${business.whatsappPhoneNumberId}/messages`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -164,7 +165,7 @@ export class ConversationService {
     if (!accessToken) throw new ServiceUnavailableException("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${business.instagramPageId}/messages?access_token=${accessToken}`,
+      `${META_GRAPH_BASE_URL}/${business.instagramPageId}/messages?access_token=${accessToken}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -246,7 +247,7 @@ export class ConversationService {
     if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
+      `${META_GRAPH_BASE_URL}/${business.whatsappPhoneNumberId}/messages`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -276,7 +277,7 @@ export class ConversationService {
     if (!accessToken) throw new ServiceUnavailableException("INSTAGRAM_PAGE_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${business.instagramPageId}/messages?access_token=${accessToken}`,
+      `${META_GRAPH_BASE_URL}/${business.instagramPageId}/messages?access_token=${accessToken}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -350,7 +351,7 @@ export class ConversationService {
     if (!accessToken) throw new ServiceUnavailableException("WHATSAPP_ACCESS_TOKEN is not configured.");
 
     const res = await fetch(
-      `https://graph.facebook.com/v19.0/${business.whatsappPhoneNumberId}/messages`,
+      `${META_GRAPH_BASE_URL}/${business.whatsappPhoneNumberId}/messages`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
